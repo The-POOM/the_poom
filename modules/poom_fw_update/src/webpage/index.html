@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <script src="jquery-3.3.1.min.js"></script>
+  <link rel="stylesheet" href="app.css">
+  <script async src="app.js"></script>
+  <title>POOM — Firmware Update</title>
+
+  <!-- Estilo mínimo para un fondo agradable y un contenedor limpio -->
+  <style>
+    :root { --bg1:#0f1226; --bg2:#1a1d3a; --card:#121427; --text:#e7e7f0; --muted:#a7abbe; --accent:#7c9cff; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      color: var(--text);
+      background: radial-gradient(1200px 600px at 80% -10%, #243158 0%, transparent 60%),
+                  radial-gradient(1000px 500px at -10% 100%, #1f2b52 0%, transparent 60%),
+                  linear-gradient(160deg, var(--bg1), var(--bg2));
+      min-height: 100vh;
+      display: grid;
+      place-items: start center;
+      padding: 24px;
+    }
+    header { text-align: center; margin: 8px 0 16px; }
+    header h1 { margin: 0 0 6px; font-size: 1.6rem; letter-spacing: .3px; }
+    header p { margin: 0; color: var(--muted); font-size: .95rem; }
+    #DFU {
+      width: 100%;
+      max-width: 640px;
+      background: color-mix(in srgb, var(--card) 88%, transparent);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      backdrop-filter: blur(6px);
+    }
+    #select_poom_bin_label { display:block; margin: 6px 0 12px; color: var(--muted); line-height: 1.4; }
+    .buttons { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+    input[type="file"] { display:none; }
+    input[type="button"] {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform .06s ease, background .2s ease, border-color .2s ease;
+    }
+    input[type="button"]:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.24); }
+    input[type="button"]:active { transform: translateY(1px) scale(.995); }
+    .buttons input[value*="Actualizar"], .buttons input[value*="Update"] {
+      background: var(--accent);
+      border-color: transparent;
+      color: #0b1024;
+    }
+    #latest_firmware { margin: 8px 0; font-size: .95rem; color: var(--text); }
+    #file_info { margin: 8px 0; font-size: .95rem; color: var(--muted); }
+    #ota_update_status { margin: 8px 0 0; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: .92rem; color: var(--text); }
+    hr { border: none; height: 1px; background: rgba(255,255,255,.08); margin: 24px 0; }
+    .note { color: var(--muted); font-size: .9rem; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>POOM Firmware Update</h1>
+    <p>Update your device quickly and securely.</p>
+  </header>
+
+  <div id="DFU">
+    <label id="select_poom_bin_label">
+      1) Click <strong>SELECT FIRMWARE</strong> and choose your <code>POOM.bin</code> file.<br>
+      2) Then click <strong>UPDATE FIRMWARE</strong>. Do not close this page during the update.
+    </label>
+
+    <div id="latest_firmware"><!-- Optional: display latest firmware version here --></div>
+
+    <input type="file" id="selected_file" accept=".bin" onchange="getFileInfo()" />
+
+    <div class="buttons">
+      <input type="button" value="Select firmware" onclick="document.getElementById('selected_file').click();" />
+      <input type="button" value="Update firmware" onclick="updateFirmware()" />
+    </div>
+
+    <div id="file_info"><!-- Selected file name/size will appear here --></div>
+    <div id="ota_update_status"><!-- Update status (connecting, progress, completed, etc.) --></div>
+
+    <p class="note">Tip: Keep your POOM close and sufficiently charged during the update.</p>
+  </div>
+
+  <hr>
+
+  <script src="script.js"></script>
+</body>
+</html>

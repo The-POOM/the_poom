@@ -1,0 +1,111 @@
+/* Reset y estilos generales */
+body {
+    background-color: #f1f1f1;
+    font-family: Helvetica, Arial, sans-serif;
+    color: #333;
+    margin: 0;
+    padding: 0;
+    line-height: 1.6;
+}
+
+/* Header con mejor contraste y título en blanco */
+header {
+    background: #0f172a;
+    padding: 24px 12px 8px;
+    text-align: center;
+}
+
+h1 {
+    margin: 10px 0;
+    color: #ffffff; /* antes #000000 */
+}
+
+h2, h3, h4 {
+    color: #000000;
+}
+
+#DFU {
+    max-width: 600px;
+    margin: 20px auto;
+    padding: 20px;
+    background-color: #fff;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    transition: transform 0.3s ease;
+    text-align: center;
+    color: #000000;
+}
+
+#select_poom_bin_label {
+    font-weight: bold;
+    margin-bottom: 16px; /* antes 100px */
+}
+
+#latest_firmware {
+    margin-top: 20px;
+    margin-bottom: 2px;
+}
+
+input[type="file"] {
+    display: none;
+}
+
+/* Botones centrados, misma altura y ancho mínimo */
+.buttons {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+input[type="button"] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 44px;
+    min-width: 180px;
+    padding: 0 16px;
+    font-size: 14px;
+    font-weight: bold;
+    border: 0;
+    line-height: 1; /* evita desajuste vertical */
+    text-align: center;
+    color: #fff;
+    border-radius: 8px; /* ligero polish */
+    background-color: #019c06;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+
+input[type="button"]:hover {
+    background-color: #123f15;
+}
+
+#file_info {
+    margin-top: 20px;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+#ota_update_status {
+    font-weight: bold;
+    text-align: center;
+    margin-top: 20px;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #ddd;
+    margin: 20px 0;
+}
+
+/* Estilos para los iconos de gato */
+.cat-icon {
+    font-size: 24px;
+    vertical-align: middle;
+    margin-right: 5px;
+}

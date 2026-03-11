@@ -1,0 +1,76 @@
+typedef struct { float gx, gy, gz; } imu_sample_t;
+
+static void imu_logger_handler(const poom_sbus_msg_t *msg, void *user)
+{
+    (void)user;
+    if(msg->len < sizeof(imu_sample_t))
+    {
+        return;
+    }
+
+    imu_sample_t sample;
+    memcpy(&sample, msg->data, sizeof(sample));
+
+    printf("[imu_logger] [%s] t=%ums gx=%.2f gy=%.2f gz=%.2f\n",
+           msg->topic,
+           (unsigned)msg->ts_ms,
+           sample.gx,
+           sample.gy,
+           sample.gz);
+}
+
+static void imu_mouse_handler(const poom_sbus_msg_t *msg, void *user)
+{
+    int delta_x;
+    int delta_y;
+    imu_sample_t sample;
+
+    (void)user;
+
+    if(msg->len < sizeof(imu_sample_t))
+    {
+        return;
+    }
+
+    memcpy(&sample, msg->data, sizeof(sample));
+
+    delta_x = (int)(sample.gz * 0.05f);
+    delta_y = (int)(-sample.gy * 0.05f);
+
+    if(delta_x > 127)
+    {
+        delta_x = 127;
+    }
+    if(delta_x < -127)
+    {
+        delta_x = -127;
+    }
+    if(delta_y > 127)
+    {
+        delta_y = 127;
+    }
+    if(delta_y < -127)
+    {
+        delta_y = -127;
+    }
+
+    printf("[imu_mouse] [%s] dx=%d dy=%d\n", msg->topic, delta_x, delta_y);
+}
+
+static void publisher_loop(void)
+{
+    for(;;)
+    {
+        imu_sample_t sample = { .gx = 1.0f, .gy = 0.2f, .gz = -0.4f };
+        poom_sbus_publish("imu", &sample, sizeof(sample), 0);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+poom_sbus_init();
+bool ok = poom_sbus_start(4, 8096);
+configASSERT(ok);
+poom_sbus_register_topic("imu");
+poom_sbus_subscribe_cb("imu", imu_logger_handler, NULL);
+poom_sbus_subscribe_cb("imu", imu_mouse_handler, NULL);
+publisher_loop();

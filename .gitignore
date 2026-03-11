@@ -1,0 +1,20 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# IDE/editor metadata
+.vscode/
+.idea/
+.project
+.cproject
+.settings/
+
+# Generated build metadata
+**/compile_commands.json
+*.log
+
+# OS/editor temp files
+.DS_Store
+*.swp
+*.swo

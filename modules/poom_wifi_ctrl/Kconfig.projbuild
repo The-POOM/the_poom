@@ -1,0 +1,66 @@
+menu "POOM Wi-Fi Controller"
+
+    config POOM_WIFI_CTRL_SCAN_MAX_AP
+        int "Maximum number of scanned access points"
+        range 1 100
+        default 20
+        help
+            Maximum number of nearby Access Points (APs) stored during
+            a Wi-Fi scan operation. Increasing this value increases RAM usage.
+    config POOM_WIFI_CTRL_ENABLE_LOG
+        bool "Enable POOM WiFi Controller logs"
+        default n
+        help
+            Enable printf debug logs inside poom_wifi_ctrl.
+
+
+    config POOM_WIFI_CTRL_ENABLE_MDNS
+        bool "Enable mDNS (mdns_manager integration)"
+        default y
+        help
+            Enables optional mDNS advertisement via mdns_manager.
+            Requires the mdns_manager component to be present.
+            
+    menu "POOM Manager Access Point (AP)"
+
+        config POOM_WIFI_CTRL_MANAGER_AP_SSID
+            string "Manager AP SSID"
+            default "POOM"
+            help
+                SSID (network name) of the POOM management Access Point.
+
+        config POOM_WIFI_CTRL_MANAGER_AP_PASSWORD
+            string "Manager AP Password"
+            default "POOM1234"
+            help
+                WPA2-PSK password for the management AP.
+                Must be at least 8 characters if authentication is enabled.
+
+        config POOM_WIFI_CTRL_MANAGER_AP_CHANNEL
+            int "Manager AP channel"
+            range 1 13
+            default 3
+            help
+                Primary Wi-Fi channel used by the management AP.
+                Allowed range: 1–13.
+
+        config POOM_WIFI_CTRL_MANAGER_AP_MAX_CONNECTIONS
+            int "Maximum number of connected clients"
+            range 1 10
+            default 1
+            help
+                Maximum number of stations that can connect simultaneously
+                to the management AP.
+
+        config POOM_WIFI_CTRL_MANAGER_AP_AUTH_ENABLE
+            bool "Enable WPA2 authentication"
+            default y
+            help
+                If enabled, the management AP will use WPA2-PSK authentication.
+                If disabled, the AP will be open (no password required).
+                
+
+    endmenu
+
+endmenu
+

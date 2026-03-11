@@ -1,0 +1,44 @@
+# ============================================================================
+# ESP32-C5 Partition Table (CSV)
+# ============================================================================
+# Notes:
+# - Empty offsets are auto-assigned by ESP-IDF with required alignment.
+#   - data partitions: 4 KB alignment
+#   - app partitions:  64 KB alignment
+# - Recommended flash size: >= 8 MB.
+# - App slots use 3712K each (58 x 64 KB) to avoid extra padding.
+# ============================================================================
+
+# Name,       Type,  SubType, Offset, Size,  Flags
+
+# ---------------------------------------------------------------------------
+# System data partitions
+# ---------------------------------------------------------------------------
+# Non-volatile key/value storage:
+# configuration, credentials, BLE bonding, and runtime settings.
+nvs,          data,  nvs,            , 24K,
+
+# RF calibration data for Wi-Fi/BLE PHY.
+phy_init,     data,  phy,            ,  4K,
+
+# Zigbee/Thread/Matter persistent storage (FAT with wear leveling).
+zb_storage,   data,  fat,            , 16K,
+
+# Zigbee factory data, 4 KB sector-aligned.
+zb_fct,       data,  fat,            ,  4K,
+
+# OTA selection metadata (active slot, rollback state, etc.).
+otadata,      data,  ota,            ,  8K,
+
+# Internal filesystem partition (SPIFFS).
+# Change subtype to `littlefs` if your project uses LittleFS.
+internal,     data,  spiffs,         , 512K,
+
+# ---------------------------------------------------------------------------
+# Application partitions (dual OTA)
+# ---------------------------------------------------------------------------
+# OTA application slot 0.
+ota_0,        app,   ota_0,          , 3712K,
+
+# OTA application slot 1 (same size as ota_0).
+ota_1,        app,   ota_1,          , 3712K,
