@@ -29,16 +29,21 @@ POOM is delivered as an ESP-IDF firmware project with a modular architecture and
 - Controller mode for apps, media, and presentations
 - Compact gaming integrations (for example Snake and portable-console flows)
 
-### Sniffer and Analyzer
+### Beast Mode
 
-- Wi-Fi, BLE, Zigbee, and 802.15.4/Thread capture paths
-- UART and host export pipelines for offline analysis
+- Wi-Fi scan, deauth testing (authorized), karma, captive/evil twin, SSID spam, DIAL, ARP spoofing.
+-  BLE spam and BLE proximity/tag tracking.
+-  Wi-Fi, BLE, Zigbee, and 802.15.4/Thread capture paths. U
+-  ART and host export pipelines for offline analysis.
+-  Drone ID and drone research features.
 
-### Wireless Toolkit
+### Gamer Mode
 
-- Wi-Fi: scan, deauth testing (authorized), karma, captive/evil twin, SSID spam, DIAL, ARP spoofing
-- Bluetooth: BLE spam and BLE proximity/tag tracking flows
-- Aerial: Drone ID and drone research features
+- BLE gamepad and IMU motion control.
+- Snake and portable-console flows.
+- Compact gaming integrations built for the device in your hand
+- Arduboy Library Support
+  
 
 ## Platform and Targets
 
