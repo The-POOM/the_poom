@@ -42,6 +42,7 @@ set(MODULES
     poom_wifi_captive
     poom_wifi_deauth
     poom_wifi_spam
+    poom_air_drums
 )
 
 set(COMPONENTS ${MODULES})
@@ -85,6 +86,7 @@ set(POOM_APPLICATION_DIRS
     ${CMAKE_SOURCE_DIR}/applications/poom_wifi_captive
     ${CMAKE_SOURCE_DIR}/applications/poom_wifi_deauth
     ${CMAKE_SOURCE_DIR}/applications/poom_wifi_spam
+    ${CMAKE_SOURCE_DIR}/applications/poom_air_drums
 )
 
 set(POOM_DRIVER_DIRS
