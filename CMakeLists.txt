@@ -25,6 +25,7 @@ set(MODULES
     ble_midi
     lsm6ds3
     mdns
+    pcap
 
     # Applications
     poom_ble_hid
@@ -68,6 +69,7 @@ set(POOM_THIRD_PARTY_DIRS
     ${CMAKE_SOURCE_DIR}/third-party/mdns
     ${CMAKE_SOURCE_DIR}/third-party/mdns_manager
     ${CMAKE_SOURCE_DIR}/third-party/oled
+    ${CMAKE_SOURCE_DIR}/third-party/pcap
 )
 
 set(POOM_APPLICATION_DIRS
