@@ -8,7 +8,6 @@
 #include "i2c.h"
 #include "poom_sbus.h"
 #include "button_driver.h"
-#include "poom_oled_screen.h"
 #include "nvs_flash.h"
 
 void app_main(void)

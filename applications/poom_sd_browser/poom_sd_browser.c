@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "poom_oled_screen.h"
+#include "Arduboy2.h"
 #include "poom_sd_browser_storage.h"
 #include "poom_sbus.h"
 #include "sd_card.h"
@@ -89,11 +89,54 @@ static poom_sd_browser_storage_t s_storage;
 static bool s_running = false;
 static bool s_buttons_subscribed = false;
 static bool s_file_details_mode = false;
+static bool s_error_mode = false;
 static size_t s_list_offset = 0U;
 static char s_selected_file_name[POOM_SD_BROWSER_FILE_NAME_MAX_LEN + 1U] = {0};
 static size_t s_selected_file_size = 0U;
 static poom_sd_browser_exit_cb_t s_exit_callback = NULL;
 static void* s_exit_callback_ctx = NULL;
+
+
+static inline int16_t poom_sd_browser_row_y_(uint8_t row)
+{
+    return (int16_t)((int16_t)row * 8);
+}
+
+static inline size_t poom_sd_browser_text_width_px_(const char* s)
+{
+    if(s == NULL)
+    {
+        return 0U;
+    }
+
+    return strlen(s) * 6U;
+}
+
+static void poom_sd_browser_draw_text_row_(const char* text, int16_t x, uint8_t row)
+{
+    poom_arduboy_set_cursor(x, poom_sd_browser_row_y_(row));
+    (void)poom_arduboy_print((text != NULL) ? text : "");
+}
+
+static void poom_sd_browser_draw_text_center_row_(const char* text, uint8_t row)
+{
+    const size_t w = poom_sd_browser_text_width_px_(text);
+    int16_t x = 0;
+
+    if(w < (size_t)ARDUBOY_WIDTH)
+    {
+        x = (int16_t)((ARDUBOY_WIDTH - (int16_t)w) / 2);
+    }
+
+    poom_sd_browser_draw_text_row_(text, x, row);
+}
+
+static void poom_sd_browser_draw_header_(const char* title)
+{
+    poom_sd_browser_draw_text_center_row_(title, 0);
+    // Invert after drawing so the title becomes black-on-white.
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 8, INVERT);
+}
 
 /**
  * @brief Formats file name for details screen keeping extension when possible.
@@ -150,7 +193,7 @@ static esp_err_t poom_sd_browser_format_file_detail_name_(const char* input_name
  * @param[in] line1 Bottom line text.
  * @return esp_err_t
  */
-static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* line1)
+static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* line1, bool show_nav)
 {
     char text0[22];
     char text1[22];
@@ -158,12 +201,22 @@ static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* lin
     snprintf(text0, sizeof(text0), "%s", (line0 != NULL) ? line0 : "");
     snprintf(text1, sizeof(text1), "%s", (line1 != NULL) ? line1 : "");
 
-    poom_oled_screen_clear_buffer();
-    poom_oled_screen_draw_rect_round(0, 10, 128, 52, 4, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text_center("SD BROWSER", 0, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text_center(text0, 3, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text_center(text1, 5, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_show();
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+
+    poom_sd_browser_draw_header_("SD BROWSER");
+    poom_arduboy_draw_rect(0, 10, ARDUBOY_WIDTH, (int16_t)(ARDUBOY_HEIGHT - 10), WHITE);
+
+    poom_sd_browser_draw_text_center_row_(text0, 3);
+    poom_sd_browser_draw_text_center_row_(text1, 5);
+
+    if(show_nav)
+    {
+        poom_sd_browser_draw_text_row_("A:Retry", 0, 7);
+        poom_sd_browser_draw_text_row_("B:Back", 76, 7);
+    }
+
+    poom_arduboy_display();
 
     return ESP_OK;
 }
@@ -264,7 +317,7 @@ static esp_err_t poom_sd_browser_draw_scrollbar_(const poom_sd_browser_storage_t
     w = (size_t)POOM_SD_BROWSER_SCROLLBAR_W;
     h = (size_t)POOM_SD_BROWSER_SCROLLBAR_H;
 
-    poom_oled_screen_draw_rect((int)x, (int)y, (int)w, (int)h, OLED_DISPLAY_NORMAL);
+    poom_arduboy_draw_rect((int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h, WHITE);
 
     thumb_h = (h * POOM_SD_BROWSER_MAX_ROWS) / storage->items_count;
     if(thumb_h < POOM_SD_BROWSER_SCROLLBAR_THUMB_MIN_H)
@@ -286,14 +339,14 @@ static esp_err_t poom_sd_browser_draw_scrollbar_(const poom_sd_browser_storage_t
 
     if((w > 2U) && (thumb_h > 2U))
     {
-        poom_oled_screen_draw_box((int)(x + 1U), (int)(thumb_y + 1U), (int)(w - 2U), (int)(thumb_h - 2U), OLED_DISPLAY_NORMAL);
+        poom_arduboy_fill_rect((int16_t)(x + 1U), (int16_t)(thumb_y + 1U), (int16_t)(w - 2U), (int16_t)(thumb_h - 2U), WHITE);
     }
 
     return ESP_OK;
 }
 
 /**
- * @brief Draws current directory listing in OLED.
+ * @brief Draws current directory listing on display.
  *
  * @param[in] storage Storage context.
  * @return esp_err_t
@@ -311,17 +364,18 @@ static esp_err_t poom_sd_browser_draw_list_(const poom_sd_browser_storage_t* sto
     (void)poom_sd_browser_sync_offset_(storage);
     (void)poom_sd_browser_format_path_line_(storage->current_path, path_line, sizeof(path_line));
 
-    poom_oled_screen_clear_buffer();
-    poom_oled_screen_display_text_center("SD BROWSER", 0, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text(path_line, 0, 1, OLED_DISPLAY_NORMAL);
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+
+    poom_sd_browser_draw_header_("SD BROWSER");
+    poom_sd_browser_draw_text_row_(path_line, 0, 1);
+    poom_arduboy_draw_fast_hline(0, 15, ARDUBOY_WIDTH, WHITE);
 
     if(storage->items_count == 0U)
     {
-        char empty_line[] = "(empty)";
-        char help_line[] = "B:Back";
-        poom_oled_screen_display_text_center(empty_line, 4, OLED_DISPLAY_NORMAL);
-        poom_oled_screen_display_text(help_line, 0, 7, OLED_DISPLAY_NORMAL);
-        poom_oled_screen_display_show();
+        poom_sd_browser_draw_text_center_row_("(empty)", 4);
+        poom_sd_browser_draw_text_row_("B:Back", 0, 7);
+        poom_arduboy_display();
         return ESP_OK;
     }
 
@@ -338,26 +392,31 @@ static esp_err_t poom_sd_browser_draw_list_(const poom_sd_browser_storage_t* sto
             char item_line[POOM_SD_BROWSER_ITEM_LINE_MAX_LEN + 1U];
             const poom_sd_browser_storage_item_t* item = &storage->items[index];
             const char* prefix = item->is_directory ? "D:" : "F:";
+            const uint8_t row_idx = (uint8_t)(2U + row);
+            const int16_t y = poom_sd_browser_row_y_(row_idx);
 
             snprintf(item_line, sizeof(item_line), "%s%.*s", prefix, (int)POOM_SD_BROWSER_ITEM_NAME_VISIBLE_CHARS, item->name);
-            poom_oled_screen_display_text(item_line, 0, (int)(2U + row), (index == storage->selected_index));
+            poom_sd_browser_draw_text_row_(item_line, 0, row_idx);
+
+            if(index == storage->selected_index)
+            {
+                // Invert only the list area so the scrollbar stays readable.
+                poom_arduboy_fill_rect(0, y, (int16_t)POOM_SD_BROWSER_SCROLLBAR_X, 8, INVERT);
+            }
         }
     }
 
     (void)poom_sd_browser_draw_scrollbar_(storage);
 
-    {
-        char footer_line[22];
-        snprintf(footer_line, sizeof(footer_line), "A:Open B:Back");
-        poom_oled_screen_display_text(footer_line, 0, 7, OLED_DISPLAY_NORMAL);
-    }
+    poom_sd_browser_draw_text_row_("A:Open", 0, 7);
+    poom_sd_browser_draw_text_row_("B:Back", 76, 7);
 
-    poom_oled_screen_display_show();
+    poom_arduboy_display();
     return ESP_OK;
 }
 
 /**
- * @brief Draws selected file details in OLED.
+ * @brief Draws selected file details screen.
  *
  * @return esp_err_t
  */
@@ -365,7 +424,6 @@ static esp_err_t poom_sd_browser_draw_file_details_(void)
 {
     char line_name[22];
     char line_size[22];
-    char line_help[22];
     const int box_x = 2;
     const int box_y = 18;
     const int box_w = 124;
@@ -374,15 +432,16 @@ static esp_err_t poom_sd_browser_draw_file_details_(void)
 
     (void)poom_sd_browser_format_file_detail_name_(s_selected_file_name, line_name, sizeof(line_name));
     snprintf(line_size, sizeof(line_size), "SIZE: %u B", (unsigned int)s_selected_file_size);
-    snprintf(line_help, sizeof(line_help), "B:Back");
 
-    poom_oled_screen_clear_buffer();
-    poom_oled_screen_display_text_center("FILE", 0, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_draw_rect_round(box_x, box_y, box_w, box_h, 4, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text(line_name, text_x, 3, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text(line_size, text_x, 5, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_text(line_help, 0, 7, OLED_DISPLAY_NORMAL);
-    poom_oled_screen_display_show();
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+
+    poom_sd_browser_draw_header_("FILE");
+    poom_arduboy_draw_rect((int16_t)box_x, (int16_t)box_y, (int16_t)box_w, (int16_t)box_h, WHITE);
+    poom_sd_browser_draw_text_row_(line_name, (int16_t)text_x, 3);
+    poom_sd_browser_draw_text_row_(line_size, (int16_t)text_x, 5);
+    poom_sd_browser_draw_text_row_("B:Back", 0, 7);
+    poom_arduboy_display();
 
     return ESP_OK;
 }
@@ -493,6 +552,24 @@ static esp_err_t poom_sd_browser_handle_button_event_(const poom_sd_browser_butt
         return ESP_OK;
     }
 
+    // If start failed (mount/read), keep a minimal UI where:
+    // - A/RIGHT retries
+    // - B/LEFT goes back to the caller via exit callback
+    if(s_error_mode)
+    {
+        if((event->button == BTN_B) || (event->button == BTN_LEFT))
+        {
+            (void)poom_sd_browser_stop();
+            return poom_sd_browser_emit_exit_callback_();
+        }
+        if((event->button == BTN_A) || (event->button == BTN_RIGHT))
+        {
+            (void)poom_sd_browser_stop();
+            return poom_sd_browser_start();
+        }
+        return ESP_OK;
+    }
+
     if(event->button == BTN_UP)
     {
         if(!s_file_details_mode)
@@ -549,6 +626,23 @@ static void poom_sd_browser_button_topic_handler_(const poom_sbus_msg_t* msg, vo
     }
 }
 
+static esp_err_t poom_sd_browser_ensure_buttons_subscribed_(void)
+{
+    if(s_buttons_subscribed)
+    {
+        return ESP_OK;
+    }
+
+    if(!poom_sbus_subscribe_cb("input/button", poom_sd_browser_button_topic_handler_, "poom_sd_browser"))
+    {
+        POOM_SD_BROWSER_PRINTF_E("poom_sbus_subscribe_cb failed");
+        return ESP_FAIL;
+    }
+
+    s_buttons_subscribed = true;
+    return ESP_OK;
+}
+
 /**
  * @brief Starts SD browser and subscribes button handling.
  *
@@ -563,7 +657,9 @@ esp_err_t poom_sd_browser_start(void)
         return ESP_OK;
     }
 
-    (void)poom_sd_browser_draw_status_("Mounting SD...", "Please wait");
+    s_error_mode = false;
+
+    (void)poom_sd_browser_draw_status_("Mounting SD...", "Please wait", false);
 
     sd_card_begin();
     if(sd_card_is_not_mounted())
@@ -572,7 +668,11 @@ esp_err_t poom_sd_browser_start(void)
         if(err != ESP_OK)
         {
             POOM_SD_BROWSER_PRINTF_E("sd_card_mount failed: %s", esp_err_to_name(err));
-            (void)poom_sd_browser_draw_status_("SD mount error", "Check card");
+            (void)poom_sd_browser_draw_status_("SD mount error", "Check card", true);
+            (void)poom_sd_browser_ensure_buttons_subscribed_();
+            memset(&s_storage, 0, sizeof(s_storage));
+            s_error_mode = true;
+            s_running = true;
             return err;
         }
     }
@@ -581,6 +681,11 @@ esp_err_t poom_sd_browser_start(void)
     if(err != ESP_OK)
     {
         POOM_SD_BROWSER_PRINTF_E("storage init failed: %s", esp_err_to_name(err));
+        (void)poom_sd_browser_draw_status_("Storage error", "Init failed", true);
+        (void)poom_sd_browser_ensure_buttons_subscribed_();
+        memset(&s_storage, 0, sizeof(s_storage));
+        s_error_mode = true;
+        s_running = true;
         return err;
     }
 
@@ -589,20 +694,23 @@ esp_err_t poom_sd_browser_start(void)
     {
         POOM_SD_BROWSER_PRINTF_W("storage reload failed: %s", esp_err_to_name(err));
         (void)poom_sd_browser_storage_deinit(&s_storage);
-        (void)poom_sd_browser_draw_status_("Read error", "Cannot list SD");
+        (void)poom_sd_browser_draw_status_("Read error", "Cannot list SD", true);
+        (void)poom_sd_browser_ensure_buttons_subscribed_();
+        memset(&s_storage, 0, sizeof(s_storage));
+        s_error_mode = true;
+        s_running = true;
         return err;
     }
 
-    if(!s_buttons_subscribed)
+    err = poom_sd_browser_ensure_buttons_subscribed_();
+    if(err != ESP_OK)
     {
-        if(!poom_sbus_subscribe_cb("input/button", poom_sd_browser_button_topic_handler_, "poom_sd_browser"))
-        {
-            (void)poom_sd_browser_storage_deinit(&s_storage);
-            POOM_SD_BROWSER_PRINTF_E("poom_sbus_subscribe_cb failed");
-            return ESP_FAIL;
-        }
-
-        s_buttons_subscribed = true;
+        (void)poom_sd_browser_storage_deinit(&s_storage);
+        memset(&s_storage, 0, sizeof(s_storage));
+        (void)poom_sd_browser_draw_status_("Input error", "No buttons", true);
+        s_error_mode = true;
+        s_running = true;
+        return err;
     }
 
     s_running = true;
@@ -635,6 +743,7 @@ esp_err_t poom_sd_browser_stop(void)
     memset(&s_storage, 0, sizeof(s_storage));
 
     s_file_details_mode = false;
+    s_error_mode = false;
     s_list_offset = 0U;
     s_running = false;
 

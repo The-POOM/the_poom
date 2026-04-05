@@ -6,5 +6,5 @@ set(srcs
 idf_component_register(
     SRCS "${srcs}"
     INCLUDE_DIRS "include"
-    REQUIRES poom_oled_screen poom_sbus sd_card
+    REQUIRES poom_arduboy_display poom_sbus sd_card
 )

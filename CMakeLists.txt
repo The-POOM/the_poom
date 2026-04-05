@@ -16,10 +16,10 @@ set(MODULES
     # Local modules
     poom_buz_theme
     poom_fw_update
-    poom_oled_screen
     poom_sbus
     poom_wifi_attacks
     poom_wifi_ctrl
+    poom_arduboy_display
 
     # Third-party components
     ble_midi
@@ -34,7 +34,6 @@ set(MODULES
     poom_ble_spam
     poom_ble_tracker
     poom_edge_impulse
-    poom_game_snake
     poom_http_load_test
     poom_imu_stream
     poom_led_rainbow
@@ -53,12 +52,12 @@ set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_server
     ${CMAKE_SOURCE_DIR}/modules/poom_buz_theme
     ${CMAKE_SOURCE_DIR}/modules/poom_fw_update
-    ${CMAKE_SOURCE_DIR}/modules/poom_oled_screen
     ${CMAKE_SOURCE_DIR}/modules/poom_sbus
     ${CMAKE_SOURCE_DIR}/modules/poom_secrets_store
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_attacks
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_ctrl
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_scanner
+    ${CMAKE_SOURCE_DIR}/modules/poom_arduboy_display
 )
 
 set(POOM_THIRD_PARTY_DIRS
@@ -79,7 +78,6 @@ set(POOM_APPLICATION_DIRS
     ${CMAKE_SOURCE_DIR}/applications/poom_ble_spam
     ${CMAKE_SOURCE_DIR}/applications/poom_ble_tracker
     ${CMAKE_SOURCE_DIR}/applications/poom_edge_impulse
-    ${CMAKE_SOURCE_DIR}/applications/poom_game_snake
     ${CMAKE_SOURCE_DIR}/applications/poom_http_load_test
     ${CMAKE_SOURCE_DIR}/applications/poom_imu_stream
     ${CMAKE_SOURCE_DIR}/applications/poom_led_rainbow

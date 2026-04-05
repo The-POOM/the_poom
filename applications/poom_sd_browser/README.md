@@ -1,6 +1,6 @@
 # poom_sd_browser
 
-`poom_sd_browser` is an SD card browser application for OLED-based devices.
+`poom_sd_browser` is an SD card browser application for Arduboy-style OLED devices.
 It provides a simple file navigation UI controlled by hardware buttons.
 
 ## Features
@@ -9,18 +9,18 @@ It provides a simple file navigation UI controlled by hardware buttons.
 - Directory listing from `/sdcard` root.
 - Folder navigation (enter folder / go parent).
 - File details view (name and size in bytes).
-- OLED rendering with selection highlight.
+- Arduboy-style rendering with selection highlight.
 - Button-driven controls through `sbus` (`input/button`).
 
-## Structure
+## Architecture
 
 The module is split into two C files:
 
 - `poom_sd_browser_storage.c`
   - Pure storage/navigation logic for SD filesystem entries.
-  - No OLED and no button handling.
+  - No display and no button handling.
 - `poom_sd_browser.c`
-  - UI and interaction layer (OLED + buttons).
+  - UI and interaction layer (display + buttons).
   - Calls storage layer functions.
 
 ## Controls
@@ -45,7 +45,7 @@ bool poom_sd_browser_is_running(void);
 esp_err_t poom_sd_browser_set_exit_callback(poom_sd_browser_exit_cb_t callback, void* user_ctx);
 ```
 
-## Usage
+## Basic Usage
 
 ```c
 #include "poom_sd_browser.h"
@@ -61,7 +61,7 @@ void start_sd_browser(void) {
 }
 ```
 
-## Runtime Flow
+## Mermaid Flowchart
 
 ```mermaid
 flowchart TD
