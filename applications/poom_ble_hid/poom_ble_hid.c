@@ -17,6 +17,12 @@
 #include "esp_hidd_prf_api.h"
 #include "hid_dev.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+
 /* Some ESP-IDF releases do not expose these prototypes in public headers. */
 void esp_hidd_send_keyboard_value(uint16_t conn_id,
                                  uint8_t special_key_mask,
@@ -77,7 +83,13 @@ static const char *POOM_BLE_HID_TAG = "poom_ble_hid";
  * ========================= */
 static uint16_t s_hid_conn_id = 0U;
 static bool s_secured = false;
+static bool s_is_started = false;
 static hid_event_callback_f s_conn_cb = NULL;
+static bool s_is_connected = false;
+static esp_bd_addr_t s_remote_bda = {0};
+static bool s_gap_cb_registered = false;
+static bool s_hidd_cb_registered = false;
+static bool s_hidd_profile_inited = false;
 
 static const char s_device_name[] = "POOM_HID";
 
@@ -241,6 +253,8 @@ static void poom_ble_hid_on_hidd_event_(esp_hidd_cb_event_t event, esp_hidd_cb_p
             if (param != NULL)
             {
                 s_hid_conn_id = param->connect.conn_id;
+                memcpy(s_remote_bda, param->connect.remote_bda, sizeof(s_remote_bda));
+                s_is_connected = true;
                 POOM_LOGI("BLE_CONNECT conn_id=%u", (unsigned)s_hid_conn_id);
                 poom_ble_hid_notify_connection_state_(true);
             }
@@ -248,6 +262,8 @@ static void poom_ble_hid_on_hidd_event_(esp_hidd_cb_event_t event, esp_hidd_cb_p
 
         case ESP_HIDD_EVENT_BLE_DISCONNECT:
             s_secured = false;
+            s_is_connected = false;
+            memset(s_remote_bda, 0, sizeof(s_remote_bda));
             POOM_LOGW("BLE_DISCONNECT -> restart advertising");
             (void)esp_ble_gap_start_advertising(&s_adv_params);
             poom_ble_hid_notify_connection_state_(false);
@@ -349,6 +365,20 @@ void poom_ble_hid_start(void)
 {
     esp_err_t ret;
 
+    s_is_connected = false;
+    s_secured = false;
+    memset(s_remote_bda, 0, sizeof(s_remote_bda));
+
+    if (s_is_started)
+    {
+        // Already started: just ensure advertising is running again.
+        (void)esp_ble_gap_config_adv_data(&s_adv_data);
+        (void)esp_ble_gap_start_advertising(&s_adv_params);
+        s_secured = false;
+        s_hid_conn_id = 0U;
+        return;
+    }
+
     ret = poom_ble_hid_initialize_nvs_();
     if (ret != ESP_OK)
     {
@@ -356,13 +386,15 @@ void poom_ble_hid_start(void)
         return;
     }
 
-    ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-    if (ret != ESP_OK)
+    esp_bt_controller_status_t bt_st = esp_bt_controller_get_status();
+    if (bt_st == ESP_BT_CONTROLLER_STATUS_IDLE)
     {
-        POOM_LOGW("mem_release classic: %s", esp_err_to_name(ret));
-    }
+        ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+        if (ret != ESP_OK)
+        {
+            POOM_LOGW("mem_release classic: %s", esp_err_to_name(ret));
+        }
 
-    {
         esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
         ret = esp_bt_controller_init(&bt_cfg);
         if (ret != ESP_OK)
@@ -370,44 +402,71 @@ void poom_ble_hid_start(void)
             POOM_LOGE("bt controller init failed: %s", esp_err_to_name(ret));
             return;
         }
+        bt_st = esp_bt_controller_get_status();
     }
 
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret != ESP_OK)
+    if (bt_st == ESP_BT_CONTROLLER_STATUS_INITED)
     {
-        POOM_LOGE("bt controller enable failed: %s", esp_err_to_name(ret));
-        return;
+        ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+        if (ret != ESP_OK)
+        {
+            POOM_LOGE("bt controller enable failed: %s", esp_err_to_name(ret));
+            return;
+        }
     }
 
-    ret = esp_bluedroid_init();
-    if (ret != ESP_OK)
+    esp_bluedroid_status_t bd_st = esp_bluedroid_get_status();
+    if (bd_st == ESP_BLUEDROID_STATUS_UNINITIALIZED)
     {
-        POOM_LOGE("bluedroid init failed: %s", esp_err_to_name(ret));
-        return;
+        ret = esp_bluedroid_init();
+        if (ret != ESP_OK)
+        {
+            POOM_LOGE("bluedroid init failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        bd_st = esp_bluedroid_get_status();
     }
 
-    ret = esp_bluedroid_enable();
-    if (ret != ESP_OK)
+    if (bd_st == ESP_BLUEDROID_STATUS_INITIALIZED)
     {
-        POOM_LOGE("bluedroid enable failed: %s", esp_err_to_name(ret));
-        return;
+        ret = esp_bluedroid_enable();
+        if (ret != ESP_OK)
+        {
+            POOM_LOGE("bluedroid enable failed: %s", esp_err_to_name(ret));
+            return;
+        }
     }
 
-    ret = esp_hidd_profile_init();
-    if (ret != ESP_OK)
+    if (!s_hidd_profile_inited)
     {
-        POOM_LOGE("hidd profile init failed: %s", esp_err_to_name(ret));
-        return;
+        ret = esp_hidd_profile_init();
+        if (ret != ESP_OK)
+        {
+            POOM_LOGE("hidd profile init failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        s_hidd_profile_inited = true;
     }
 
-    ret = esp_ble_gap_register_callback(poom_ble_hid_on_gap_event_);
-    if (ret != ESP_OK)
+    if (!s_gap_cb_registered)
     {
-        POOM_LOGE("gap register callback failed: %s", esp_err_to_name(ret));
-        return;
+        if (esp_ble_gap_get_callback() == NULL)
+        {
+            ret = esp_ble_gap_register_callback(poom_ble_hid_on_gap_event_);
+            if (ret != ESP_OK)
+            {
+                POOM_LOGE("gap register callback failed: %s", esp_err_to_name(ret));
+                return;
+            }
+        }
+        s_gap_cb_registered = true;
     }
 
-    esp_hidd_register_callbacks(poom_ble_hid_on_hidd_event_);
+    if (!s_hidd_cb_registered)
+    {
+        esp_hidd_register_callbacks(poom_ble_hid_on_hidd_event_);
+        s_hidd_cb_registered = true;
+    }
 
     {
         esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;
@@ -426,7 +485,48 @@ void poom_ble_hid_start(void)
     s_hid_conn_id = 0U;
     s_secured = false;
 
+    s_is_started = true;
+
+    // Ensure advertising restarts whenever we (re)start the module.
+    (void)esp_ble_gap_config_adv_data(&s_adv_data);
+    (void)esp_ble_gap_start_advertising(&s_adv_params);
+
     POOM_LOGI("Initialized (name=%s)", s_device_name);
+}
+
+
+/**
+ * @brief Stop BLE HID stack and advertising.
+ */
+void poom_ble_hid_stop(void)
+{
+    if (!s_is_started)
+    {
+        return;
+    }
+
+    // Best-effort: disconnect (if connected), stop advertising, then stop HID profile.
+    if (s_is_connected)
+    {
+        (void)esp_ble_gap_disconnect(s_remote_bda);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        s_is_connected = false;
+        s_secured = false;
+        memset(s_remote_bda, 0, sizeof(s_remote_bda));
+        poom_ble_hid_notify_connection_state_(false);
+    }
+
+    (void)esp_ble_gap_stop_advertising();
+
+    s_is_started = false;
+    s_hid_conn_id = 0U;
+    s_secured = false;
+    s_conn_cb = NULL;
+}
+
+bool poom_ble_hid_is_started(void)
+{
+    return s_is_started;
 }
 
 /* =========================

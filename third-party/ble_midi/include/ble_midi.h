@@ -39,6 +39,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 
 #define BLEMIDI_DEVICE_NAME "poom-midi"
@@ -98,6 +99,19 @@ extern void blemidi_receive_packet_callback_for_debugging(
  * @return < 0 on errors
  */
 extern void blemidi_tick();
+
+/**
+ * @brief Returns true when a BLE client is connected.
+ */
+extern bool blemidi_is_connected(void);
+
+/**
+ * @brief Stops BLE MIDI advertising and shuts down BLE stack.
+ *
+ * Intended to be called when leaving the BLE MIDI mode so the device
+ * no longer advertises as a MIDI peripheral and resources are released.
+ */
+extern void blemidi_deinit(void);
 
 
 #ifdef __cplusplus

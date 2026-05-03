@@ -35,10 +35,22 @@
     #define POOM_BLE_TRACKER_PRINTF_D(...) do { } while (0)
 #endif
 
-#define POOM_BLE_TRACKER_SCAN_DURATION_SECONDS (60)
+/*
+ * Scan timeout:
+ * - Set to 0 to scan indefinitely (recommended for UI modules that need live updates).
+ */
+#define POOM_BLE_TRACKER_SCAN_DURATION_SECONDS (0)
 #define POOM_BLE_TRACKER_RSSI_AT_1M_DBM (-65)
 #define POOM_BLE_TRACKER_PATH_LOSS_EXPONENT (2.2f)
 #define POOM_BLE_TRACKER_DISTANCE_SCALE (10.0f)
+
+#ifndef POOM_BLE_TRACKER_RSSI_AVG_WINDOW
+    #define POOM_BLE_TRACKER_RSSI_AVG_WINDOW (10U)
+#endif
+
+#ifndef POOM_BLE_TRACKER_RSSI_CACHE_SLOTS
+    #define POOM_BLE_TRACKER_RSSI_CACHE_SLOTS (16U)
+#endif
 
 typedef struct {
     uint8_t adv_cmp[4];
@@ -46,16 +58,95 @@ typedef struct {
     const char *vendor;
 } poom_ble_tracker_signature_t;
 
+typedef struct {
+    bool in_use;
+    uint8_t mac_address[6];
+    int8_t samples[POOM_BLE_TRACKER_RSSI_AVG_WINDOW];
+    uint8_t count;
+    uint8_t next_index;
+    int32_t sum;
+    TickType_t last_seen_tick;
+} poom_ble_tracker_rssi_filter_t;
+
 static TaskHandle_t s_scan_timer_task = NULL;
 static poom_ble_tracker_scan_cb_t s_scan_callback = NULL;
 static int s_scan_elapsed_seconds = 0;
 static bool s_scanner_active = false;
+
+static poom_ble_tracker_rssi_filter_t s_rssi_filters[POOM_BLE_TRACKER_RSSI_CACHE_SLOTS];
 
 static const poom_ble_tracker_signature_t s_tracker_signatures[] = {
     {.adv_cmp = {0x1E, 0xFF, 0x4C, 0x00}, .name = "AirTag", .vendor = "Apple"},
     {.adv_cmp = {0x4C, 0x00, 0x12, 0x19}, .name = "UATag", .vendor = "Apple"},
     {.adv_cmp = {0x02, 0x01, 0x06, 0x0D}, .name = "Tile", .vendor = "Tile"},
 };
+
+static void poom_ble_tracker_rssi_filter_reset_(void) {
+    memset(s_rssi_filters, 0, sizeof(s_rssi_filters));
+}
+
+static poom_ble_tracker_rssi_filter_t *poom_ble_tracker_rssi_filter_get_slot_(const uint8_t mac_address[6]) {
+    int first_free = -1;
+    TickType_t oldest_tick = 0;
+    int oldest_index = -1;
+
+    if (mac_address == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0U; i < (sizeof(s_rssi_filters) / sizeof(s_rssi_filters[0])); i++) {
+        if (s_rssi_filters[i].in_use) {
+            if (memcmp(s_rssi_filters[i].mac_address, mac_address, 6U) == 0) {
+                return &s_rssi_filters[i];
+            }
+            if ((oldest_index < 0) || (s_rssi_filters[i].last_seen_tick < oldest_tick)) {
+                oldest_tick = s_rssi_filters[i].last_seen_tick;
+                oldest_index = (int)i;
+            }
+        } else if (first_free < 0) {
+            first_free = (int)i;
+        }
+    }
+
+    int slot_index = (first_free >= 0) ? first_free : oldest_index;
+    if (slot_index < 0) {
+        return NULL;
+    }
+
+    poom_ble_tracker_rssi_filter_t *slot = &s_rssi_filters[slot_index];
+    memset(slot, 0, sizeof(*slot));
+    slot->in_use = true;
+    memcpy(slot->mac_address, mac_address, 6U);
+    slot->last_seen_tick = xTaskGetTickCount();
+    return slot;
+}
+
+static float poom_ble_tracker_rssi_filter_update_avg_(const uint8_t mac_address[6], int rssi_dbm) {
+    poom_ble_tracker_rssi_filter_t *slot = poom_ble_tracker_rssi_filter_get_slot_(mac_address);
+    if (slot == NULL) {
+        return (float)rssi_dbm;
+    }
+
+    slot->last_seen_tick = xTaskGetTickCount();
+
+    if (slot->count < POOM_BLE_TRACKER_RSSI_AVG_WINDOW) {
+        slot->samples[slot->next_index] = (int8_t)rssi_dbm;
+        slot->sum += (int32_t)rssi_dbm;
+        slot->count++;
+        slot->next_index = (uint8_t)((slot->next_index + 1U) % POOM_BLE_TRACKER_RSSI_AVG_WINDOW);
+    } else {
+        const int old = (int)slot->samples[slot->next_index];
+        slot->samples[slot->next_index] = (int8_t)rssi_dbm;
+        slot->sum += (int32_t)rssi_dbm - (int32_t)old;
+        slot->next_index = (uint8_t)((slot->next_index + 1U) % POOM_BLE_TRACKER_RSSI_AVG_WINDOW);
+    }
+
+    if (slot->count == 0U) {
+        return (float)rssi_dbm;
+    }
+
+    return (float)slot->sum / (float)slot->count;
+}
 
 /**
  * @brief Estimate tracker distance from RSSI value.
@@ -107,6 +198,7 @@ static void poom_ble_tracker_parse_adv_record_(const esp_ble_gap_cb_param_t *sca
                                                poom_ble_tracker_profile_t *tracker_record) {
     const poom_ble_tracker_signature_t *signature = NULL;
     uint8_t copy_len;
+    float rssi_avg;
 
     if ((scan_result == NULL) || (tracker_record == NULL)) {
         return;
@@ -122,6 +214,7 @@ static void poom_ble_tracker_parse_adv_record_(const esp_ble_gap_cb_param_t *sca
     tracker_record->name = signature->name;
     tracker_record->vendor = signature->vendor;
     tracker_record->rssi = scan_result->scan_rst.rssi;
+    rssi_avg = poom_ble_tracker_rssi_filter_update_avg_(scan_result->scan_rst.bda, tracker_record->rssi);
 
     copy_len = scan_result->scan_rst.adv_data_len;
     if (copy_len > sizeof(tracker_record->adv_data)) {
@@ -132,12 +225,13 @@ static void poom_ble_tracker_parse_adv_record_(const esp_ble_gap_cb_param_t *sca
     memcpy(tracker_record->mac_address, scan_result->scan_rst.bda, sizeof(tracker_record->mac_address));
     memcpy(tracker_record->adv_data, scan_result->scan_rst.ble_adv, copy_len);
 
-    tracker_record->distance_m = poom_ble_tracker_estimate_distance_m_((float)tracker_record->rssi);
+    tracker_record->distance_m = poom_ble_tracker_estimate_distance_m_(rssi_avg);
 
-    POOM_BLE_TRACKER_PRINTF_I("Tracker found: %s (%s), RSSI=%d dBm, distance=%.2f m",
+    POOM_BLE_TRACKER_PRINTF_I("Tracker found: %s (%s), RSSI=%d dBm (avg=%.1f), distance=%.2f m",
                               tracker_record->name,
                               tracker_record->vendor,
                               tracker_record->rssi,
+                              (double)rssi_avg,
                               tracker_record->distance_m);
 }
 
@@ -190,6 +284,7 @@ static void poom_ble_tracker_handle_gap_event_(esp_gap_ble_cb_event_t event_type
  * @param[in/out] arg Unused task argument.
  * @return esp_err_t
  */
+#if (POOM_BLE_TRACKER_SCAN_DURATION_SECONDS > 0)
 static void poom_ble_tracker_timer_task_(void *arg) {
     (void)arg;
 
@@ -200,7 +295,8 @@ static void poom_ble_tracker_timer_task_(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(1000U));
         s_scan_elapsed_seconds++;
 
-        if (s_scan_elapsed_seconds >= POOM_BLE_TRACKER_SCAN_DURATION_SECONDS) {
+        if ((POOM_BLE_TRACKER_SCAN_DURATION_SECONDS > 0) &&
+            (s_scan_elapsed_seconds >= POOM_BLE_TRACKER_SCAN_DURATION_SECONDS)) {
             POOM_BLE_TRACKER_PRINTF_I("Scan duration reached");
             poom_ble_tracker_stop();
             return;
@@ -211,6 +307,7 @@ static void poom_ble_tracker_timer_task_(void *arg) {
     POOM_BLE_TRACKER_PRINTF_I("Scanner timer task stopped");
     vTaskDelete(NULL);
 }
+#endif /* POOM_BLE_TRACKER_SCAN_DURATION_SECONDS > 0 */
 
 /**
  * @brief Register scan callback to receive tracker records.
@@ -233,6 +330,8 @@ void poom_ble_tracker_start(void) {
         return;
     }
 
+    poom_ble_tracker_rssi_filter_reset_();
+
     scan_params.remote_filter_service_uuid = poom_ble_gatt_client_default_service_uuid();
     scan_params.remote_filter_char_uuid = poom_ble_gatt_client_default_char_uuid();
     scan_params.notify_descr_uuid = poom_ble_gatt_client_default_notify_descr_uuid();
@@ -249,6 +348,7 @@ void poom_ble_tracker_start(void) {
     s_scanner_active = true;
     s_scan_elapsed_seconds = 0;
 
+#if (POOM_BLE_TRACKER_SCAN_DURATION_SECONDS > 0)
     if (s_scan_timer_task == NULL) {
         if (xTaskCreate(poom_ble_tracker_timer_task_,
                         "poom_ble_tracker_task",
@@ -262,6 +362,7 @@ void poom_ble_tracker_start(void) {
             return;
         }
     }
+#endif /* POOM_BLE_TRACKER_SCAN_DURATION_SECONDS > 0 */
 
     POOM_BLE_TRACKER_PRINTF_I("Scanner started");
 }
@@ -277,6 +378,7 @@ void poom_ble_tracker_stop(void) {
     s_scan_elapsed_seconds = 0;
 
     poom_ble_gatt_client_stop();
+    poom_ble_tracker_rssi_filter_reset_();
 
     if (s_scan_timer_task != NULL) {
         current_task = xTaskGetCurrentTaskHandle();

@@ -28,7 +28,7 @@ applications/poom_ble_keyboard
 - `void poom_ble_keyboard_set_keyboard_mode(bool enabled);`
 - `void poom_ble_keyboard_set_connection_callback(poom_ble_keyboard_connection_cb_t cb);`
 
-## Runtime Flow
+## Flow (Mermaid)
 
 ```mermaid
 flowchart TD
@@ -49,9 +49,6 @@ flowchart TD
     L --> M[Map to media action]
     M --> N[play pause prev next vol+ vol-]
 
-    O[BLE callback: connected] --> P[poom_led_rainbow_start]
-    Q[BLE callback: disconnected] --> R[poom_led_rainbow_stop]
-
     S[poom_ble_keyboard_stop] --> T[release_all + unsubscribe sbus]
 ```
 
@@ -65,9 +62,7 @@ The module uses logging macros controlled by:
 ## Dependencies
 
 - `poom_ble_hid`
-- `poom_led_rainbow`
 - `sbus`
 - `bt`
 - `nvs_flash`
-- `ws2812`
 - `board`

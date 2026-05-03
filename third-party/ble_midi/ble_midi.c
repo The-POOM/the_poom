@@ -32,6 +32,7 @@
 
 #include "../include/ble_midi.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +47,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
+#include "poom_sbus.h"
 
 // -----------------------------------------------------------------------------
 // Defaults (por si no están en el header)
@@ -66,6 +68,12 @@
 #define BLEMIDI_DEVICE_NAME "ESP32-BLE-MIDI"
 #endif
 // -----------------------------------------------------------------------------
+
+static bool s_is_connected = false;
+static bool s_is_started = false;
+static bool s_is_stopping = false;
+
+#define BLEMIDI_SBUS_TOPIC_CONNECTED "ble/midi/connected"
 
 /* =========================
  * Local log macros (printf)
@@ -269,6 +277,9 @@ void (*blemidi_callback_midi_message_received)(
 
     /* Flush periódico con esp_timer */
     static void flush_timer_cb(void *arg) {
+      if (!s_is_started || s_is_stopping) {
+        return;
+      }
       blemidi_outbuffer_flush(0);
     }
 
@@ -358,6 +369,16 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
 
 /* Flush de buffer (desde tarea/timer) */
 int32_t blemidi_outbuffer_flush(uint8_t blemidi_port) {
+  if (!s_is_started || s_is_stopping) {
+    blemidi_outbuffer_len[blemidi_port] = 0;
+    return 0;
+  }
+
+  if (!s_is_connected || (midi_profile_tab[PROFILE_APP_IDX].gatts_if == ESP_GATT_IF_NONE)) {
+    blemidi_outbuffer_len[blemidi_port] = 0;
+    return 0;
+  }
+
   if (blemidi_outbuffer_len[blemidi_port] > 0) {
     esp_ble_gatts_send_indicate(midi_profile_tab[PROFILE_APP_IDX].gatts_if,
                                 midi_profile_tab[PROFILE_APP_IDX].conn_id,
@@ -397,6 +418,8 @@ static int32_t blemidi_outbuffer_push(uint8_t blemidi_port,
 int32_t blemidi_send_message(uint8_t blemidi_port, uint8_t *stream, size_t len) {
   const size_t max_header_size = 2;
   if (blemidi_port >= BLEMIDI_NUM_PORTS) return -1;
+  if (!s_is_started || s_is_stopping) return -1;
+  if (!s_is_connected) return 0;
 
   if (len < (blemidi_mtu - max_header_size)) {
     blemidi_outbuffer_push(blemidi_port, stream, len);
@@ -608,6 +631,11 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
     case ESP_GATTS_CONNECT_EVT: {
       BLEMIDI_PRINTF_I("CONNECT conn_id=%d", param->connect.conn_id);
       midi_profile_tab[PROFILE_APP_IDX].conn_id = param->connect.conn_id;
+      s_is_connected = true;
+      {
+        const uint8_t connected = 1U;
+        (void)poom_sbus_publish(BLEMIDI_SBUS_TOPIC_CONNECTED, &connected, sizeof(connected), 0);
+      }
 
       esp_ble_conn_update_params_t conn_params = {0};
       memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
@@ -621,7 +649,14 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
 
     case ESP_GATTS_DISCONNECT_EVT:
       BLEMIDI_PRINTF_I("DISCONNECT reason=0x%x", param->disconnect.reason);
-      esp_ble_gap_start_advertising(&adv_params);
+      s_is_connected = false;
+      {
+        const uint8_t connected = 0U;
+        (void)poom_sbus_publish(BLEMIDI_SBUS_TOPIC_CONNECTED, &connected, sizeof(connected), 0);
+      }
+      if (s_is_started && !s_is_stopping) {
+        esp_ble_gap_start_advertising(&adv_params);
+      }
       break;
 
     case ESP_GATTS_CREAT_ATTR_TAB_EVT: {
@@ -671,31 +706,52 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
 int32_t blemidi_init(void *_callback_midi_message_received) {
   esp_err_t ret;
 
+  if (s_is_started) {
+    blemidi_callback_midi_message_received = _callback_midi_message_received;
+    return 0;
+  }
+
   blemidi_callback_midi_message_received = NULL;
 
-  ret = nvs_flash_init();
-  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    ESP_ERROR_CHECK(nvs_flash_erase());
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
     ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
   }
-  ESP_ERROR_CHECK(ret);
 
-  ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+    ESP_ERROR_CHECK(esp_bluedroid_init());
+  }
+  if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    ESP_ERROR_CHECK(esp_bluedroid_enable());
+  }
 
-  esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
-  ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
-  ESP_ERROR_CHECK(esp_bluedroid_init());
-  ESP_ERROR_CHECK(esp_bluedroid_enable());
+  // Note: callbacks/app registration are only safe to do once per boot.
+  // If the BLE stack is already running, we reuse the existing server.
+  static bool s_callbacks_registered = false;
+  if (!s_callbacks_registered) {
+    ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
+    ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
+    ESP_ERROR_CHECK(esp_ble_gatts_app_register(ESP_APP_ID));
+    s_callbacks_registered = true;
 
-  ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
-  ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
-  ESP_ERROR_CHECK(esp_ble_gatts_app_register(ESP_APP_ID));
-
-  esp_err_t local_mtu_ret = esp_ble_gatt_set_local_mtu(GATTS_MIDI_CHAR_VAL_LEN_MAX);
-  if (local_mtu_ret) {
-    BLEMIDI_PRINTF_E("set local MTU failed: %x", local_mtu_ret);
-    return -1;
+    esp_err_t local_mtu_ret = esp_ble_gatt_set_local_mtu(GATTS_MIDI_CHAR_VAL_LEN_MAX);
+    if (local_mtu_ret) {
+      BLEMIDI_PRINTF_E("set local MTU failed: %x", local_mtu_ret);
+      return -1;
+    }
+  } else {
+    // If we were previously stopped, resume advertising.
+    (void)esp_ble_gap_start_advertising(&adv_params);
   }
 
   for (uint32_t p = 0; p < BLEMIDI_NUM_PORTS; ++p) {
@@ -720,5 +776,45 @@ int32_t blemidi_init(void *_callback_midi_message_received) {
                                              (uint64_t)BLEMIDI_OUTBUFFER_FLUSH_MS * 1000ULL)); // us
   }
 
+  s_is_started = true;
   return 0;
+}
+
+bool blemidi_is_connected(void)
+{
+  return s_is_connected;
+}
+
+void blemidi_deinit(void)
+{
+  if (!s_is_started)
+  {
+    return;
+  }
+
+  s_is_stopping = true;
+
+  if (s_flush_timer != NULL)
+  {
+    (void)esp_timer_stop(s_flush_timer);
+    (void)esp_timer_delete(s_flush_timer);
+    s_flush_timer = NULL;
+  }
+
+  // Best-effort: stop advertising and disconnect.
+  (void)esp_ble_gap_stop_advertising();
+
+  if (s_is_connected && (midi_profile_tab[PROFILE_APP_IDX].gatts_if != ESP_GATT_IF_NONE))
+  {
+    (void)esp_ble_gatts_close(midi_profile_tab[PROFILE_APP_IDX].gatts_if,
+                              midi_profile_tab[PROFILE_APP_IDX].conn_id);
+  }
+  s_is_connected = false;
+
+  // Reset local state (keep gatts_if, it's assigned once at REG_EVT).
+  adv_config_done = 0;
+  midi_profile_tab[PROFILE_APP_IDX].conn_id = 0;
+  blemidi_callback_midi_message_received = NULL;
+  s_is_started = false;
+  s_is_stopping = false;
 }

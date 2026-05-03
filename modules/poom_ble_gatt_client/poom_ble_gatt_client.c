@@ -614,14 +614,13 @@ static void poom_ble_gatt_client_gap_event_handler_(esp_gap_ble_cb_event_t event
         {
             esp_ble_gap_cb_param_t *scan_result = param;
 
-            if (!s_search_by_name)
-            {
-                break;
-            }
-
             switch (scan_result->scan_rst.search_evt)
             {
                 case ESP_GAP_SEARCH_INQ_RES_EVT:
+                    if (!s_search_by_name)
+                    {
+                        break;
+                    }
                     adv_name = esp_ble_resolve_adv_data(scan_result->scan_rst.ble_adv,
                                                         ESP_BLE_AD_TYPE_NAME_CMPL,
                                                         &adv_name_len);
@@ -650,6 +649,12 @@ static void poom_ble_gatt_client_gap_event_handler_(esp_gap_ble_cb_event_t event
                     break;
 
                 case ESP_GAP_SEARCH_INQ_CMPL_EVT:
+                    POOM_BLE_GATT_CLIENT_PRINTF_D("scan window complete, restarting");
+                    if (!s_is_connected)
+                    {
+                        (void)esp_ble_gap_start_scanning(POOM_BLE_GATT_CLIENT_SCAN_DURATION_SEC_DEFAULT);
+                    }
+                    break;
                 default:
                     break;
             }

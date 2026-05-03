@@ -32,6 +32,11 @@ void poom_ble_keyboard_start(void);
 void poom_ble_keyboard_stop(void);
 
 /**
+ * @brief Returns current BLE connection state.
+ */
+bool poom_ble_keyboard_is_connected(void);
+
+/**
  * @brief Sets keyboard mode.
  *
  * @param[in] enabled true to send keyboard keys, false to send media keys.

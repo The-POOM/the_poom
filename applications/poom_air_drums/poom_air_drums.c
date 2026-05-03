@@ -5,7 +5,7 @@
  *
  * Air Drums application over BLE MIDI
  * - Reads IMU motion and triggers drum notes on MIDI channel 10
- * - Uses button topic to select drum note mapping
+ * - Exposes configurable note/threshold globals for menu-driven control
  *
  * Notes:
  * - BLE MIDI transport stays in ble_midi component
@@ -24,7 +24,6 @@
 
 #include "ble_midi.h"
 #include "poom_imu_stream.h"
-#include "poom_sbus.h"
 
 /**
  * @file poom_air_drums.c
@@ -69,18 +68,15 @@
 #define MIDI_PORT_INDEX                     0U
 #define MIDI_NOTE_ON_CH10_STATUS            0x99U
 #define MIDI_NOTE_OFF_CH10_STATUS           0x89U
+#define MIDI_NOTE_ON_CH1_STATUS             0x90U
+#define MIDI_NOTE_OFF_CH1_STATUS            0x80U
 #define MIDI_NOTE_OFF_VALUE                 0x00U
 #define MIDI_MESSAGE_SIZE                   3U
 #define MIDI_VELOCITY_MIN                   25U
 #define MIDI_VELOCITY_MAX                   127U
 
 /* Buttons */
-#define BUTTON_EVENT_SINGLE_CLICK           4U
-#define BUTTON_EVENT_DOUBLE_CLICK           5U
-#define BUTTON_TOPIC                        "input/button"
-#define BUTTON_SUBSCRIBER_ID                "poom_air_drums"
-
-/* Drum notes */
+/* Drum notes (defaults only; actual note is controlled by g_midi_note) */
 #define NOTE_KICK                           36U
 #define NOTE_SNARE                          38U
 #define NOTE_HH_CLOSED                      42U
@@ -97,9 +93,29 @@
 #define MOTION_NORM_MAX                     2.2f
 #define NORMALIZED_MIN                      0.0f
 #define NORMALIZED_MAX                      1.0f
-#define MIDI_HIT_THRESHOLD_ON               12U
+#define MIDI_HIT_THRESHOLD_ON_DEFAULT       12U
 #define MIDI_HIT_MIN_INTERVAL_MS            80U
 #define MIDI_HIT_NOTE_LEN_MS                35U
+#define MIDI_HIT_ARM_SAMPLES               3U
+#define MIDI_CALIB_SAMPLES                 50U
+#define MOTION_BASELINE_ALPHA              0.01f
+#define MOTION_BASELINE_QUIET_MARGIN       0.04f
+#define MOTION_RISE_MIN                    0.015f
+
+/* Melody mode */
+#define MELODY_GYRO_ON_DPS                  140.0f
+#define MELODY_GYRO_OFF_DPS                 70.0f
+#define MELODY_GYRO_VELOCITY_DPS_MAX        550.0f
+#define MELODY_OCTAVE_STEP_DPS              220.0f
+#define MELODY_OCTAVE_REARM_DPS             80.0f
+#define MELODY_OCTAVE_COOLDOWN_MS           250U
+#define MELODY_OCTAVE_MIN                   (-4)
+#define MELODY_OCTAVE_MAX                   (4)
+#define MELODY_DEGREE_STEP_DPS              180.0f
+#define MELODY_DEGREE_REARM_DPS             70.0f
+#define MELODY_DEGREE_COOLDOWN_MS           180U
+#define MELODY_DEGREE_MIN                   (0)
+#define MELODY_DEGREE_MAX                   (4)
 
 /* Task */
 #define POOM_AIR_DRUMS_TASK_DELAY_MS        10U
@@ -108,28 +124,39 @@
 #define POOM_AIR_DRUMS_TASK_PRIORITY        (tskIDLE_PRIORITY + 2)
 #define POOM_AIR_DRUMS_TASK_NAME            "poom_air_drums"
 
-typedef struct
-{
-    uint8_t button;
-    uint8_t event;
-    uint32_t ts_ms;
-} poom_air_drums_button_event_t;
-
 /* =========================
  * Local state
  * ========================= */
-static const uint8_t k_button_note_map[] = {
-    NOTE_KICK, NOTE_SNARE, NOTE_HH_CLOSED, NOTE_HH_OPEN, NOTE_CRASH, NOTE_LOW_TOM
-};
+uint8_t g_midi_note = NOTE_CRASH;
+uint8_t g_hit_threshold = MIDI_HIT_THRESHOLD_ON_DEFAULT;
+uint8_t g_midi_mode = POOM_MIDI_MODE_DRUM;
+uint8_t g_midi_scale = POOM_MIDI_SCALE_PENTATONIC_MAJOR;
 
-static uint8_t s_selected_note = NOTE_CRASH;
 static uint8_t s_active_note = NOTE_KICK;
 static bool s_hit_active = false;
-static bool s_buttons_subscribed = false;
 static bool s_started = false;
+static volatile bool s_stop_requested = false;
 static TickType_t s_last_hit_tick = 0;
 static TickType_t s_note_on_tick = 0;
 static TaskHandle_t s_poom_air_drums_task = NULL;
+static uint8_t s_arm_count = 0U;
+static float s_motion_baseline = 0.0f;
+static float s_calib_motion_sum = 0.0f;
+static uint16_t s_calib_count = 0U;
+static bool s_calibrated = false;
+static float s_prev_motion_hp = 0.0f;
+static bool s_melody_note_active = false;
+static uint8_t s_melody_active_note = 60U;
+static int8_t s_melody_octave = 0;
+static bool s_melody_octave_armed = true;
+static TickType_t s_melody_last_octave_step_tick = 0;
+static int8_t s_melody_degree = 0;
+static bool s_melody_degree_armed = true;
+static TickType_t s_melody_last_degree_step_tick = 0;
+static uint8_t s_prev_mode = POOM_MIDI_MODE_DRUM;
+
+static const int8_t k_pentatonic_major_intervals_[5] = {0, 2, 4, 7, 9};
+static const int8_t k_pentatonic_minor_intervals_[5] = {0, 3, 5, 7, 10};
 
 /* =========================
  * Local helpers
@@ -158,17 +185,6 @@ static inline float poom_air_drums_clampf_(float value, float min_value, float m
 }
 
 /**
- * @brief Checks whether a button event is valid for note selection.
- *
- * @param event Button event ID.
- * @return true if event is single or double click.
- */
-static inline bool poom_air_drums_is_note_select_event_(uint8_t event)
-{
-    return (event == BUTTON_EVENT_SINGLE_CLICK) || (event == BUTTON_EVENT_DOUBLE_CLICK);
-}
-
-/**
  * @brief Sends MIDI NOTE ON on channel 10.
  *
  * @param note MIDI note.
@@ -191,34 +207,176 @@ static inline void poom_air_drums_midi_note_off_ch10_(uint8_t note)
     (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
 }
 
-/**
- * @brief Handles button events used to select the active drum note.
- *
- * @param msg Incoming SBUS message.
- * @param user User context (unused).
- */
-static void poom_air_drums_button_event_cb_(const poom_sbus_msg_t *msg, void *user)
+static inline void poom_air_drums_midi_note_on_ch1_(uint8_t note, uint8_t velocity)
 {
-    (void)user;
-    if (msg->len < sizeof(poom_air_drums_button_event_t))
+    uint8_t msg[MIDI_MESSAGE_SIZE] = {MIDI_NOTE_ON_CH1_STATUS, note, velocity};
+    (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
+}
+
+static inline void poom_air_drums_midi_note_off_ch1_(uint8_t note)
+{
+    uint8_t msg[MIDI_MESSAGE_SIZE] = {MIDI_NOTE_OFF_CH1_STATUS, note, MIDI_NOTE_OFF_VALUE};
+    (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
+}
+
+static inline uint8_t poom_air_drums_clamp_u8_(int value, int min_value, int max_value)
+{
+    if (value < min_value)
     {
-        POOM_AIR_DRUMS_PRINTF_W("input/button payload too short: len=%u", (unsigned)msg->len);
-        return;
+        return (uint8_t)min_value;
+    }
+    if (value > max_value)
+    {
+        return (uint8_t)max_value;
+    }
+    return (uint8_t)value;
+}
+
+static void poom_air_drums_melody_reset_(void)
+{
+    s_melody_note_active = false;
+    s_melody_active_note = 60U;
+    s_melody_octave = 0;
+    s_melody_octave_armed = true;
+    s_melody_last_octave_step_tick = 0;
+    s_melody_degree = 0;
+    s_melody_degree_armed = true;
+    s_melody_last_degree_step_tick = 0;
+}
+
+static inline uint8_t poom_air_drums_scale_interval_(uint8_t scale, uint8_t degree)
+{
+    const uint8_t idx = (degree > 4U) ? 4U : degree;
+    if (scale == POOM_MIDI_SCALE_PENTATONIC_MINOR)
+    {
+        return (uint8_t)k_pentatonic_minor_intervals_[idx];
+    }
+    return (uint8_t)k_pentatonic_major_intervals_[idx];
+}
+
+static uint8_t poom_air_drums_melody_note_(void)
+{
+    const int tonic = (int)g_midi_note;
+    const int interval = (int)poom_air_drums_scale_interval_(g_midi_scale, (uint8_t)s_melody_degree);
+    const int note = tonic + interval + ((int)s_melody_octave * 12);
+    return poom_air_drums_clamp_u8_(note, 0, 127);
+}
+
+static uint8_t poom_air_drums_melody_velocity_(float gyro_dps_norm)
+{
+    float v = gyro_dps_norm / MELODY_GYRO_VELOCITY_DPS_MAX;
+    v = poom_air_drums_clampf_(v, 0.0f, 1.0f);
+    uint8_t vel = (uint8_t)(v * (float)MIDI_VELOCITY_MAX);
+    if (vel < MIDI_VELOCITY_MIN)
+    {
+        vel = MIDI_VELOCITY_MIN;
+    }
+    if (vel > MIDI_VELOCITY_MAX)
+    {
+        vel = MIDI_VELOCITY_MAX;
+    }
+    return vel;
+}
+
+static void poom_air_drums_melody_step_(float gx_dps, float gy_dps, float gz_dps)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    const float gyro_norm = sqrtf(gx_dps * gx_dps + gy_dps * gy_dps + gz_dps * gz_dps);
+
+    if (!s_melody_octave_armed)
+    {
+        if (fabsf(gy_dps) <= MELODY_OCTAVE_REARM_DPS)
+        {
+            s_melody_octave_armed = true;
+        }
+    }
+    else
+    {
+        if ((now - s_melody_last_octave_step_tick) >= pdMS_TO_TICKS(MELODY_OCTAVE_COOLDOWN_MS))
+        {
+            if (gy_dps >= MELODY_OCTAVE_STEP_DPS)
+            {
+                if (s_melody_octave < MELODY_OCTAVE_MAX)
+                {
+                    s_melody_octave++;
+                }
+                s_melody_octave_armed = false;
+                s_melody_last_octave_step_tick = now;
+            }
+            else if (gy_dps <= -MELODY_OCTAVE_STEP_DPS)
+            {
+                if (s_melody_octave > MELODY_OCTAVE_MIN)
+                {
+                    s_melody_octave--;
+                }
+                s_melody_octave_armed = false;
+                s_melody_last_octave_step_tick = now;
+            }
+        }
     }
 
-    poom_air_drums_button_event_t ev;
-    memcpy(&ev, msg->data, sizeof(ev));
-
-    if (poom_air_drums_is_note_select_event_(ev.event) && (ev.button < ARRAY_LEN(k_button_note_map)))
+    // Scale degree change driven by X axis (roll). Require rearm + cooldown.
+    if (!s_melody_degree_armed)
     {
-        s_selected_note = k_button_note_map[ev.button];
+        if (fabsf(gx_dps) <= MELODY_DEGREE_REARM_DPS)
+        {
+            s_melody_degree_armed = true;
+        }
+    }
+    else
+    {
+        if ((now - s_melody_last_degree_step_tick) >= pdMS_TO_TICKS(MELODY_DEGREE_COOLDOWN_MS))
+        {
+            if (gx_dps >= MELODY_DEGREE_STEP_DPS)
+            {
+                if (s_melody_degree < MELODY_DEGREE_MAX)
+                {
+                    s_melody_degree++;
+                }
+                s_melody_degree_armed = false;
+                s_melody_last_degree_step_tick = now;
+            }
+            else if (gx_dps <= -MELODY_DEGREE_STEP_DPS)
+            {
+                if (s_melody_degree > MELODY_DEGREE_MIN)
+                {
+                    s_melody_degree--;
+                }
+                s_melody_degree_armed = false;
+                s_melody_last_degree_step_tick = now;
+            }
+        }
     }
 
-    POOM_AIR_DRUMS_PRINTF_D("[%s] b=%u e=%u t=%ums",
-                            msg->topic,
-                            ev.button,
-                            ev.event,
-                            (unsigned)ev.ts_ms);
+    const bool want_note_on = (gyro_norm >= MELODY_GYRO_ON_DPS) && blemidi_is_connected();
+    const bool want_note_off = (gyro_norm <= MELODY_GYRO_OFF_DPS) || !blemidi_is_connected();
+    const uint8_t note = poom_air_drums_melody_note_();
+
+    if (s_melody_note_active)
+    {
+        if (want_note_off)
+        {
+            poom_air_drums_midi_note_off_ch1_(s_melody_active_note);
+            s_melody_note_active = false;
+        }
+        else if (note != s_melody_active_note)
+        {
+            poom_air_drums_midi_note_off_ch1_(s_melody_active_note);
+            s_melody_active_note = note;
+            poom_air_drums_midi_note_on_ch1_(note, MIDI_VELOCITY_MIN);
+        }
+    }
+    else
+    {
+        if (want_note_on)
+        {
+            s_melody_active_note = note;
+            const uint8_t vel = poom_air_drums_melody_velocity_(gyro_norm);
+            poom_air_drums_midi_note_on_ch1_(note, vel);
+            s_melody_note_active = true;
+        }
+    }
 }
 
 /**
@@ -251,36 +409,6 @@ static void poom_air_drums_midi_rx_cb_(uint8_t blemidi_port,
 }
 
 /**
- * @brief Subscribes to button topic if not already subscribed.
- */
-static void poom_air_drums_buttons_subscribe_(void)
-{
-    if (!s_buttons_subscribed)
-    {
-        if (poom_sbus_subscribe_cb(BUTTON_TOPIC, poom_air_drums_button_event_cb_, (void *)BUTTON_SUBSCRIBER_ID))
-        {
-            s_buttons_subscribed = true;
-        }
-        else
-        {
-            POOM_AIR_DRUMS_PRINTF_W("failed to subscribe to %s", BUTTON_TOPIC);
-        }
-    }
-}
-
-/**
- * @brief Unsubscribes from button topic if currently subscribed.
- */
-static void poom_air_drums_buttons_unsubscribe_(void)
-{
-    if (s_buttons_subscribed)
-    {
-        (void)poom_sbus_unsubscribe_cb(BUTTON_TOPIC, poom_air_drums_button_event_cb_, (void *)BUTTON_SUBSCRIBER_ID);
-        s_buttons_subscribed = false;
-    }
-}
-
-/**
  * @brief Executes one Air Drums processing step.
  *
  * Reads IMU data, computes motion intensity, and emits NOTE ON/OFF events
@@ -296,6 +424,15 @@ static void poom_air_drums_midi_step_(bool trigger_pressed)
         return;
     }
 
+    if (g_midi_mode > POOM_MIDI_MODE_MELODY)
+    {
+        g_midi_mode = POOM_MIDI_MODE_DRUM;
+    }
+    if (g_midi_scale > POOM_MIDI_SCALE_PENTATONIC_MINOR)
+    {
+        g_midi_scale = POOM_MIDI_SCALE_PENTATONIC_MAJOR;
+    }
+
     float ax = d.acceleration_mg[0] / ACC_MG_TO_G;
     float ay = d.acceleration_mg[1] / ACC_MG_TO_G;
     float az = d.acceleration_mg[2] / ACC_MG_TO_G;
@@ -303,10 +440,64 @@ static void poom_air_drums_midi_step_(bool trigger_pressed)
     float gy = d.angular_rate_mdps[1] / GYRO_MDPS_TO_DPS;
     float gz = d.angular_rate_mdps[2] / GYRO_MDPS_TO_DPS;
 
+    if (g_midi_mode != s_prev_mode)
+    {
+        if (s_hit_active)
+        {
+            poom_air_drums_midi_note_off_ch10_(s_active_note);
+            s_hit_active = false;
+        }
+        if (s_melody_note_active)
+        {
+            poom_air_drums_midi_note_off_ch1_(s_melody_active_note);
+            s_melody_note_active = false;
+        }
+        s_prev_mode = g_midi_mode;
+    }
+
+    if (g_midi_mode == POOM_MIDI_MODE_MELODY)
+    {
+        poom_air_drums_melody_step_(gx, gy, gz);
+        return;
+    }
+
     float a_total = sqrtf(ax * ax + ay * ay + az * az);
     float a_dynamic = fabsf(a_total - G_BASELINE);
     float gyro_dynamic = sqrtf(gx * gx + gy * gy + gz * gz) / GYRO_DYNAMIC_SCALE_DPS;
-    float motion = a_dynamic + gyro_dynamic;
+    float motion_raw = a_dynamic + gyro_dynamic;
+
+    if (!s_calibrated)
+    {
+        s_calib_motion_sum += motion_raw;
+        s_calib_count++;
+        if (s_calib_count >= MIDI_CALIB_SAMPLES)
+        {
+            s_motion_baseline = s_calib_motion_sum / (float)s_calib_count;
+            s_calibrated = true;
+            s_prev_motion_hp = 0.0f;
+            POOM_AIR_DRUMS_PRINTF_I("calibrated baseline=%.3f (%u samples)",
+                                    (double)s_motion_baseline,
+                                    (unsigned)s_calib_count);
+        }
+        return;
+    }
+
+    if (!s_hit_active)
+    {
+        if (motion_raw <= (s_motion_baseline + MOTION_BASELINE_QUIET_MARGIN))
+        {
+            s_motion_baseline = ((1.0f - MOTION_BASELINE_ALPHA) * s_motion_baseline) +
+                                (MOTION_BASELINE_ALPHA * motion_raw);
+        }
+    }
+
+    float motion = motion_raw - s_motion_baseline;
+    if (motion < 0.0f)
+    {
+        motion = 0.0f;
+    }
+    float motion_rise = motion - s_prev_motion_hp;
+    s_prev_motion_hp = motion;
 
     float norm = (motion - MOTION_NORM_MIN) / (MOTION_NORM_MAX - MOTION_NORM_MIN);
     uint8_t velocity = (uint8_t)(poom_air_drums_clampf_(norm, NORMALIZED_MIN, NORMALIZED_MAX) *
@@ -325,8 +516,27 @@ static void poom_air_drums_midi_step_(bool trigger_pressed)
         return;
     }
 
+    if (velocity >= g_hit_threshold)
+    {
+        if (motion_rise >= MOTION_RISE_MIN)
+        {
+            if (s_arm_count < MIDI_HIT_ARM_SAMPLES)
+            {
+                s_arm_count++;
+            }
+        }
+        else
+        {
+            s_arm_count = 0U;
+        }
+    }
+    else
+    {
+        s_arm_count = 0U;
+    }
+
     if (!s_hit_active &&
-        velocity >= MIDI_HIT_THRESHOLD_ON &&
+        (s_arm_count >= MIDI_HIT_ARM_SAMPLES) &&
         ((now - s_last_hit_tick) >= pdMS_TO_TICKS(MIDI_HIT_MIN_INTERVAL_MS)))
     {
         uint8_t midi_vel = velocity;
@@ -339,16 +549,18 @@ static void poom_air_drums_midi_step_(bool trigger_pressed)
             midi_vel = MIDI_VELOCITY_MAX;
         }
 
-        poom_air_drums_midi_note_on_ch10_(s_selected_note, midi_vel);
-        s_active_note = s_selected_note;
+        const uint8_t note = g_midi_note;
+        s_active_note = note;
+        poom_air_drums_midi_note_on_ch10_(note, midi_vel);
         s_hit_active = true;
         s_note_on_tick = now;
         s_last_hit_tick = now;
+        s_arm_count = 0U;
 
         POOM_AIR_DRUMS_PRINTF_I("HIT: motion=%.2f vel=%u note=%u",
                                 motion,
                                 (unsigned)midi_vel,
-                                (unsigned)s_selected_note);
+                                (unsigned)note);
     }
 }
 
@@ -362,10 +574,17 @@ static void poom_air_drums_task_(void *arg)
     (void)arg;
     for (;;)
     {
+        if (s_stop_requested)
+        {
+            break;
+        }
         bool trigger = true; /* TODO: bind to enable button/gesture */
         poom_air_drums_midi_step_(trigger);
         vTaskDelay(pdMS_TO_TICKS(POOM_AIR_DRUMS_TASK_DELAY_MS));
     }
+
+    s_poom_air_drums_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /**
@@ -411,6 +630,7 @@ void poom_air_drums_start(void)
         return;
     }
     s_started = true;
+    s_stop_requested = false;
 
     int status = blemidi_init((void *)poom_air_drums_midi_rx_cb_);
     poom_imu_stream_init();
@@ -424,7 +644,14 @@ void poom_air_drums_start(void)
         POOM_AIR_DRUMS_PRINTF_I("BLE MIDI initialized");
     }
 
-    poom_air_drums_buttons_subscribe_();
+    s_arm_count = 0U;
+    s_motion_baseline = 0.0f;
+    s_calib_motion_sum = 0.0f;
+    s_calib_count = 0U;
+    s_calibrated = false;
+    poom_air_drums_melody_reset_();
+    s_prev_mode = g_midi_mode;
+
     poom_air_drums_task_start_();
 }
 
@@ -440,12 +667,7 @@ void poom_air_drums_stop(void)
         return;
     }
 
-    if (s_poom_air_drums_task != NULL)
-    {
-        vTaskDelete(s_poom_air_drums_task);
-        s_poom_air_drums_task = NULL;
-        POOM_AIR_DRUMS_PRINTF_I("poom_air_drums task deleted");
-    }
+    s_stop_requested = true;
 
     if (s_hit_active)
     {
@@ -453,6 +675,18 @@ void poom_air_drums_stop(void)
         s_hit_active = false;
     }
 
-    poom_air_drums_buttons_unsubscribe_();
+    if (s_melody_note_active)
+    {
+        poom_air_drums_midi_note_off_ch1_(s_melody_active_note);
+        s_melody_note_active = false;
+    }
+
+    s_arm_count = 0U;
+    s_calibrated = false;
+    s_calib_motion_sum = 0.0f;
+    s_calib_count = 0U;
     s_started = false;
+
+    // Shut down BLE MIDI so it doesn't remain advertising/connected after exiting the menu.
+    blemidi_deinit();
 }

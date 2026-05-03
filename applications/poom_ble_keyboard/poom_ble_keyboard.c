@@ -8,7 +8,6 @@
 #include <string.h>
 
 #include "poom_ble_hid.h"
-#include "poom_led_rainbow.h"
 #include "poom_sbus.h"
 
 #if POOM_BLE_KEYBOARD_ENABLE_LOG
@@ -155,12 +154,10 @@ static void poom_ble_keyboard_on_connection_changed_(bool connected)
 
     if (connected)
     {
-        poom_led_rainbow_start();
         POOM_BLE_KEYBOARD_PRINTF_I("BLE HID connected");
     }
     else
     {
-        poom_led_rainbow_stop();
         POOM_BLE_KEYBOARD_PRINTF_I("BLE HID disconnected");
     }
 
@@ -190,6 +187,11 @@ void poom_ble_keyboard_start(void)
 
     poom_ble_hid_set_connection_callback(poom_ble_keyboard_on_connection_changed_);
     poom_ble_hid_start();
+    if (!poom_ble_hid_is_started())
+    {
+        POOM_BLE_KEYBOARD_PRINTF_E("poom_ble_hid_start failed");
+        return;
+    }
     poom_sbus_subscribe_cb("input/button", poom_ble_keyboard_on_button_event_, "poom_ble_keyboard");
 
     s_is_started = true;
@@ -205,12 +207,19 @@ void poom_ble_keyboard_stop(void)
 
     s_is_started = false;
     s_is_connected = false;
+    s_connection_cb = NULL;
 
-    poom_led_rainbow_stop();
     poom_ble_hid_key_release_all();
     poom_sbus_unsubscribe_cb("input/button", poom_ble_keyboard_on_button_event_, "poom_ble_keyboard");
 
+    poom_ble_hid_stop();
+
     POOM_BLE_KEYBOARD_PRINTF_I("module stopped");
+}
+
+bool poom_ble_keyboard_is_connected(void)
+{
+    return s_is_connected;
 }
 
 void poom_ble_keyboard_set_keyboard_mode(bool enabled)

@@ -41,6 +41,17 @@ void poom_wifi_attacks_handle(
 void poom_wifi_attacks_stop(void);
 
 /**
+ * @brief Stops all Wi-Fi attack services and frees resources.
+ *
+ * This is a stronger stop than `poom_wifi_attacks_stop()`:
+ * - Signals attack tasks to exit and waits briefly
+ * - Stops captive portal (if running)
+ * - Disables promiscuous mode
+ * - Deinitializes Wi-Fi control
+ */
+void poom_wifi_attacks_stop_all(void);
+
+/**
  * @brief Returns the number of supported attack types.
  * @param[in,out] none Not used.
  * @return int

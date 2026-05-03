@@ -32,6 +32,16 @@ void poom_ble_hid_set_connection_callback(hid_event_callback_f callback);
 void poom_ble_hid_start(void);
 
 /**
+ * @brief Stop BLE HID stack and advertising.
+ */
+void poom_ble_hid_stop(void);
+
+/**
+ * @brief Returns true if BLE HID is started.
+ */
+bool poom_ble_hid_is_started(void);
+
+/**
  * @brief Send consumer volume-up key state.
  * @param[in] press True to press, false to release.
  * @return esp_err_t
