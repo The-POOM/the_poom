@@ -31,7 +31,7 @@ POOM is delivered as an ESP-IDF firmware project with a modular architecture and
 
 ### Beast Mode
 
-- Wi-Fi scan, deauth testing (authorized), karma, captive/evil twin, SSID spam, DIAL, ARP spoofing.
+- Wi-Fi scan, deauth testing (authorized), karma, captive/evil twin, SSID spam, ARP spoofing.
 -  BLE spam and BLE proximity/tag tracking.
 -  Wi-Fi, BLE, Zigbee, and 802.15.4/Thread capture paths. U
 -  ART and host export pipelines for offline analysis.
