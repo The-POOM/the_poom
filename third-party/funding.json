@@ -6,7 +6,7 @@
 "role": "owner",
 "name": "POOM",
 "email": "[jupiter@stellar-iot.com](mailto:jupiter@stellar-iot.com)",
-"description": "POOM develops open-source edge hardware and software for real-time signal processing, embedded security workflows, NFC experimentation, and local anomaly detection. The current POOM repository provides ESP-IDF firmware and tooling for ESP32-C5 and ESP32-C6-based edge hardware. We are now working on POOM XL Linux support, including complete migration of the existing POOM NFC libraries to a Linux-compatible stack and development of local edge AI anomaly detection.",
+"description": "POOM develops open-source edge hardware and software for real-time signal processing, embedded security workflows, NFC experimentation, and local anomaly detection. The current POOM repository provides ESP-IDF firmware and tooling for ESP32-C5-based edge hardware. We are now working on POOM XL Linux support, including complete migration of the existing POOM NFC libraries to a Linux-compatible stack and development of local edge AI anomaly detection.",
 "webpageUrl": {
 "url": "https://github.com/The-POOM/the_poom"
 }
@@ -15,7 +15,7 @@
 {
 "guid": "poom-edge-ai",
 "name": "POOM Edge AI Anomaly Detection",
-"description": "POOM Edge AI Anomaly Detection extends the existing POOM open-source firmware project toward POOM XL, a Linux-based edge AI stack for real-time signal processing and anomaly detection. The project will migrate POOM's NFC libraries completely to Linux, build a local signal and network metadata pipeline, implement lightweight edge AI models for detecting abnormal patterns on-device, and generate privacy-preserving alerts and reports without centralizing raw captures. Funding will support Linux migration work, NFC library portability, real-time metadata processing, edge AI anomaly detection, documentation, tests, and reproducible public releases.",
+"description": "POOM Edge AI Anomaly Detection extends the existing ESP32-C5-based POOM open-source firmware project toward POOM XL, a Linux-based edge AI stack for real-time signal processing and anomaly detection. The project will migrate POOM's NFC libraries completely to Linux, build a local signal and network metadata pipeline, implement lightweight edge AI models for detecting abnormal patterns on-device, and generate privacy-preserving alerts and reports without centralizing raw captures. Funding will support Linux migration work, NFC library portability, real-time metadata processing, edge AI anomaly detection, documentation, tests, and reproducible public releases.",
 "webpageUrl": {
 "url": "https://github.com/The-POOM/the_poom"
 },
@@ -66,3 +66,4 @@
 ]
 }
 }
+
