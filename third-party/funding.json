@@ -23,9 +23,7 @@
 "url": "https://github.com/The-POOM/the_poom"
 },
 "licenses": [
-"spdx:Apache-2.0",
-"spdx:CERN-OHL-S-2.0",
-"spdx:CC-BY-SA-4.0"
+"spdx:Apache-2.0"
 ],
 "tags": [
 "edge-ai",
