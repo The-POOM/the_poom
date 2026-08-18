@@ -1,4 +1,4 @@
-# mdns
+# mDNS Service
 
 [![Component Registry](https://components.espressif.com/components/espressif/mdns/badge.svg)](https://components.espressif.com/components/espressif/mdns)
 

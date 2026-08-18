@@ -18,7 +18,7 @@ set(modules_src "")
  endforeach()
 
 
-idf_component_register(SRCS "${modules_src}"
+idf_component_register(SRCS "odrone_id.cpp" "${modules_src}"
                     INCLUDE_DIRS "${headers_dirs}"
                     PRIV_REQUIRES esp_wifi nvs_flash bt)
 

@@ -69,6 +69,10 @@ static int oled_transport_get_page_index_(const oled_driver_t *dev, int page)
  */
 static void oled_transport_build_page_setup_cmd_(int page, int seg, uint8_t *cmd, size_t cmd_len)
 {
+#ifdef CFG_SH1106
+    seg = seg + 2;  // SH1106 requires column offset
+#endif
+
     uint8_t column_low = (uint8_t)seg & OLED_COLUMN_LOW_MASK;
     uint8_t column_high = ((uint8_t)seg >> OLED_COLUMN_HIGH_SHIFT) & OLED_COLUMN_HIGH_MASK;
 

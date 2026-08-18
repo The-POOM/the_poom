@@ -78,7 +78,7 @@ Configurable in `dns_server.h`:
 - `DNS_SERVER_LOG_ENABLED`
 - `DNS_SERVER_DEBUG_LOG_ENABLED`
 
-## Notes
+## Notes / Limits
 
 - Name compression pointers inside `QNAME` are not supported.
 - Only IPv4 A records are answered.

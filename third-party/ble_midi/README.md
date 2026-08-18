@@ -24,7 +24,7 @@ From `components/ble_midi/CMakeLists.txt`:
 - `bt`
 - `nvs_flash`
 
-## Purpose
+## What It Does
 
 - Initializes BLE controller + Bluedroid + GATTS/GAP for a BLE MIDI service.
 - Advertises a BLE MIDI service UUID.
@@ -47,7 +47,7 @@ Current implementation details:
 - `blemidi_receive_packet_callback_for_debugging()` and `blemidi_tick()` are
   declared in the header but are not implemented in `ble_midi.c`.
 
-## Usage
+## Basic Usage
 
 ```c
 #include "ble_midi.h"
@@ -93,7 +93,7 @@ In `ble_midi.c`:
 - `BLEMIDI_LOG_ENABLED` controls info/warn/error `printf` logs.
 - `BLEMIDI_DEBUG_LOG_ENABLED` enables debug-level logs.
 
-## Notes
+## Notes and Limitations
 
 - There is no public `blemidi_stop()` API in this component at the moment.
 - Outgoing buffering is single-port by default (`BLEMIDI_NUM_PORTS = 1`).
