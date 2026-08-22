@@ -100,6 +100,9 @@ static int32_t poom_imu_platform_write_(void *handle, uint8_t reg, const uint8_t
         return -1;
     }
 
+    i2c_lock();
+    i2c_start();
+
     uint8_t dev_addr7 = *(uint8_t *)handle;
     dev_addr7 = poom_imu_i2c_norm_addr7_(dev_addr7);
 
@@ -107,19 +110,19 @@ static int32_t poom_imu_platform_write_(void *handle, uint8_t reg, const uint8_t
     if (ret != POOM_IMU_I2C_OK)
     {
         POOM_IMU_PRINTF_D("WRITE reg 0x%02X failed (%u)", (unsigned)reg, (unsigned)ret);
+        i2c_unlock();
         return -1;
     }
 
-    if (len > 0U)
+    ret = i2c_tx_dev(dev_addr7, bufp, len, true, true);
+    if (ret != POOM_IMU_I2C_OK)
     {
-        ret = i2c_tx_dev(dev_addr7, bufp, len, true, true);
-        if (ret != POOM_IMU_I2C_OK)
-        {
-            POOM_IMU_PRINTF_D("WRITE data len=%u failed (%u)", (unsigned)len, (unsigned)ret);
-            return -1;
-        }
+        POOM_IMU_PRINTF_D("WRITE data len=%u failed (%u)", (unsigned)len, (unsigned)ret);
+        i2c_unlock();
+        return -1;
     }
 
+    i2c_unlock();
     return 0;
 }
 
@@ -139,6 +142,9 @@ static int32_t poom_imu_platform_read_(void *handle, uint8_t reg, uint8_t *bufp,
         return -1;
     }
 
+    i2c_lock();
+    i2c_start();
+
     uint8_t dev_addr7 = *(uint8_t *)handle;
     dev_addr7 = poom_imu_i2c_norm_addr7_(dev_addr7);
 
@@ -146,6 +152,7 @@ static int32_t poom_imu_platform_read_(void *handle, uint8_t reg, uint8_t *bufp,
     if (ret != POOM_IMU_I2C_OK)
     {
         POOM_IMU_PRINTF_D("READ reg 0x%02X failed (%u)", (unsigned)reg, (unsigned)ret);
+        i2c_unlock();
         return -1;
     }
 
@@ -153,9 +160,11 @@ static int32_t poom_imu_platform_read_(void *handle, uint8_t reg, uint8_t *bufp,
     if (ret != POOM_IMU_I2C_OK)
     {
         POOM_IMU_PRINTF_D("READ len=%u failed (%u)", (unsigned)len, (unsigned)ret);
+        i2c_unlock();
         return -1;
     }
 
+    i2c_unlock();
     return 0;
 }
 

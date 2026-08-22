@@ -50,7 +50,7 @@ void poom_ble_spam_app_stop(void);
 - `poom_ble_spam_app_stop()`:
   - stops rotation and sends an advertising stop request.
 
-## Logging
+## Logging (printf)
 
 Configurable in `poom_ble_spam.h`:
 

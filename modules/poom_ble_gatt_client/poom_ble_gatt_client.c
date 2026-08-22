@@ -729,7 +729,7 @@ static void poom_ble_gatt_client_gattc_event_handler_(esp_gattc_cb_event_t event
     }
 }
 
-void poom_ble_gatt_client_start(void)
+esp_err_t poom_ble_gatt_client_start(void)
 {
     esp_err_t ret;
     esp_bt_controller_status_t ctrl_status;
@@ -737,7 +737,7 @@ void poom_ble_gatt_client_start(void)
 
     if (s_started)
     {
-        return;
+        return ESP_OK;
     }
 
     if (!s_scan_params_set)
@@ -759,7 +759,7 @@ void poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("controller init failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -770,7 +770,7 @@ void poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("controller enable failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -782,7 +782,7 @@ void poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("bluedroid init failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -793,7 +793,7 @@ void poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("bluedroid enable failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -801,21 +801,21 @@ void poom_ble_gatt_client_start(void)
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("gap register failed: 0x%x", ret);
-        return;
+        return ret;
     }
 
     ret = esp_ble_gattc_register_callback(poom_ble_gatt_client_gattc_event_handler_);
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("gattc register failed: 0x%x", ret);
-        return;
+        return ret;
     }
 
     ret = esp_ble_gattc_app_register(POOM_BLE_GATT_CLIENT_PROFILE_ID);
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("gattc app register failed: 0x%x", ret);
-        return;
+        return ret;
     }
 
     ret = esp_ble_gatt_set_local_mtu(POOM_BLE_GATT_CLIENT_LOCAL_MTU);
@@ -826,17 +826,19 @@ void poom_ble_gatt_client_start(void)
 
     s_started = true;
     POOM_BLE_GATT_CLIENT_PRINTF_I("started");
+    return ESP_OK;
 }
 
-void poom_ble_gatt_client_stop(void)
+esp_err_t poom_ble_gatt_client_stop(void)
 {
+    esp_err_t result = ESP_OK;
     esp_err_t ret;
     esp_bt_controller_status_t ctrl_status;
     esp_bluedroid_status_t bluedroid_status;
 
     if (!s_started)
     {
-        return;
+        return ESP_OK;
     }
 
     s_is_connected = false;
@@ -849,6 +851,10 @@ void poom_ble_gatt_client_stop(void)
         if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE))
         {
             POOM_BLE_GATT_CLIENT_PRINTF_W("bluedroid disable failed: 0x%x", ret);
+            if (result == ESP_OK)
+            {
+                result = ret;
+            }
         }
     }
 
@@ -859,6 +865,10 @@ void poom_ble_gatt_client_stop(void)
         if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE))
         {
             POOM_BLE_GATT_CLIENT_PRINTF_W("bluedroid deinit failed: 0x%x", ret);
+            if (result == ESP_OK)
+            {
+                result = ret;
+            }
         }
     }
 
@@ -869,6 +879,10 @@ void poom_ble_gatt_client_stop(void)
         if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE))
         {
             POOM_BLE_GATT_CLIENT_PRINTF_W("controller disable failed: 0x%x", ret);
+            if (result == ESP_OK)
+            {
+                result = ret;
+            }
         }
     }
 
@@ -879,6 +893,10 @@ void poom_ble_gatt_client_stop(void)
         if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE))
         {
             POOM_BLE_GATT_CLIENT_PRINTF_W("controller deinit failed: 0x%x", ret);
+            if (result == ESP_OK)
+            {
+                result = ret;
+            }
         }
     }
 
@@ -886,6 +904,10 @@ void poom_ble_gatt_client_stop(void)
     if ((ret != ESP_OK) && (ret != ESP_ERR_INVALID_STATE))
     {
         POOM_BLE_GATT_CLIENT_PRINTF_W("controller mem release ble failed: 0x%x", ret);
+        if (result == ESP_OK)
+        {
+            result = ret;
+        }
     }
 
     s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].gattc_if = ESP_GATT_IF_NONE;
@@ -897,4 +919,5 @@ void poom_ble_gatt_client_stop(void)
 
     s_started = false;
     POOM_BLE_GATT_CLIENT_PRINTF_I("stopped");
+    return result;
 }

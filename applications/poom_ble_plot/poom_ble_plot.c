@@ -508,7 +508,6 @@ static void gatts_profile_cb(esp_gatts_cb_event_t event,
             break;
 
         case ESP_GATTS_CONF_EVT:
-            /* no-op: notifications do not require app-level confirmation */
             break;
 
         default:

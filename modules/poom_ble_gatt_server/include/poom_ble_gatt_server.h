@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_gap_ble_api.h"
@@ -24,6 +25,7 @@ extern "C" {
 #define POOM_BLE_GATT_SERVER_CHAR_VAL_MAX_LEN_DEFAULT        (0x80U)
 #define POOM_BLE_GATT_SERVER_PREPARE_BUF_MAX_SIZE_DEFAULT    (1024U)
 #define POOM_BLE_GATT_SERVER_MANUFACTURER_DATA_LEN_DEFAULT   (17U)
+#define POOM_BLE_GATT_SERVER_DEVICE_NAME_DEFAULT             "EC_BLE_SERVER"
 
 /**
  * @brief Basic server identity properties.
@@ -35,6 +37,17 @@ typedef struct
 } poom_ble_gatt_server_props_t;
 
 /**
+ * @brief GATT service and characteristic configuration.
+ */
+typedef struct
+{
+    esp_bt_uuid_t service_uuid;
+    esp_bt_uuid_t char_uuid;
+    esp_gatt_perm_t char_perm;
+    esp_gatt_char_prop_t char_property;
+} poom_ble_gatt_server_profile_params_t;
+
+/**
  * @brief Complete server advertising and characteristic configuration.
  */
 typedef struct
@@ -44,6 +57,7 @@ typedef struct
     esp_ble_adv_params_t adv_params;
     esp_attr_value_t char_val;
     poom_ble_gatt_server_props_t bt_props;
+    poom_ble_gatt_server_profile_params_t profile;
 } poom_ble_gatt_server_adv_params_t;
 
 /**
@@ -102,12 +116,17 @@ void poom_ble_gatt_server_send_data(uint8_t *data, int length);
 /**
  * @brief Starts BLE GATT server helper stack.
  */
-void poom_ble_gatt_server_start(void);
+esp_err_t poom_ble_gatt_server_start(void);
 
 /**
  * @brief Stops BLE GATT server helper stack and releases resources.
  */
 void poom_ble_gatt_server_stop(void);
+
+/**
+ * @brief Returns whether the helper stack is currently started.
+ */
+bool poom_ble_gatt_server_is_started(void);
 
 #ifdef __cplusplus
 }

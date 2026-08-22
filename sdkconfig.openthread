@@ -1,0 +1,24 @@
+# OpenThread overlay for POOM.
+#
+# Suggested usage:
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.openthread" reconfigure
+#
+# Goal:
+# - Enable the OpenThread-specific OT CLI menu path in this repo.
+# - Keep Zigbee disabled in this profile to avoid extra RAM pressure.
+# - Preserve the shared base config from sdkconfig.defaults.
+
+# -------------------------
+# OpenThread
+# -------------------------
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_OPENTHREAD_TASK_SIZE=8192
+CONFIG_OPENTHREAD_CONSOLE_ENABLE=n
+CONFIG_OPENTHREAD_CLI=y
+# CONFIG_OPENTHREAD_MTD is not set
+# CONFIG_OPENTHREAD_RADIO is not set
+
+# -------------------------
+# Keep Zigbee out of this profile
+# -------------------------
+# CONFIG_ZB_ENABLED is not set

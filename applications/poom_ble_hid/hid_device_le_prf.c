@@ -711,14 +711,10 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event,
 }
 
 void hidd_le_create_service(esp_gatt_if_t gatts_if) {
-  /* Here should added the battery service first, because the hid service should
-     include the battery service. After finish to added the battery service then
-     can added the hid service. */
   esp_ble_gatts_create_attr_tab(bas_att_db, gatts_if, BAS_IDX_NB, 0);
 }
 
 void hidd_le_init(void) {
-  // Reset the hid device target environment
   memset(&hidd_le_env, 0, sizeof(hidd_le_env_t));
 }
 
@@ -762,10 +758,17 @@ static struct gatts_profile_inst heart_rate_profile_tab[PROFILE_NUM] = {
 
 };
 
+/**
+ * @brief Internal helper for `gatts_event_handler`.
+ *
+ * @param[in] event Parameter passed to the function.
+ * @param[in] gatts_if Parameter passed to the function.
+ * @param[in] param Parameter passed to the function.
+ * @return void
+ */
 static void gatts_event_handler(esp_gatts_cb_event_t event,
                                 esp_gatt_if_t gatts_if,
                                 esp_ble_gatts_cb_param_t* param) {
-  /* If event is register event, store the gatts_if for each profile */
   if (event == ESP_GATTS_REG_EVT) {
     if (param->reg.status == ESP_GATT_OK) {
       heart_rate_profile_tab[PROFILE_APP_IDX].gatts_if = gatts_if;
@@ -822,8 +825,12 @@ void hidd_get_attr_value(uint16_t handle, uint16_t* length, uint8_t** value) {
   return;
 }
 
+/**
+ * @brief Internal helper for `hid_add_id_tbl`.
+ *
+ * @return void
+ */
 static void hid_add_id_tbl(void) {
-  // Mouse input report
   hid_rpt_map[0].id = hidReportRefMouseIn[0];
   hid_rpt_map[0].type = hidReportRefMouseIn[1];
   hid_rpt_map[0].handle =
@@ -832,7 +839,6 @@ static void hid_add_id_tbl(void) {
       hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_MOUSE_IN_VAL];
   hid_rpt_map[0].mode = HID_PROTOCOL_MODE_REPORT;
 
-  // Key input report
   hid_rpt_map[1].id = hidReportRefKeyIn[0];
   hid_rpt_map[1].type = hidReportRefKeyIn[1];
   hid_rpt_map[1].handle =
@@ -841,7 +847,6 @@ static void hid_add_id_tbl(void) {
       hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_KEY_IN_CCC];
   hid_rpt_map[1].mode = HID_PROTOCOL_MODE_REPORT;
 
-  // Consumer Control input report
   hid_rpt_map[2].id = hidReportRefCCIn[0];
   hid_rpt_map[2].type = hidReportRefCCIn[1];
   hid_rpt_map[2].handle =
@@ -850,7 +855,6 @@ static void hid_add_id_tbl(void) {
       hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_CC_IN_CCC];
   hid_rpt_map[2].mode = HID_PROTOCOL_MODE_REPORT;
 
-  // LED output report
   hid_rpt_map[3].id = hidReportRefLedOut[0];
   hid_rpt_map[3].type = hidReportRefLedOut[1];
   hid_rpt_map[3].handle =
@@ -858,8 +862,6 @@ static void hid_add_id_tbl(void) {
   hid_rpt_map[3].cccdHandle = 0;
   hid_rpt_map[3].mode = HID_PROTOCOL_MODE_REPORT;
 
-  // Boot keyboard input report
-  // Use same ID and type as key input report
   hid_rpt_map[4].id = hidReportRefKeyIn[0];
   hid_rpt_map[4].type = hidReportRefKeyIn[1];
   hid_rpt_map[4].handle =
@@ -867,8 +869,6 @@ static void hid_add_id_tbl(void) {
   hid_rpt_map[4].cccdHandle = 0;
   hid_rpt_map[4].mode = HID_PROTOCOL_MODE_BOOT;
 
-  // Boot keyboard output report
-  // Use same ID and type as LED output report
   hid_rpt_map[5].id = hidReportRefLedOut[0];
   hid_rpt_map[5].type = hidReportRefLedOut[1];
   hid_rpt_map[5].handle =
@@ -876,8 +876,6 @@ static void hid_add_id_tbl(void) {
   hid_rpt_map[5].cccdHandle = 0;
   hid_rpt_map[5].mode = HID_PROTOCOL_MODE_BOOT;
 
-  // Boot mouse input report
-  // Use same ID and type as mouse input report
   hid_rpt_map[6].id = hidReportRefMouseIn[0];
   hid_rpt_map[6].type = hidReportRefMouseIn[1];
   hid_rpt_map[6].handle =
@@ -885,13 +883,11 @@ static void hid_add_id_tbl(void) {
   hid_rpt_map[6].cccdHandle = 0;
   hid_rpt_map[6].mode = HID_PROTOCOL_MODE_BOOT;
 
-  // Feature report
   hid_rpt_map[7].id = hidReportRefFeature[0];
   hid_rpt_map[7].type = hidReportRefFeature[1];
   hid_rpt_map[7].handle = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_VAL];
   hid_rpt_map[7].cccdHandle = 0;
   hid_rpt_map[7].mode = HID_PROTOCOL_MODE_REPORT;
 
-  // Setup report ID map
   hid_dev_register_reports(HID_NUM_REPORTS, hid_rpt_map);
 }

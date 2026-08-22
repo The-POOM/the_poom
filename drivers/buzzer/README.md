@@ -2,7 +2,7 @@
 
 `buzzer` is a simple PWM buzzer driver built on top of ESP-IDF LEDC.
 
-## Structure
+## Folder Layout
 
 ```text
 drivers/buzzer
@@ -24,7 +24,7 @@ drivers/buzzer
 - `buzzer_init(uint8_t pin)`
 - `buzzer_tone(uint32_t freq_hz, uint32_t duration_ms)`
 
-## Usage
+## Quick Start
 
 ```c
 #include "buzzer.h"

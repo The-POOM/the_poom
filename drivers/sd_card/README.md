@@ -2,7 +2,7 @@
 
 `sd_card` provides SD-over-SPI mount/unmount and file utility operations through FATFS + VFS.
 
-## Structure
+## Folder Layout
 
 ```text
 drivers/sd_card
@@ -35,7 +35,7 @@ drivers/sd_card
 - `sd_card_read_file_to_buffer`
 - `sd_card_get_info`
 
-## Usage
+## Quick Start
 
 ```c
 #include "sd_card.h"
@@ -50,7 +50,7 @@ void app_main(void)
 }
 ```
 
-## Runtime Flow
+## Mount/IO Flow
 
 ```mermaid
 flowchart TD

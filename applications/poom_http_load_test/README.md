@@ -10,7 +10,7 @@ This flow is used to validate connectivity, stability, and server behavior under
 - On POOM, you start `poom_http_load_test`, which connects to Wi-Fi and sends GET requests to that server.
 - This lets you observe how the server behaves under continuous traffic from POOM.
 
-## Structure
+## Runtime Behavior
 
 1. Computer (target server):
 - Run a local HTTP server with Python.
@@ -20,7 +20,7 @@ This flow is used to validate connectivity, stability, and server behavior under
 - Send parallel GET requests to the configured host/port/path.
 - STA Wi-Fi management uses `poom_wifi_ctrl`.
 
-## Local GET Server
+## Usage
 
 ```bash
 # Dynamic function
@@ -56,7 +56,7 @@ Functions:
 - `path`
 - `worker_count`
 
-## Usage
+## Integration
 
 ```c
 #include "poom_http_load_test.h"

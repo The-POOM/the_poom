@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POOM Tone Generator</title>
+  <link rel="stylesheet" href="/tone.css" />
+</head>
+<body>
+  <div class="tg-app">
+    <header class="tg-topbar">
+      <div class="tg-brand">
+        <div class="tg-title">Tone Generator</div>
+        <div class="tg-subtitle">POOM · Browser piano roll → device buzzer</div>
+      </div>
+      <div class="tg-top-actions">
+        <a class="tg-link" href="/">Back to CLI</a>
+      </div>
+    </header>
+
+    <section class="tg-toolbar" aria-label="Tone controls">
+      <button class="tg-btn tg-btn-secondary" id="tg-new" type="button">New</button>
+      <button class="tg-btn tg-btn-secondary" id="tg-load" type="button">Load SD</button>
+
+      <div class="tg-spacer"></div>
+
+      <label class="tg-label">BPM
+        <input class="tg-input" id="tg-bpm" type="number" min="30" max="3000" value="120" />
+      </label>
+
+      <label class="tg-label">Quantize
+        <select class="tg-select" id="tg-quantize">
+          <option value="4">1/4</option>
+          <option value="8" selected>1/8</option>
+          <option value="16">1/16</option>
+          <option value="32">1/32</option>
+        </select>
+      </label>
+
+      <label class="tg-label">Name
+        <input class="tg-input" id="tg-name" type="text" maxlength="24" placeholder="tone1" />
+      </label>
+
+      <div class="tg-spacer"></div>
+
+      <button class="tg-btn tg-btn-primary" id="tg-play-device" type="button">Play on POOM</button>
+      <button class="tg-btn tg-btn-accent" id="tg-save-sd" type="button">Save to SD</button>
+    </section>
+
+    <main class="tg-main">
+      <aside class="tg-side">
+        <div class="tg-card">
+          <div class="tg-card-title">Status</div>
+          <pre class="tg-status" id="tg-status">Ready</pre>
+          <div class="tg-stat" id="tg-stat">Notes: 0</div>
+        </div>
+        <details class="tg-card tg-help">
+          <summary class="tg-help-summary">Help</summary>
+          <div class="tg-muted">Click: add · Right-click: delete</div>
+          <div class="tg-muted">Drag: move · Drag edge: resize</div>
+          <div class="tg-muted">Wheel: pitch · Shift+Wheel: time</div>
+        </details>
+      </aside>
+
+      <section class="tg-roll-wrap" aria-label="Piano roll">
+        <canvas id="tg-roll" class="tg-roll"></canvas>
+        <div class="tg-timeline" aria-label="Timeline">
+          <div class="tg-timeline-track" id="tg-timeline-track" role="slider" aria-label="Scroll timeline">
+            <div class="tg-timeline-thumb" id="tg-timeline-thumb"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="tg-load-overlay" class="tg-modal-overlay hidden"></div>
+    <section id="tg-load-modal" class="tg-modal hidden" aria-label="Load tone from SD">
+      <header class="tg-modal-header">
+        <div class="tg-modal-title">Load from SD</div>
+        <button class="tg-modal-close" id="tg-load-close" type="button" aria-label="Close">x</button>
+      </header>
+      <div class="tg-modal-body">
+        <div class="tg-modal-hint">Folder: /sdcard/tones</div>
+        <div id="tg-load-list" class="tg-modal-list">Loading...</div>
+      </div>
+    </section>
+
+  </div>
+
+  <script type="module" src="/tone.js"></script>
+</body>
+</html>

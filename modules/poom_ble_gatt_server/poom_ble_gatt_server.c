@@ -54,7 +54,6 @@ static const char *POOM_BLE_GATT_SERVER_LOG_TAG = "poom_ble_gatt_server";
 
 #define POOM_BLE_GATT_SERVER_PROFILE_COUNT                  (1U)
 #define POOM_BLE_GATT_SERVER_PROFILE_ID                     (0U)
-#define POOM_BLE_GATT_SERVER_DEVICE_NAME_DEFAULT            "EC_BLE_SERVER"
 #define POOM_BLE_GATT_SERVER_NUM_HANDLES                    (4U)
 #define POOM_BLE_GATT_SERVER_APP_ID                         (0U)
 #define POOM_BLE_GATT_SERVER_SERVICE_INSTANCE_ID            (0U)
@@ -65,13 +64,6 @@ static const char *POOM_BLE_GATT_SERVER_LOG_TAG = "poom_ble_gatt_server";
 
 static uint8_t s_default_manufacturer_data[POOM_BLE_GATT_SERVER_MANUFACTURER_DATA_LEN_DEFAULT] = {
     0x12, 0x23, 0x45, 0x56
-};
-
-static const uint8_t s_adv_service_uuid128[32] = {
-    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xEE, 0x00, 0x00, 0x00,
-    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00,
 };
 
 static uint8_t s_default_char_value[] = {0x61, 0x70, 0x70, 0x73, 0x65, 0x63};
@@ -117,6 +109,7 @@ static void poom_ble_gatt_server_prepare_write_event_(esp_gatt_if_t gatts_if,
                                                 esp_ble_gatts_cb_param_t *param);
 static void poom_ble_gatt_server_exec_write_event_(poom_ble_gatt_server_prepare_env_t *prepare_env,
                                              esp_ble_gatts_cb_param_t *param);
+static void poom_ble_gatt_server_refresh_service_uuid_payload_(void);
 
 static uint8_t s_adv_config_done = 0U;
 static esp_gatt_char_prop_t s_char_property = 0U;
@@ -130,10 +123,27 @@ static esp_attr_value_t s_char_val;
 static esp_ble_adv_data_t s_adv_data;
 static esp_ble_adv_data_t s_scan_rsp_data;
 static esp_ble_adv_params_t s_adv_params;
+static esp_bt_uuid_t s_service_uuid = {
+    .len = ESP_UUID_LEN_16,
+    .uuid = {
+        .uuid16 = POOM_BLE_GATT_SERVER_SERVICE_UUID_DEFAULT,
+    },
+};
+static esp_bt_uuid_t s_char_uuid_cfg = {
+    .len = ESP_UUID_LEN_16,
+    .uuid = {
+        .uuid16 = POOM_BLE_GATT_SERVER_CHAR_UUID_DEFAULT,
+    },
+};
+static esp_gatt_perm_t s_char_perm_cfg = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
+static esp_gatt_char_prop_t s_char_prop_cfg = ESP_GATT_CHAR_PROP_BIT_READ |
+                                              ESP_GATT_CHAR_PROP_BIT_WRITE |
+                                              ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
 static poom_ble_gatt_server_props_t s_props = {
     .device_name = POOM_BLE_GATT_SERVER_DEVICE_NAME_DEFAULT,
     .manufacturer_data = s_default_manufacturer_data,
 };
+static uint8_t s_adv_service_uuid[ESP_UUID_LEN_128] = {0};
 
 static poom_ble_gatt_server_profile_inst_t s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_COUNT] = {
     [POOM_BLE_GATT_SERVER_PROFILE_ID] = {
@@ -196,6 +206,149 @@ static void poom_ble_gatt_server_log_ascii_(const uint8_t *data, size_t len)
 }
 
 /**
+ * @brief Internal helper for `poom_ble_gatt_server_adv_field_size`.
+ *
+ * @param[in] data_len Parameter passed to the function.
+ * @return size_t
+ */
+static size_t poom_ble_gatt_server_adv_field_size_(uint16_t data_len)
+{
+    return (data_len > 0U) ? ((size_t)data_len + 2U) : 0U;
+}
+
+/**
+ * @brief Refreshes the internal state used by this module.
+ *
+ * @return void
+ */
+static void poom_ble_gatt_server_refresh_name_visibility_(void)
+{
+    size_t adv_payload_len = 0U;
+    size_t scan_rsp_payload_len = 0U;
+    size_t name_len = 0U;
+
+    if ((s_props.device_name != NULL) && (s_props.device_name[0] != '\0'))
+    {
+        name_len = strlen(s_props.device_name);
+    }
+
+    adv_payload_len += poom_ble_gatt_server_adv_field_size_(1U);
+    adv_payload_len += poom_ble_gatt_server_adv_field_size_(s_adv_data.manufacturer_len);
+    adv_payload_len += poom_ble_gatt_server_adv_field_size_(s_adv_data.service_data_len);
+    adv_payload_len += poom_ble_gatt_server_adv_field_size_(s_adv_data.service_uuid_len);
+    if (s_adv_data.include_txpower)
+    {
+        adv_payload_len += poom_ble_gatt_server_adv_field_size_(1U);
+    }
+    if ((s_adv_data.min_interval != 0U) || (s_adv_data.max_interval != 0U))
+    {
+        adv_payload_len += poom_ble_gatt_server_adv_field_size_(4U);
+    }
+    if (s_adv_data.appearance != 0)
+    {
+        adv_payload_len += poom_ble_gatt_server_adv_field_size_(2U);
+    }
+
+    scan_rsp_payload_len += poom_ble_gatt_server_adv_field_size_(s_scan_rsp_data.manufacturer_len);
+    scan_rsp_payload_len += poom_ble_gatt_server_adv_field_size_(s_scan_rsp_data.service_data_len);
+    scan_rsp_payload_len += poom_ble_gatt_server_adv_field_size_(s_scan_rsp_data.service_uuid_len);
+    if (s_scan_rsp_data.include_txpower)
+    {
+        scan_rsp_payload_len += poom_ble_gatt_server_adv_field_size_(1U);
+    }
+    if ((s_scan_rsp_data.min_interval != 0U) || (s_scan_rsp_data.max_interval != 0U))
+    {
+        scan_rsp_payload_len += poom_ble_gatt_server_adv_field_size_(4U);
+    }
+    if (s_scan_rsp_data.appearance != 0)
+    {
+        scan_rsp_payload_len += poom_ble_gatt_server_adv_field_size_(2U);
+    }
+
+    s_adv_data.include_name = false;
+    s_scan_rsp_data.include_name = false;
+
+    if (name_len == 0U)
+    {
+        return;
+    }
+
+    if ((adv_payload_len + poom_ble_gatt_server_adv_field_size_((uint16_t)name_len)) <= ESP_BLE_ADV_DATA_LEN_MAX)
+    {
+        s_adv_data.include_name = true;
+        return;
+    }
+
+    if ((scan_rsp_payload_len + poom_ble_gatt_server_adv_field_size_((uint16_t)name_len)) <= ESP_BLE_ADV_DATA_LEN_MAX)
+    {
+        s_scan_rsp_data.include_name = true;
+    }
+}
+
+/**
+ * @brief Refreshes the internal state used by this module.
+ *
+ * @return void
+ */
+static void poom_ble_gatt_server_refresh_service_uuid_payload_(void)
+{
+    if(s_service_uuid.len == ESP_UUID_LEN_16)
+    {
+        static const uint8_t ble_base_uuid[ESP_UUID_LEN_128] = {
+            0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+            0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+
+        memcpy(s_adv_service_uuid, ble_base_uuid, sizeof(ble_base_uuid));
+        s_adv_service_uuid[12] = (uint8_t)(s_service_uuid.uuid.uuid16 & 0xFFU);
+        s_adv_service_uuid[13] = (uint8_t)((s_service_uuid.uuid.uuid16 >> 8) & 0xFFU);
+        s_adv_data.service_uuid_len = ESP_UUID_LEN_128;
+        s_adv_data.p_service_uuid = s_adv_service_uuid;
+        s_scan_rsp_data.service_uuid_len = 0U;
+        s_scan_rsp_data.p_service_uuid = NULL;
+        poom_ble_gatt_server_refresh_name_visibility_();
+        return;
+    }
+
+    if(s_service_uuid.len == ESP_UUID_LEN_32)
+    {
+        static const uint8_t ble_base_uuid[ESP_UUID_LEN_128] = {
+            0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+            0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+
+        memcpy(s_adv_service_uuid, ble_base_uuid, sizeof(ble_base_uuid));
+        s_adv_service_uuid[12] = (uint8_t)(s_service_uuid.uuid.uuid32 & 0xFFU);
+        s_adv_service_uuid[13] = (uint8_t)((s_service_uuid.uuid.uuid32 >> 8) & 0xFFU);
+        s_adv_service_uuid[14] = (uint8_t)((s_service_uuid.uuid.uuid32 >> 16) & 0xFFU);
+        s_adv_service_uuid[15] = (uint8_t)((s_service_uuid.uuid.uuid32 >> 24) & 0xFFU);
+        s_adv_data.service_uuid_len = ESP_UUID_LEN_128;
+        s_adv_data.p_service_uuid = s_adv_service_uuid;
+        s_scan_rsp_data.service_uuid_len = 0U;
+        s_scan_rsp_data.p_service_uuid = NULL;
+        poom_ble_gatt_server_refresh_name_visibility_();
+        return;
+    }
+
+    if(s_service_uuid.len == ESP_UUID_LEN_128)
+    {
+        memcpy(s_adv_service_uuid, s_service_uuid.uuid.uuid128, ESP_UUID_LEN_128);
+        s_adv_data.service_uuid_len = ESP_UUID_LEN_128;
+        s_adv_data.p_service_uuid = s_adv_service_uuid;
+        s_scan_rsp_data.service_uuid_len = 0U;
+        s_scan_rsp_data.p_service_uuid = NULL;
+        poom_ble_gatt_server_refresh_name_visibility_();
+        return;
+    }
+
+    s_adv_data.service_uuid_len = 0U;
+    s_adv_data.p_service_uuid = NULL;
+    s_scan_rsp_data.service_uuid_len = 0U;
+    s_scan_rsp_data.p_service_uuid = NULL;
+    poom_ble_gatt_server_refresh_name_visibility_();
+}
+
+/**
  * @brief Applies default advertising/characteristic parameters.
  */
 static void poom_ble_gatt_server_set_defaults_(void)
@@ -204,10 +357,18 @@ static void poom_ble_gatt_server_set_defaults_(void)
     s_adv_data = poom_ble_gatt_server_default_adv_data();
     s_scan_rsp_data = poom_ble_gatt_server_default_scan_rsp_data();
     s_adv_params = poom_ble_gatt_server_default_adv_params();
+    s_service_uuid.len = ESP_UUID_LEN_16;
+    s_service_uuid.uuid.uuid16 = POOM_BLE_GATT_SERVER_SERVICE_UUID_DEFAULT;
+    s_char_uuid_cfg.len = ESP_UUID_LEN_16;
+    s_char_uuid_cfg.uuid.uuid16 = POOM_BLE_GATT_SERVER_CHAR_UUID_DEFAULT;
+    s_char_perm_cfg = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
+    s_char_prop_cfg = ESP_GATT_CHAR_PROP_BIT_READ |
+                      ESP_GATT_CHAR_PROP_BIT_WRITE |
+                      ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
     s_props.device_name = POOM_BLE_GATT_SERVER_DEVICE_NAME_DEFAULT;
     s_props.manufacturer_data = s_default_manufacturer_data;
-    s_scan_rsp_data.p_manufacturer_data = (uint8_t *)s_props.manufacturer_data;
-    s_scan_rsp_data.manufacturer_len = POOM_BLE_GATT_SERVER_MANUFACTURER_DATA_LEN_DEFAULT;
+    poom_ble_gatt_server_refresh_service_uuid_payload_();
+    poom_ble_gatt_server_refresh_name_visibility_();
     s_adv_params_set = true;
 }
 
@@ -226,17 +387,17 @@ esp_ble_adv_data_t poom_ble_gatt_server_default_adv_data(void)
 {
     esp_ble_adv_data_t adv_data = {
         .set_scan_rsp = false,
-        .include_name = true,
-        .include_txpower = true,
-        .min_interval = 0x0006,
-        .max_interval = 0x0010,
+        .include_name = false,
+        .include_txpower = false,
+        .min_interval = 0,
+        .max_interval = 0,
         .appearance = 0x00,
         .manufacturer_len = 0,
         .p_manufacturer_data = NULL,
         .service_data_len = 0,
         .p_service_data = NULL,
-        .service_uuid_len = sizeof(s_adv_service_uuid128),
-        .p_service_uuid = (uint8_t *)s_adv_service_uuid128,
+        .service_uuid_len = 0,
+        .p_service_uuid = NULL,
         .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
     };
 
@@ -247,16 +408,18 @@ esp_ble_adv_data_t poom_ble_gatt_server_default_scan_rsp_data(void)
 {
     esp_ble_adv_data_t scan_rsp = {
         .set_scan_rsp = true,
-        .include_name = true,
-        .include_txpower = true,
+        .include_name = false,
+        .include_txpower = false,
+        .min_interval = 0,
+        .max_interval = 0,
         .appearance = 0x00,
-        .manufacturer_len = POOM_BLE_GATT_SERVER_MANUFACTURER_DATA_LEN_DEFAULT,
-        .p_manufacturer_data = s_default_manufacturer_data,
+        .manufacturer_len = 0,
+        .p_manufacturer_data = NULL,
         .service_data_len = 0,
         .p_service_data = NULL,
-        .service_uuid_len = sizeof(s_adv_service_uuid128),
-        .p_service_uuid = (uint8_t *)s_adv_service_uuid128,
-        .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
+        .service_uuid_len = 0,
+        .p_service_uuid = NULL,
+        .flag = 0,
     };
 
     return scan_rsp;
@@ -289,6 +452,10 @@ void poom_ble_gatt_server_set_adv_data_params(const poom_ble_gatt_server_adv_par
     s_adv_params = adv_params->adv_params;
     s_char_val = adv_params->char_val;
     s_props = adv_params->bt_props;
+    s_service_uuid = adv_params->profile.service_uuid;
+    s_char_uuid_cfg = adv_params->profile.char_uuid;
+    s_char_perm_cfg = adv_params->profile.char_perm;
+    s_char_prop_cfg = adv_params->profile.char_property;
 
     if ((s_props.device_name == NULL) || (s_props.device_name[0] == '\0'))
     {
@@ -299,11 +466,43 @@ void poom_ble_gatt_server_set_adv_data_params(const poom_ble_gatt_server_adv_par
         s_props.manufacturer_data = s_default_manufacturer_data;
     }
 
-    s_scan_rsp_data.p_manufacturer_data = (uint8_t *)s_props.manufacturer_data;
-    if (s_scan_rsp_data.manufacturer_len == 0U)
+    if ((s_scan_rsp_data.manufacturer_len > 0U) && (s_props.manufacturer_data != NULL))
     {
-        s_scan_rsp_data.manufacturer_len = POOM_BLE_GATT_SERVER_MANUFACTURER_DATA_LEN_DEFAULT;
+        s_scan_rsp_data.p_manufacturer_data = (uint8_t *)s_props.manufacturer_data;
     }
+    else
+    {
+        s_scan_rsp_data.manufacturer_len = 0U;
+        s_scan_rsp_data.p_manufacturer_data = NULL;
+    }
+
+    poom_ble_gatt_server_refresh_name_visibility_();
+
+    if(s_service_uuid.len == 0U)
+    {
+        s_service_uuid.len = ESP_UUID_LEN_16;
+        s_service_uuid.uuid.uuid16 = POOM_BLE_GATT_SERVER_SERVICE_UUID_DEFAULT;
+    }
+
+    if(s_char_uuid_cfg.len == 0U)
+    {
+        s_char_uuid_cfg.len = ESP_UUID_LEN_16;
+        s_char_uuid_cfg.uuid.uuid16 = POOM_BLE_GATT_SERVER_CHAR_UUID_DEFAULT;
+    }
+
+    if(s_char_perm_cfg == 0U)
+    {
+        s_char_perm_cfg = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
+    }
+
+    if(s_char_prop_cfg == 0U)
+    {
+        s_char_prop_cfg = ESP_GATT_CHAR_PROP_BIT_READ |
+                          ESP_GATT_CHAR_PROP_BIT_WRITE |
+                          ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
+    }
+
+    poom_ble_gatt_server_refresh_service_uuid_payload_();
 
     s_adv_params_set = true;
 }
@@ -471,6 +670,10 @@ static void poom_ble_gatt_server_gap_event_handler_(esp_gap_ble_cb_event_t event
             {
                 POOM_BLE_GATT_SERVER_PRINTF_E("advertising start failed status=0x%x", param->adv_start_cmpl.status);
             }
+            else
+            {
+                POOM_BLE_GATT_SERVER_PRINTF_I("advertising started name=%s", s_props.device_name);
+            }
             break;
 
         case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
@@ -520,8 +723,7 @@ static void poom_ble_gatt_server_profile_event_handler_(esp_gatts_cb_event_t eve
 
             s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_id.is_primary = true;
             s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_id.id.inst_id = POOM_BLE_GATT_SERVER_SERVICE_INSTANCE_ID;
-            s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_id.id.uuid.len = ESP_UUID_LEN_16;
-            s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_id.id.uuid.uuid.uuid16 = POOM_BLE_GATT_SERVER_SERVICE_UUID_DEFAULT;
+            s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_id.id.uuid = s_service_uuid;
 
             ret = esp_ble_gap_set_device_name(s_props.device_name);
             if (ret != ESP_OK)
@@ -607,21 +809,18 @@ static void poom_ble_gatt_server_profile_event_handler_(esp_gatts_cb_event_t eve
             esp_err_t ret;
 
             s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_handle = param->create.service_handle;
-            s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].char_uuid.len = ESP_UUID_LEN_16;
-            s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].char_uuid.uuid.uuid16 = POOM_BLE_GATT_SERVER_CHAR_UUID_DEFAULT;
+            s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].char_uuid = s_char_uuid_cfg;
             s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].descr_uuid.len = ESP_UUID_LEN_16;
             s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].descr_uuid.uuid.uuid16 = POOM_BLE_GATT_SERVER_DESCR_UUID_DEFAULT;
 
             (void)esp_ble_gatts_start_service(s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_handle);
 
-            s_char_property = ESP_GATT_CHAR_PROP_BIT_READ |
-                              ESP_GATT_CHAR_PROP_BIT_WRITE_NR |
-                              ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+            s_char_property = s_char_prop_cfg;
 
             ret = esp_ble_gatts_add_char(
                 s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].service_handle,
                 &s_profile_tab[POOM_BLE_GATT_SERVER_PROFILE_ID].char_uuid,
-                ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                s_char_perm_cfg,
                 s_char_property,
                 &s_char_val,
                 NULL);
@@ -734,7 +933,7 @@ static void poom_ble_gatt_server_event_dispatcher_(esp_gatts_cb_event_t event,
     }
 }
 
-void poom_ble_gatt_server_start(void)
+esp_err_t poom_ble_gatt_server_start(void)
 {
     esp_err_t ret;
     esp_bt_controller_status_t ctrl_status;
@@ -742,7 +941,7 @@ void poom_ble_gatt_server_start(void)
 
     if (s_started)
     {
-        return;
+        return ESP_OK;
     }
 
     if (!s_adv_params_set)
@@ -764,7 +963,7 @@ void poom_ble_gatt_server_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_SERVER_PRINTF_E("controller init failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -775,7 +974,7 @@ void poom_ble_gatt_server_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_SERVER_PRINTF_E("controller enable failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -787,7 +986,7 @@ void poom_ble_gatt_server_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_SERVER_PRINTF_E("bluedroid init failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -798,7 +997,7 @@ void poom_ble_gatt_server_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_SERVER_PRINTF_E("bluedroid enable failed: %s", esp_err_to_name(ret));
-            return;
+            return ret;
         }
     }
 
@@ -806,21 +1005,21 @@ void poom_ble_gatt_server_start(void)
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_SERVER_PRINTF_E("gatts callback register failed: 0x%x", ret);
-        return;
+        return ret;
     }
 
     ret = esp_ble_gap_register_callback(poom_ble_gatt_server_gap_event_handler_);
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_SERVER_PRINTF_E("gap callback register failed: 0x%x", ret);
-        return;
+        return ret;
     }
 
     ret = esp_ble_gatts_app_register(POOM_BLE_GATT_SERVER_APP_ID);
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_SERVER_PRINTF_E("gatts app register failed: 0x%x", ret);
-        return;
+        return ret;
     }
 
     ret = esp_ble_gatt_set_local_mtu(POOM_BLE_GATT_SERVER_LOCAL_MTU);
@@ -831,6 +1030,7 @@ void poom_ble_gatt_server_start(void)
 
     s_started = true;
     POOM_BLE_GATT_SERVER_PRINTF_I("started");
+    return ESP_OK;
 }
 
 void poom_ble_gatt_server_stop(void)
@@ -904,4 +1104,9 @@ void poom_ble_gatt_server_stop(void)
     s_started = false;
 
     POOM_BLE_GATT_SERVER_PRINTF_I("stopped");
+}
+
+bool poom_ble_gatt_server_is_started(void)
+{
+    return s_started;
 }

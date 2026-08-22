@@ -3,7 +3,7 @@
 `poom_sd_browser` is an SD card browser application for Arduboy-style OLED devices.
 It provides a simple file navigation UI controlled by hardware buttons.
 
-## Features
+## Purpose
 
 - SD card mount check and runtime startup.
 - Directory listing from `/sdcard` root.
@@ -12,7 +12,7 @@ It provides a simple file navigation UI controlled by hardware buttons.
 - Arduboy-style rendering with selection highlight.
 - Button-driven controls through `sbus` (`input/button`).
 
-## Architecture
+## Structure
 
 The module is split into two C files:
 
@@ -23,7 +23,7 @@ The module is split into two C files:
   - UI and interaction layer (display + buttons).
   - Calls storage layer functions.
 
-## Controls
+## Usage
 
 - `UP`: move selection up.
 - `DOWN`: move selection down.
@@ -40,12 +40,18 @@ Behavior:
 
 ```c
 esp_err_t poom_sd_browser_start(void);
+esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config);
 esp_err_t poom_sd_browser_stop(void);
 bool poom_sd_browser_is_running(void);
 esp_err_t poom_sd_browser_set_exit_callback(poom_sd_browser_exit_cb_t callback, void* user_ctx);
 ```
 
-## Basic Usage
+`poom_sd_browser_start_ex()` supports:
+- Custom start directory (absolute under `/sdcard`)
+- Optional entry filter (e.g. show only `*.lua`)
+- Optional file-selected callback (file details shows `A:Select`)
+
+## Integration
 
 ```c
 #include "poom_sd_browser.h"
@@ -61,7 +67,7 @@ void start_sd_browser(void) {
 }
 ```
 
-## Mermaid Flowchart
+## Runtime Behavior
 
 ```mermaid
 flowchart TD

@@ -21,6 +21,12 @@
 #define POOM_SECRETS_RECORD_KEY_ID_FMT    "i%08" PRIx32
 #define POOM_SECRETS_RECORD_KEY_BUF_LEN   (NVS_KEY_NAME_MAX_SIZE)
 
+/**
+ * @brief Internal helper for `poom_secrets_is_valid_key`.
+ *
+ * @param[in] key Parameter passed to the function.
+ * @return bool
+ */
 static bool poom_secrets_is_valid_key_(const char* key) {
     size_t len;
 
@@ -36,6 +42,12 @@ static bool poom_secrets_is_valid_key_(const char* key) {
     return true;
 }
 
+/**
+ * @brief Internal helper for `poom_secrets_is_valid_record_id`.
+ *
+ * @param[in] id Parameter passed to the function.
+ * @return bool
+ */
 static bool poom_secrets_is_valid_record_id_(const char* id) {
     size_t len;
 
@@ -51,6 +63,12 @@ static bool poom_secrets_is_valid_record_id_(const char* id) {
     return true;
 }
 
+/**
+ * @brief Internal helper for `poom_secrets_fnv1a32`.
+ *
+ * @param[in] text Parameter passed to the function.
+ * @return uint32_t
+ */
 static uint32_t poom_secrets_fnv1a32_(const char* text) {
     uint32_t hash = 2166136261UL;
     size_t i;
@@ -64,6 +82,16 @@ static uint32_t poom_secrets_fnv1a32_(const char* text) {
     return hash;
 }
 
+/**
+ * @brief Internal helper for `poom_secrets_build_record_keys`.
+ *
+ * @param[in] id Parameter passed to the function.
+ * @param[in] out_key_data Parameter passed to the function.
+ * @param[in] out_key_data_len Parameter passed to the function.
+ * @param[in] out_key_id Parameter passed to the function.
+ * @param[in] out_key_id_len Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t poom_secrets_build_record_keys_(
     const char* id,
     char* out_key_data,
@@ -94,6 +122,13 @@ static esp_err_t poom_secrets_build_record_keys_(
     return ESP_OK;
 }
 
+/**
+ * @brief Internal helper for `poom_secrets_open`.
+ *
+ * @param[in] mode Parameter passed to the function.
+ * @param[in] out_handle Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t poom_secrets_open_(nvs_open_mode_t mode, nvs_handle_t* out_handle) {
     if(out_handle == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -102,6 +137,13 @@ static esp_err_t poom_secrets_open_(nvs_open_mode_t mode, nvs_handle_t* out_hand
     return nvs_open(POOM_SECRETS_NAMESPACE, mode, out_handle);
 }
 
+/**
+ * @brief Internal helper for `poom_secrets_commit_and_close`.
+ *
+ * @param[in] handle Parameter passed to the function.
+ * @param[in] op_err Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t poom_secrets_commit_and_close_(nvs_handle_t handle, esp_err_t op_err) {
     esp_err_t commit_err = ESP_OK;
 

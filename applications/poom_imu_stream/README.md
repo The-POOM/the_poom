@@ -81,3 +81,6 @@ if (poom_imu_stream_read_data(&d)) {
     /* use d.acceleration_mg / d.angular_rate_mdps / d.temperature_degC */
 }
 ```
+## Integration
+
+Block I2C when reading the accelerometer to avoid I2C collisions.

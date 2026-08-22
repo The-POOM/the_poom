@@ -157,7 +157,6 @@ static void poom_ble_spam_set_random_addr_for_index_(int idx)
     esp_bd_addr_t random_addr = {0};
     poom_ble_spam_fill_random_bytes_(random_addr, sizeof(random_addr));
 
-    /* Random static address requires top two bits set to 1. */
     random_addr[0] = (uint8_t)((random_addr[0] & POOM_BLE_SPAM_ADDR_CLEAR_MASK) | POOM_BLE_SPAM_ADDR_STATIC_MASK);
     random_addr[5] ^= (uint8_t)(idx * (int)POOM_BLE_SPAM_ADDR_MIX_FACTOR_A);
     random_addr[4] ^= (uint8_t)(idx * (int)POOM_BLE_SPAM_ADDR_MIX_FACTOR_B);
@@ -312,13 +311,23 @@ void poom_ble_spam_start(void)
 /**
  * @brief Stops BLE payload rotation.
  */
-void poom_ble_spam_app_stop(void)
+void poom_ble_spam_app_stop(void) 
 {
-    s_running = false;
-    if (s_adv_cut_timer != NULL)
-    {
-        (void)xTimerStop(s_adv_cut_timer, 0);
+    if (!s_running) return;
+
+    if (s_adv_cut_timer != NULL) {
+        xTimerStop(s_adv_cut_timer, 0);
     }
-    (void)esp_ble_gap_stop_advertising();
-    POOM_BLE_SPAM_PRINTF_I("stopped");
+    esp_ble_gap_stop_advertising();
+
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+
+    s_running = false;
+    s_current_device_idx = -1;
+
+    POOM_BLE_SPAM_PRINTF_I("stopped and deinitialized");
 }

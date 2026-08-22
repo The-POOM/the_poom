@@ -11,7 +11,7 @@
 ## Structure
 
 ```text
-components/poom_wifi_scanner
+modules/poom_wifi_scanner
 ├── CMakeLists.txt
 ├── README.md
 ├── include/
@@ -21,7 +21,7 @@ components/poom_wifi_scanner
 
 ## Public API
 
-Header: `components/poom_wifi_scanner/include/poom_wifi_scanner.h`
+Header: `modules/poom_wifi_scanner/include/poom_wifi_scanner.h`
 
 ```c
 esp_err_t poom_wifi_scanner_scan(void);

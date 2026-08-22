@@ -12,7 +12,7 @@ It provides a compact server setup that:
 ## Structure
 
 ```text
-components/poom_ble_gatt_server
+modules/poom_ble_gatt_server
 ├── CMakeLists.txt
 ├── component.mk
 ├── poom_ble_gatt_server.c
@@ -32,7 +32,7 @@ If debug is disabled, `POOM_BLE_GATT_SERVER_PRINTF_D(...)` is compiled out.
 
 ## Public API
 
-Header: `components/poom_ble_gatt_server/include/poom_ble_gatt_server.h`
+Header: `modules/poom_ble_gatt_server/include/poom_ble_gatt_server.h`
 
 - `esp_attr_value_t poom_ble_gatt_server_default_char_val(void)`
 - `esp_ble_adv_data_t poom_ble_gatt_server_default_adv_data(void)`

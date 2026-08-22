@@ -45,6 +45,7 @@ void poom_arduboy_delay_short(uint16_t ms);
 
 void poom_arduboy_draw_pixel(int16_t x, int16_t y, uint8_t color);
 void poom_arduboy_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t color);
+void poom_arduboy_draw_circle(int16_t x0, int16_t y0, uint8_t r, uint8_t color);
 void poom_arduboy_draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color);
 
 void poom_arduboy_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color);
@@ -113,6 +114,10 @@ public:
     void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t color)
     {
         poom_arduboy_draw_line(x0, y0, x1, y1, color);
+    }
+    void drawCircle(int16_t x0, int16_t y0, uint8_t r, uint8_t color)
+    {
+        poom_arduboy_draw_circle(x0, y0, r, color);
     }
     void drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color)
     {

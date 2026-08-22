@@ -2,7 +2,7 @@
 
 `poom_ble_tracker` is a BLE scanner component that detects known tracker advertisement signatures (for example AirTag and Tile), estimates distance from RSSI, and streams parsed records through a callback.
 
-## Features
+## Purpose
 
 - Starts and stops BLE scanning through `poom_ble_gatt_client`.
 - Detects tracker signatures from advertisement payload prefixes.
@@ -26,7 +26,7 @@ applications/poom_ble_tracker/
     └── poom_ble_tracker.h
 ```
 
-## Runtime Flow
+## Runtime Behavior
 
 ```mermaid
 flowchart TD
@@ -68,3 +68,8 @@ Defined in `applications/poom_ble_tracker/CMakeLists.txt`:
 - `bt`
 - `poom_ble_gatt_client`
 
+## Integration
+
+- All implementation, comments, and logs are in English.
+- The component uses a flat source layout (no `src/` subfolder).
+- Third-party libraries are not renamed or modified by this refactor.

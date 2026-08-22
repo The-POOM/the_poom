@@ -12,6 +12,8 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
+#include "poom_secrets_store.h"
 #include "poom_wifi_ctrl.h"
 
 #if POOM_WIFI_SPAM_ENABLE_LOG
@@ -45,7 +47,11 @@
 #define POOM_WIFI_SPAM_TASK_PRIO           (5U)
 #define POOM_WIFI_SPAM_TASK_INTERVAL_MS    (100U)
 #define POOM_WIFI_SPAM_MAX_BEACON_LEN      (256U)
-#define POOM_WIFI_SPAM_MAX_SSID_LEN        (32U)
+#define POOM_WIFI_SPAM_MAX_SSID_LEN        (POOM_WIFI_SPAM_SSID_MAX_LEN)
+
+#define POOM_WIFI_SPAM_SSIDS_KEY "wifi_spam_ssids"
+#define POOM_WIFI_SPAM_SSIDS_MAGIC (0x57535331UL) /* WSS1 */
+#define POOM_WIFI_SPAM_SSIDS_VERSION (1U)
 
 static const uint8_t s_poom_wifi_spam_beacon_template[] = {
     0x80, 0x00,
@@ -71,27 +77,157 @@ static const uint8_t s_poom_wifi_spam_beacon_template[] = {
     0x01, 0x0b, 0x14
 };
 
-static const char *const s_poom_wifi_spam_ssids[] = {
-    "POOM is live on Kickstarter",
-    "Scan, sniff, play with POOM",
-    "Link in bio: POOM campaign",
-    "POOM: your pocket pentester",
-    "Debug Zigbee & WiFi w/ POOM",
-    "Matter/Thread/Zigbee sniffer",
-    "POOM for makers & hackers",
-    "Stop scrolling, back POOM",
-    "Pentest. Play. Create. = POOM",
-    "Turn bugs into features w/ POOM",
-    "Your smart home needs POOM",
-    "Catch flaky Zigbee with POOM",
-    "POOM: open-source ESP32-C5",
-    "Sniff 2.4 GHz like a boss",
-    "POOM fits in your wallet",
-    "Tap WiFi BLE 802.15.4 w/ POOM",
+static const char *const s_poom_wifi_spam_default_ssids[] = {
+    "Starbucks_Free_WiFi",
+    "Coffee_Shop_Guest",
+    "Airport_Public_HighSpeed",
+    "Hotel_Lobby_FreeWiFi",
+    "McDonalds_Free_Internet",
+    "Free_Public_WiFi",
+    "Guest_Access_Point",
+    "Coffee_Break_Network",
+    "Open_WiFi_Connect",
+    "Free_City_WiFi_Portal",
+    "Welcome_Guest_Access",
+    "Digital_Nomad_Hotspot",
+    "Premium_Coffee_Link",
+    "Downtown_Guest_WiFi",
+    "Fast_Internet_No_Pass",
+    "Wireless_Internet_Guest"
 };
 
 static TaskHandle_t s_poom_wifi_spam_task_handle = NULL;
 static bool s_poom_wifi_spam_running = false;
+
+typedef struct __attribute__((packed))
+{
+    uint32_t magic;
+    uint8_t version;
+    uint8_t count;
+    uint16_t reserved;
+    char ssids[POOM_WIFI_SPAM_SSIDS_MAX][POOM_WIFI_SPAM_SSID_MAX_LEN + 1U];
+} poom_wifi_spam_ssids_blob_v1_t;
+
+static bool s_poom_wifi_spam_ssids_loaded = false;
+static poom_wifi_spam_ssid_list_t s_poom_wifi_spam_ssids;
+
+/**
+ * @brief Internal helper for `poom_wifi_spam_ssids_set_defaults`.
+ *
+ * @return void
+ */
+static void poom_wifi_spam_ssids_set_defaults_(void)
+{
+    (void)memset(&s_poom_wifi_spam_ssids, 0, sizeof(s_poom_wifi_spam_ssids));
+
+    const size_t def_cnt =
+        sizeof(s_poom_wifi_spam_default_ssids) / sizeof(s_poom_wifi_spam_default_ssids[0]);
+    const size_t n = (def_cnt > (size_t)POOM_WIFI_SPAM_SSIDS_MAX) ? (size_t)POOM_WIFI_SPAM_SSIDS_MAX : def_cnt;
+
+    s_poom_wifi_spam_ssids.count = (uint8_t)n;
+    for(size_t i = 0; i < n; i++)
+    {
+        (void)snprintf(s_poom_wifi_spam_ssids.ssids[i],
+                       sizeof(s_poom_wifi_spam_ssids.ssids[i]),
+                       "%s",
+                       (s_poom_wifi_spam_default_ssids[i] != NULL) ? s_poom_wifi_spam_default_ssids[i] : "");
+    }
+}
+
+/**
+ * @brief Saves internal data used by this module.
+ *
+ * @return esp_err_t
+ */
+static esp_err_t poom_wifi_spam_ssids_save_(void)
+{
+    poom_wifi_spam_ssids_blob_v1_t blob;
+    (void)memset(&blob, 0, sizeof(blob));
+    blob.magic = POOM_WIFI_SPAM_SSIDS_MAGIC;
+    blob.version = POOM_WIFI_SPAM_SSIDS_VERSION;
+    blob.count = s_poom_wifi_spam_ssids.count;
+    (void)memcpy(blob.ssids, s_poom_wifi_spam_ssids.ssids, sizeof(blob.ssids));
+
+    esp_err_t err = poom_secrets_init();
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+
+    return poom_secrets_set_blob(POOM_WIFI_SPAM_SSIDS_KEY, &blob, sizeof(blob));
+}
+
+/**
+ * @brief Loads internal data used by this module.
+ *
+ * @return esp_err_t
+ */
+static esp_err_t poom_wifi_spam_ssids_load_(void)
+{
+    poom_wifi_spam_ssids_blob_v1_t blob;
+    size_t blob_len = sizeof(blob);
+
+    esp_err_t err = poom_secrets_init();
+    if(err != ESP_OK)
+    {
+        poom_wifi_spam_ssids_set_defaults_();
+        s_poom_wifi_spam_ssids_loaded = true;
+        return err;
+    }
+
+    (void)memset(&blob, 0, sizeof(blob));
+    err = poom_secrets_get_blob(POOM_WIFI_SPAM_SSIDS_KEY, &blob, &blob_len);
+    if(err == ESP_ERR_NVS_NOT_FOUND)
+    {
+        poom_wifi_spam_ssids_set_defaults_();
+        s_poom_wifi_spam_ssids_loaded = true;
+        return ESP_OK;
+    }
+    if(err != ESP_OK)
+    {
+        poom_wifi_spam_ssids_set_defaults_();
+        s_poom_wifi_spam_ssids_loaded = true;
+        return err;
+    }
+
+    if((blob_len != sizeof(blob)) || (blob.magic != POOM_WIFI_SPAM_SSIDS_MAGIC) ||
+       (blob.version != POOM_WIFI_SPAM_SSIDS_VERSION))
+    {
+        poom_wifi_spam_ssids_set_defaults_();
+        s_poom_wifi_spam_ssids_loaded = true;
+        return ESP_OK;
+    }
+
+    (void)memset(&s_poom_wifi_spam_ssids, 0, sizeof(s_poom_wifi_spam_ssids));
+    s_poom_wifi_spam_ssids.count = blob.count;
+    if(s_poom_wifi_spam_ssids.count > POOM_WIFI_SPAM_SSIDS_MAX)
+    {
+        s_poom_wifi_spam_ssids.count = POOM_WIFI_SPAM_SSIDS_MAX;
+    }
+    (void)memcpy(s_poom_wifi_spam_ssids.ssids, blob.ssids, sizeof(blob.ssids));
+
+    for(uint8_t i = 0; i < s_poom_wifi_spam_ssids.count; i++)
+    {
+        s_poom_wifi_spam_ssids.ssids[i][POOM_WIFI_SPAM_SSID_MAX_LEN] = '\0';
+    }
+
+    s_poom_wifi_spam_ssids_loaded = true;
+    return ESP_OK;
+}
+
+/**
+ * @brief Internal helper for `poom_wifi_spam_ssids_ensure_loaded`.
+ *
+ * @return void
+ */
+static void poom_wifi_spam_ssids_ensure_loaded_(void)
+{
+    if(s_poom_wifi_spam_ssids_loaded)
+    {
+        return;
+    }
+    (void)poom_wifi_spam_ssids_load_();
+}
 
 /**
  * @brief Writes the 12-bit sequence number in beacon header format.
@@ -216,9 +352,9 @@ static esp_err_t poom_wifi_spam_prepare_ap_(void)
 static void poom_wifi_spam_task_(void *task_arg)
 {
     uint8_t line_index = 0U;
-    uint16_t sequence_numbers[sizeof(s_poom_wifi_spam_ssids) / sizeof(s_poom_wifi_spam_ssids[0])] = {0};
+    uint16_t sequence_numbers[POOM_WIFI_SPAM_SSIDS_MAX] = {0};
     uint8_t beacon_buffer[POOM_WIFI_SPAM_MAX_BEACON_LEN];
-    const uint32_t total_lines = (uint32_t)(sizeof(s_poom_wifi_spam_ssids) / sizeof(s_poom_wifi_spam_ssids[0]));
+    const uint32_t total_lines = (uint32_t)s_poom_wifi_spam_ssids.count;
     uint32_t per_line_ms = POOM_WIFI_SPAM_TASK_INTERVAL_MS / total_lines;
 
     (void)task_arg;
@@ -230,7 +366,7 @@ static void poom_wifi_spam_task_(void *task_arg)
 
     while(s_poom_wifi_spam_running)
     {
-        const char *ssid = s_poom_wifi_spam_ssids[line_index];
+        const char *ssid = s_poom_wifi_spam_ssids.ssids[line_index];
         size_t packet_len = 0U;
         esp_err_t status;
 
@@ -277,6 +413,13 @@ esp_err_t poom_wifi_spam_start(void)
     if(s_poom_wifi_spam_running)
     {
         return ESP_OK;
+    }
+
+    poom_wifi_spam_ssids_ensure_loaded_();
+    if(s_poom_wifi_spam_ssids.count == 0U)
+    {
+        POOM_WIFI_SPAM_PRINTF_E("SSID list is empty (configure via CLI)");
+        return ESP_ERR_INVALID_STATE;
     }
 
     status = poom_wifi_spam_prepare_ap_();
@@ -346,5 +489,131 @@ esp_err_t poom_wifi_spam_get_running(bool *out_running)
     }
 
     *out_running = s_poom_wifi_spam_running;
+    return ESP_OK;
+}
+
+esp_err_t poom_wifi_spam_ssids_get(poom_wifi_spam_ssid_list_t* out_list)
+{
+    if(out_list == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    poom_wifi_spam_ssids_ensure_loaded_();
+    (void)memcpy(out_list, &s_poom_wifi_spam_ssids, sizeof(*out_list));
+    return ESP_OK;
+}
+
+esp_err_t poom_wifi_spam_ssids_set(const poom_wifi_spam_ssid_list_t* list)
+{
+    if(list == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if(s_poom_wifi_spam_running)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    poom_wifi_spam_ssids_ensure_loaded_();
+
+    if(list->count > POOM_WIFI_SPAM_SSIDS_MAX)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    poom_wifi_spam_ssid_list_t tmp;
+    (void)memset(&tmp, 0, sizeof(tmp));
+    tmp.count = list->count;
+
+    for(uint8_t i = 0; i < tmp.count; i++)
+    {
+        const char* s = list->ssids[i];
+        if((s == NULL) || (s[0] == '\0'))
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+        if(strlen(s) > POOM_WIFI_SPAM_SSID_MAX_LEN)
+        {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        (void)snprintf(tmp.ssids[i], sizeof(tmp.ssids[i]), "%s", s);
+    }
+
+    s_poom_wifi_spam_ssids = tmp;
+    s_poom_wifi_spam_ssids_loaded = true;
+    return poom_wifi_spam_ssids_save_();
+}
+
+esp_err_t poom_wifi_spam_ssids_remove(uint8_t index)
+{
+    if(s_poom_wifi_spam_running)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    poom_wifi_spam_ssids_ensure_loaded_();
+    if(index >= s_poom_wifi_spam_ssids.count)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for(uint8_t i = index; (i + 1U) < s_poom_wifi_spam_ssids.count; i++)
+    {
+        (void)memcpy(s_poom_wifi_spam_ssids.ssids[i],
+                     s_poom_wifi_spam_ssids.ssids[i + 1U],
+                     sizeof(s_poom_wifi_spam_ssids.ssids[i]));
+    }
+    (void)memset(s_poom_wifi_spam_ssids.ssids[s_poom_wifi_spam_ssids.count - 1U], 0,
+                 sizeof(s_poom_wifi_spam_ssids.ssids[0]));
+    s_poom_wifi_spam_ssids.count--;
+    return poom_wifi_spam_ssids_save_();
+}
+
+esp_err_t poom_wifi_spam_ssids_add(const char* ssid)
+{
+    if(s_poom_wifi_spam_running)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if((ssid == NULL) || (ssid[0] == '\0'))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    poom_wifi_spam_ssids_ensure_loaded_();
+    if(s_poom_wifi_spam_ssids.count >= POOM_WIFI_SPAM_SSIDS_MAX)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    if(strlen(ssid) > POOM_WIFI_SPAM_SSID_MAX_LEN)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    (void)snprintf(s_poom_wifi_spam_ssids.ssids[s_poom_wifi_spam_ssids.count],
+                   sizeof(s_poom_wifi_spam_ssids.ssids[0]),
+                   "%s",
+                   ssid);
+    s_poom_wifi_spam_ssids.count++;
+    return poom_wifi_spam_ssids_save_();
+}
+
+esp_err_t poom_wifi_spam_ssids_reset_defaults(void)
+{
+    if(s_poom_wifi_spam_running)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    poom_wifi_spam_ssids_set_defaults_();
+    s_poom_wifi_spam_ssids_loaded = true;
+
+    esp_err_t err = poom_secrets_init();
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    (void)poom_secrets_erase_key(POOM_WIFI_SPAM_SSIDS_KEY);
     return ESP_OK;
 }

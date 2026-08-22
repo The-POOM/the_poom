@@ -13,7 +13,7 @@ It wraps the most common flow:
 ## Structure
 
 ```text
-components/poom_ble_gatt_client
+modules/poom_ble_gatt_client
 ├── CMakeLists.txt
 ├── component.mk
 ├── poom_ble_gatt_client.c
@@ -33,7 +33,7 @@ If debug is disabled, `POOM_BLE_GATT_CLIENT_PRINTF_D(...)` is compiled out.
 
 ## Public API
 
-Header: `components/poom_ble_gatt_client/include/poom_ble_gatt_client.h`
+Header: `modules/poom_ble_gatt_client/include/poom_ble_gatt_client.h`
 
 - `esp_bt_uuid_t poom_ble_gatt_client_default_service_uuid(void)`
 - `esp_bt_uuid_t poom_ble_gatt_client_default_char_uuid(void)`

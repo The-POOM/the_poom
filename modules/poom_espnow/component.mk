@@ -1,0 +1,3 @@
+COMPONENT_SRCDIRS := .
+COMPONENT_ADD_INCLUDEDIRS := include
+COMPONENT_REQUIRES := poom_wifi_ctrl esp_wifi

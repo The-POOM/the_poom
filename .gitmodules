@@ -1,0 +1,6 @@
+[submodule "applications/poom_nfc"]
+	path = applications/poom_nfc
+	url = https://github.com/The-POOM/poom_nfc.git
+[submodule "third-party/nfcal"]
+	path = third-party/nfcal
+	url = https://github.com/The-POOM/nfcal.git

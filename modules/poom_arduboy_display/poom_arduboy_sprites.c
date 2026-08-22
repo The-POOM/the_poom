@@ -13,11 +13,27 @@
 #define pgm_read_byte(addr) (*(const uint8_t *)(addr))
 #endif
 
+/**
+ * @brief Internal helper for `buffer`.
+ *
+ * @return inline uint8_t *
+ */
 static inline uint8_t *buffer_(void)
 {
     return poom_arduboy_get_buffer();
 }
 
+/**
+ * @brief Draws the current module state.
+ *
+ * @param[in] x Parameter passed to the function.
+ * @param[in] y Parameter passed to the function.
+ * @param[in] bitmap Parameter passed to the function.
+ * @param[in] w Parameter passed to the function.
+ * @param[in] h Parameter passed to the function.
+ * @param[in] draw_mode Parameter passed to the function.
+ * @return void
+ */
 static void draw_bitmap_(int16_t x,
                          int16_t y,
                          const uint8_t *bitmap,
@@ -151,6 +167,16 @@ static void draw_bitmap_(int16_t x,
     }
 }
 
+/**
+ * @brief Internal helper for `draw`.
+ *
+ * @param[in] x Parameter passed to the function.
+ * @param[in] y Parameter passed to the function.
+ * @param[in] bitmap Parameter passed to the function.
+ * @param[in] frame Parameter passed to the function.
+ * @param[in] drawMode Parameter passed to the function.
+ * @return void
+ */
 static void draw_(int16_t x, int16_t y, const uint8_t *bitmap, uint8_t frame, uint8_t drawMode)
 {
     if (bitmap == NULL)

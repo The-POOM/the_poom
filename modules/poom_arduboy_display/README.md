@@ -47,6 +47,7 @@ From `include/Arduboy2.h` (C API):
 - Drawing primitives:
   - `poom_arduboy_draw_pixel`
   - `poom_arduboy_draw_line`
+  - `poom_arduboy_draw_circle`
   - `poom_arduboy_draw_rect`, `poom_arduboy_fill_rect`
   - `poom_arduboy_draw_fast_vline`, `poom_arduboy_draw_fast_hline`
   - `poom_arduboy_fill_triangle`
@@ -92,4 +93,3 @@ void render(void)
 
 ## Notes
 - This component is **display-only** (no button/audio helpers like the full Arduboy2 library).
-

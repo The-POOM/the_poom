@@ -25,7 +25,7 @@ applications/poom_ble_hid/
     └── poom_ble_hid.h
 ```
 
-## Runtime Flow
+## Runtime Behavior
 
 ```mermaid
 flowchart TD
@@ -71,3 +71,7 @@ flowchart TD
   - `poom_ble_hid_key_press_ascii`
   - `poom_ble_hid_key_release_all`
 
+## Integration
+
+- Third-party files (`esp_hidd_prf_api.*`, `hid_dev.*`, `hid_device_le_prf.*`) are kept with their original names.
+- The component now uses a flat source layout (no `src/` subfolder).

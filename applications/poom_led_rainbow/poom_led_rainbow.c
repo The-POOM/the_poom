@@ -38,6 +38,7 @@
 static ws2812_strip_t s_strip;
 static TaskHandle_t s_led_task = NULL;
 static bool s_initialized = false;
+static bool s_boot_blink_done = false;
 
 /**
  * @brief Converts wheel position into RGB color.
@@ -169,7 +170,11 @@ void poom_led_rainbow_init(void)
 
     ws2812_set_brightness(&s_strip, POOM_LED_RAINBOW_INIT_BRIGHTNESS);
 
-    poom_led_rainbow_boot_blink_();
+    if (!s_boot_blink_done)
+    {
+        poom_led_rainbow_boot_blink_();
+        s_boot_blink_done = true;
+    }
     poom_led_rainbow_clear_all_();
     s_initialized = true;
 }
@@ -204,15 +209,30 @@ bool poom_led_rainbow_start(void)
 
 void poom_led_rainbow_stop(void)
 {
+    if (s_initialized)
+    {
+        poom_led_rainbow_clear_all_();
+    }
+
     if (s_led_task != NULL)
     {
         TaskHandle_t task = s_led_task;
         s_led_task = NULL;
         vTaskDelete(task);
     }
+}
+
+bool poom_led_rainbow_deinit(void)
+{
+    bool was_running = (s_led_task != NULL);
+
+    poom_led_rainbow_stop();
 
     if (s_initialized)
     {
-        poom_led_rainbow_clear_all_();
+        ws2812_deinit(&s_strip);
+        s_initialized = false;
     }
+
+    return was_running;
 }

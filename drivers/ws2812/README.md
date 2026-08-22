@@ -51,7 +51,7 @@ esp_err_t ws2812_show(ws2812_strip_t *s);
 - The internal simple encoder uses a shared symbol context, which is suitable for
   the common single-strip usage pattern in this project.
 
-## Usage
+## Quick Usage
 
 ```c
 #include "ws2812.h"

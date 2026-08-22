@@ -1,0 +1,21 @@
+# Zigbee overlay for POOM.
+#
+# Suggested usage:
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.zigbee" reconfigure
+#
+# Goal:
+# - Enable the Zigbee-specific CLI/menu path in this repo.
+# - Keep OpenThread disabled in this profile to avoid extra RAM pressure.
+# - Preserve the shared base config from sdkconfig.defaults.
+
+# -------------------------
+# Zigbee
+# -------------------------
+CONFIG_ZB_ENABLED=y
+# CONFIG_ZB_ZED is not set
+
+# -------------------------
+# Keep Thread out of this profile
+# -------------------------
+# CONFIG_OPENTHREAD_ENABLED is not set
+# CONFIG_OPENTHREAD_SPINEL_ONLY is not set

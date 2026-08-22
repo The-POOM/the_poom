@@ -21,11 +21,26 @@ static int16_t s_cursor_y = 0;
 static uint8_t s_text_size = 1;
 static int8_t s_x_shift = (int8_t)POOM_ARDUBOY_OLED_X_SHIFT;
 
+/**
+ * @brief Internal helper for `in_bounds`.
+ *
+ * @param[in] x Parameter passed to the function.
+ * @param[in] y Parameter passed to the function.
+ * @return inline bool
+ */
 static inline bool in_bounds_(int16_t x, int16_t y)
 {
     return (x >= 0) && (y >= 0) && (x < ARDUBOY_WIDTH) && (y < ARDUBOY_HEIGHT);
 }
 
+/**
+ * @brief Internal helper for `put_pixel`.
+ *
+ * @param[in] x Parameter passed to the function.
+ * @param[in] y Parameter passed to the function.
+ * @param[in] color Parameter passed to the function.
+ * @return inline void
+ */
 static inline void put_pixel_(int16_t x, int16_t y, uint8_t color)
 {
     if (!in_bounds_(x, y))
@@ -50,6 +65,14 @@ static inline void put_pixel_(int16_t x, int16_t y, uint8_t color)
     }
 }
 
+/**
+ * @brief Draws the current module state.
+ *
+ * @param[in] x Parameter passed to the function.
+ * @param[in] y Parameter passed to the function.
+ * @param[in] c Parameter passed to the function.
+ * @return void
+ */
 static void draw_char5x7_(int16_t x, int16_t y, char c)
 {
     if (c < 0x20 || c > 0x7E)
@@ -90,6 +113,12 @@ static void draw_char5x7_(int16_t x, int16_t y, char c)
     }
 }
 
+/**
+ * @brief Internal helper for `flush_page_shifted`.
+ *
+ * @param[in] page Parameter passed to the function.
+ * @return void
+ */
 static void flush_page_shifted_(int page)
 {
     const uint8_t *src = &s_buffer[(size_t)page * (size_t)ARDUBOY_WIDTH];
@@ -136,7 +165,6 @@ void poom_arduboy_set_text_size(uint8_t size)
 void poom_arduboy_begin(void)
 {
     (void)i2c_init();
-    // Not strictly required (oled_transport_init will register again), but makes the flow explicit.
     (void)i2c_register_device((uint8_t)OLED_I2C_ADDRESS_DEFAULT);
 
     oled_driver_init(&s_dev, ARDUBOY_WIDTH, ARDUBOY_HEIGHT);
@@ -295,6 +323,43 @@ void poom_arduboy_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint
     }
 }
 
+void poom_arduboy_draw_circle(int16_t x0, int16_t y0, uint8_t r, uint8_t color)
+{
+    int16_t f = (int16_t)(1 - (int16_t)r);
+    int16_t ddF_x = 1;
+    int16_t ddF_y = (int16_t)(-2 * (int16_t)r);
+    int16_t x = 0;
+    int16_t y = (int16_t)r;
+
+    put_pixel_(x0, (int16_t)(y0 + y), color);
+    put_pixel_(x0, (int16_t)(y0 - y), color);
+    put_pixel_((int16_t)(x0 + y), y0, color);
+    put_pixel_((int16_t)(x0 - y), y0, color);
+
+    while (x < y)
+    {
+        if (f >= 0)
+        {
+            --y;
+            ddF_y = (int16_t)(ddF_y + 2);
+            f = (int16_t)(f + ddF_y);
+        }
+
+        ++x;
+        ddF_x = (int16_t)(ddF_x + 2);
+        f = (int16_t)(f + ddF_x);
+
+        put_pixel_((int16_t)(x0 + x), (int16_t)(y0 + y), color);
+        put_pixel_((int16_t)(x0 - x), (int16_t)(y0 + y), color);
+        put_pixel_((int16_t)(x0 + x), (int16_t)(y0 - y), color);
+        put_pixel_((int16_t)(x0 - x), (int16_t)(y0 - y), color);
+        put_pixel_((int16_t)(x0 + y), (int16_t)(y0 + x), color);
+        put_pixel_((int16_t)(x0 - y), (int16_t)(y0 + x), color);
+        put_pixel_((int16_t)(x0 + y), (int16_t)(y0 - x), color);
+        put_pixel_((int16_t)(x0 - y), (int16_t)(y0 - x), color);
+    }
+}
+
 void poom_arduboy_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color)
 {
     if (w <= 0 || h <= 0)
@@ -308,6 +373,13 @@ void poom_arduboy_fill_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint8_t 
     }
 }
 
+/**
+ * @brief Internal helper for `swap_i16`.
+ *
+ * @param[in] a Parameter passed to the function.
+ * @param[in] b Parameter passed to the function.
+ * @return inline void
+ */
 static inline void swap_i16_(int16_t *a, int16_t *b)
 {
     int16_t t = *a;
@@ -323,7 +395,6 @@ void poom_arduboy_fill_triangle(int16_t x0,
                                 int16_t y2,
                                 uint8_t color)
 {
-    // Sort vertices by Y (y0 <= y1 <= y2)
     if (y0 > y1)
     {
         swap_i16_(&y0, &y1);
@@ -409,7 +480,6 @@ void poom_arduboy_draw_bitmap_rows(int16_t x,
 
     if ((width & 7) != 0)
     {
-        // Must be 8-pixels aligned (same limitation as legacy oled_driver_bitmaps).
         return;
     }
 
@@ -428,7 +498,6 @@ void poom_arduboy_draw_bitmap_rows(int16_t x,
 
             const int16_t base_x = (int16_t)(x + bx * 8);
 
-            // MSB-first: bit 7 is left-most pixel.
             for (int16_t bit = 0; bit < 8; bit++)
             {
                 const bool on = ((v & (uint8_t)(1u << (7 - bit))) != 0u);

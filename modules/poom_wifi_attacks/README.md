@@ -24,14 +24,14 @@
 - Combined attack mode.
 - Link-time override for `ieee80211_raw_frame_sanity_check`.
 
-## Public API
+## Public API Overview
 
 - `void poom_wifi_attacks_handle(poom_wifi_attacks_type_t attack_type, wifi_ap_record_t *ap_target);`
 - `void poom_wifi_attacks_stop(void);`
 - `int poom_wifi_attacks_get_attack_count(void);`
 - `void poom_wifi_attacks_broadcast_once(wifi_ap_record_t *ap);`
 
-## Structure
+## File Structure
 
 ```text
 modules/poom_wifi_attacks
@@ -56,13 +56,13 @@ modules/poom_wifi_attacks
 
 No component-specific `Kconfig` file is required.
 
-## Logging
+## Logging Behavior
 
 When `CONFIG_POOM_WIFI_ATTACKS_ENABLE_LOG` is enabled, logs are emitted with:
 - Tag: `poom_wifi_attacks`
 - Macros: `POOM_PRINTF_E`, `POOM_PRINTF_W`, `POOM_PRINTF_I`, `POOM_PRINTF_D`
 
-## Usage
+## Usage Example
 
 ```c
 #include "poom_wifi_attacks.h"

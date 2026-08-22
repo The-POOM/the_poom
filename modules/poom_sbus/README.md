@@ -14,7 +14,7 @@
 - Multi-subscriber topic delivery.
 - Duplicate subscription protection.
 
-## Public API
+## Public API Overview
 - `poom_sbus_init`
 - `poom_sbus_start`
 - `poom_sbus_register_topic`
@@ -22,7 +22,7 @@
 - `poom_sbus_unsubscribe_cb`
 - `poom_sbus_publish`
 
-## Structure
+## File Structure
 - `poom_sbus.c`: dispatcher, registry, and message routing.
 - `include/poom_sbus.h`: public types, limits, and API.
 - `CMakeLists.txt`: ESP-IDF registration.
@@ -39,10 +39,10 @@ Compile-time limits are exposed in `poom_sbus.h`:
 - `POOM_SBUS_MSG_DATA_SIZE`
 - `POOM_SBUS_DISPATCH_QUEUE_DEPTH`
 
-## Logging
+## Logging Behavior
 This module does not emit runtime logs by default.
 
-## Usage
+## Usage Example
 ```c
 static void button_handler(const poom_sbus_msg_t *msg, void *user)
 {

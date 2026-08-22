@@ -97,12 +97,12 @@ void poom_ble_gatt_client_send_data(uint8_t *data, int length);
 /**
  * @brief Starts BLE GATT client helper stack.
  */
-void poom_ble_gatt_client_start(void);
+esp_err_t poom_ble_gatt_client_start(void);
 
 /**
  * @brief Stops BLE GATT client helper stack and releases resources.
  */
-void poom_ble_gatt_client_stop(void);
+esp_err_t poom_ble_gatt_client_stop(void);
 
 #ifdef __cplusplus
 }

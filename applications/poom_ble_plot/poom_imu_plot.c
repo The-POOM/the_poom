@@ -126,7 +126,6 @@ static void on_button_any(const poom_sbus_msg_t *msg, void *user)
         }
         else
         {
-            /* no-op */
         }
     }
 }

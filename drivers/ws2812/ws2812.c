@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "esp_check.h"
+#include "soc/soc_caps.h"
 #include "ws2812.h"
 
 /**
@@ -21,7 +22,11 @@ static const char *TAG = "ws2812";
 #define WS2812_BRIGHTNESS_ROUNDING_OFFSET     (127U)
 #define WS2812_RESET_SYMBOL_PARTS             (2U)
 
+#if defined(SOC_RMT_MEM_WORDS_PER_CHANNEL)
+#define WS2812_RMT_MEM_BLOCK_SYMBOLS          ((uint32_t)SOC_RMT_MEM_WORDS_PER_CHANNEL)
+#else
 #define WS2812_RMT_MEM_BLOCK_SYMBOLS          (64U)
+#endif
 #define WS2812_RMT_TRANS_QUEUE_DEPTH          (4U)
 #define WS2812_RMT_LOOP_COUNT                 (0U)
 #define WS2812_ENCODER_MIN_FREE_SYMBOLS       (8U)

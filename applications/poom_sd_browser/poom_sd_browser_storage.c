@@ -309,6 +309,35 @@ esp_err_t poom_sd_browser_storage_init(poom_sd_browser_storage_t* storage)
     return poom_sd_browser_storage_update_root_state_(storage);
 }
 
+esp_err_t poom_sd_browser_storage_init_at(poom_sd_browser_storage_t* storage, const char* abs_path)
+{
+    esp_err_t err = poom_sd_browser_storage_validate_(storage);
+    const char* root = POOM_SD_BROWSER_STORAGE_ROOT;
+    size_t root_len = strlen(root);
+
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+
+    memset(storage, 0, sizeof(*storage));
+
+    if((abs_path == NULL) || (abs_path[0] == '\0'))
+    {
+        snprintf(storage->current_path, sizeof(storage->current_path), "%s", root);
+        return poom_sd_browser_storage_update_root_state_(storage);
+    }
+
+    if((strncmp(abs_path, root, root_len) != 0) || (strstr(abs_path, "..") != NULL))
+    {
+        snprintf(storage->current_path, sizeof(storage->current_path), "%s", root);
+        return poom_sd_browser_storage_update_root_state_(storage);
+    }
+
+    snprintf(storage->current_path, sizeof(storage->current_path), "%s", abs_path);
+    return poom_sd_browser_storage_update_root_state_(storage);
+}
+
 /**
  * @brief Releases all allocated storage resources.
  *
@@ -326,7 +355,9 @@ esp_err_t poom_sd_browser_storage_deinit(poom_sd_browser_storage_t* storage)
  * @param[in,out] storage Storage context.
  * @return esp_err_t
  */
-esp_err_t poom_sd_browser_storage_reload(poom_sd_browser_storage_t* storage)
+esp_err_t poom_sd_browser_storage_reload(poom_sd_browser_storage_t* storage,
+                                        poom_sd_browser_storage_filter_fn_t filter,
+                                        void* user_ctx)
 {
     DIR* dir;
     struct dirent* entry;
@@ -377,6 +408,11 @@ esp_err_t poom_sd_browser_storage_reload(poom_sd_browser_storage_t* storage)
             &is_dir,
             &file_size);
         if(err != ESP_OK)
+        {
+            continue;
+        }
+
+        if((filter != NULL) && !filter(entry->d_name, is_dir, user_ctx))
         {
             continue;
         }
@@ -516,7 +552,7 @@ esp_err_t poom_sd_browser_storage_enter_selected(poom_sd_browser_storage_t* stor
     storage->selected_index = 0U;
     *out_is_file = false;
 
-    return poom_sd_browser_storage_reload(storage);
+    return poom_sd_browser_storage_reload(storage, NULL, NULL);
 }
 
 /**
@@ -542,7 +578,7 @@ esp_err_t poom_sd_browser_storage_go_parent(poom_sd_browser_storage_t* storage)
     }
 
     storage->selected_index = 0U;
-    return poom_sd_browser_storage_reload(storage);
+    return poom_sd_browser_storage_reload(storage, NULL, NULL);
 }
 
 /**

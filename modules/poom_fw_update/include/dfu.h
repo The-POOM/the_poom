@@ -13,7 +13,8 @@ extern "C" {
 /* =========================
  * Compile-time constants
  * ========================= */
-#define CURRENT_FW_VERSION "1.0"
+/* Deprecated: runtime should use `esp_app_get_description()->version` (PROJECT_VER). */
+#define CURRENT_FW_VERSION "deprecated"
 
 /* =========================
  * Public types
@@ -58,6 +59,18 @@ typedef poom_fw_update_show_event_cb_t ota_show_event_cb_t;
 esp_err_t poom_fw_update_init(void);
 
 /**
+ * @brief Stops firmware-update service and releases AP/web resources.
+ *
+ * This function stops the embedded HTTP server, tears down mDNS, and
+ * deinitializes Wi-Fi/AP mode.
+ *
+ * @return
+ * - ESP_OK on success
+ * - Error code from shutdown sequence on failure
+ */
+esp_err_t poom_fw_update_deinit(void);
+
+/**
  * @brief Registers callback to receive update UI events.
  *
  * @param[in] cb Callback function. Can be NULL to clear callback.
@@ -89,6 +102,13 @@ const char* poom_fw_update_get_wifi_ap_ssid(void);
  * @return Null-terminated password string.
  */
 const char* poom_fw_update_get_wifi_ap_password(void);
+
+/**
+ * @brief Returns current AP IPv4 address used by firmware update mode.
+ *
+ * @return Null-terminated IPv4 string, or empty string when unavailable.
+ */
+const char* poom_fw_update_get_wifi_ap_ip(void);
 
 #ifdef __cplusplus
 }

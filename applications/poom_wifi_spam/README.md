@@ -26,6 +26,7 @@ Defined in `applications/poom_wifi_spam/CMakeLists.txt`:
 
 - `poom_wifi_ctrl`
 - `esp_wifi`
+- `poom_secrets_store` (persist SSID list)
 
 ## Public API
 
@@ -35,6 +36,12 @@ Header: `applications/poom_wifi_spam/include/poom_wifi_spam.h`
 esp_err_t poom_wifi_spam_start(void);
 esp_err_t poom_wifi_spam_stop(void);
 esp_err_t poom_wifi_spam_get_running(bool *out_running);
+
+esp_err_t poom_wifi_spam_ssids_get(poom_wifi_spam_ssid_list_t* out_list);
+esp_err_t poom_wifi_spam_ssids_set(const poom_wifi_spam_ssid_list_t* list);
+esp_err_t poom_wifi_spam_ssids_remove(uint8_t index);
+esp_err_t poom_wifi_spam_ssids_add(const char* ssid);
+esp_err_t poom_wifi_spam_ssids_reset_defaults(void);
 ```
 
 ## Runtime Behavior
@@ -45,7 +52,7 @@ esp_err_t poom_wifi_spam_get_running(bool *out_running);
 4. `poom_wifi_spam_stop()` stops transmission and tears down AP mode.
 5. `poom_wifi_spam_get_running()` reports current runtime status.
 
-## Runtime Flow
+## Integration
 
 ```mermaid
 flowchart TD
@@ -66,7 +73,12 @@ flowchart TD
     O --> P[Return status]
 ```
 
-## Notes
+## Usage
 
-- SSID values are capped to 32 bytes to match IEEE 802.11 limits.
-- Beacon template, sequence handling, and SSID rotation are implemented in `poom_wifi_spam.c`.
+The `poom_cli` component registers these helpers:
+
+- `wifi-spam-ssids-show`
+- `wifi-spam-ssids-set <ssid1> [ssid2] ...`
+- `wifi-spam-ssids-add <ssid>`
+- `wifi-spam-ssids-del <index>`
+- `wifi-spam-ssids-reset`

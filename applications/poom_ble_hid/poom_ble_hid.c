@@ -264,8 +264,15 @@ static void poom_ble_hid_on_hidd_event_(esp_hidd_cb_event_t event, esp_hidd_cb_p
             s_secured = false;
             s_is_connected = false;
             memset(s_remote_bda, 0, sizeof(s_remote_bda));
-            POOM_LOGW("BLE_DISCONNECT -> restart advertising");
-            (void)esp_ble_gap_start_advertising(&s_adv_params);
+            if (s_is_started)
+            {
+                POOM_LOGW("BLE_DISCONNECT -> restart advertising");
+                (void)esp_ble_gap_start_advertising(&s_adv_params);
+            }
+            else
+            {
+                POOM_LOGW("BLE_DISCONNECT while stopped");
+            }
             poom_ble_hid_notify_connection_state_(false);
             break;
 
@@ -371,7 +378,6 @@ void poom_ble_hid_start(void)
 
     if (s_is_started)
     {
-        // Already started: just ensure advertising is running again.
         (void)esp_ble_gap_config_adv_data(&s_adv_data);
         (void)esp_ble_gap_start_advertising(&s_adv_params);
         s_secured = false;
@@ -487,7 +493,6 @@ void poom_ble_hid_start(void)
 
     s_is_started = true;
 
-    // Ensure advertising restarts whenever we (re)start the module.
     (void)esp_ble_gap_config_adv_data(&s_adv_data);
     (void)esp_ble_gap_start_advertising(&s_adv_params);
 
@@ -505,11 +510,11 @@ void poom_ble_hid_stop(void)
         return;
     }
 
-    // Best-effort: disconnect (if connected), stop advertising, then stop HID profile.
+    s_is_started = false;
+
     if (s_is_connected)
     {
         (void)esp_ble_gap_disconnect(s_remote_bda);
-        vTaskDelay(pdMS_TO_TICKS(250));
         s_is_connected = false;
         s_secured = false;
         memset(s_remote_bda, 0, sizeof(s_remote_bda));
@@ -518,7 +523,6 @@ void poom_ble_hid_stop(void)
 
     (void)esp_ble_gap_stop_advertising();
 
-    s_is_started = false;
     s_hid_conn_id = 0U;
     s_secured = false;
     s_conn_cb = NULL;

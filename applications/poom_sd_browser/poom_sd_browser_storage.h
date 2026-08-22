@@ -33,6 +33,8 @@ typedef struct
     bool is_root;
 } poom_sd_browser_storage_t;
 
+typedef bool (*poom_sd_browser_storage_filter_fn_t)(const char* name, bool is_directory, void* user_ctx);
+
 /**
  * @brief Initializes SD browser storage context.
  *
@@ -40,6 +42,14 @@ typedef struct
  * @return esp_err_t
  */
 esp_err_t poom_sd_browser_storage_init(poom_sd_browser_storage_t* storage);
+
+/**
+ * @brief Initializes storage context starting at an absolute path.
+ *
+ * The path must be inside the SD root (prefix `POOM_SD_BROWSER_STORAGE_ROOT`).
+ * When invalid or empty, falls back to SD root.
+ */
+esp_err_t poom_sd_browser_storage_init_at(poom_sd_browser_storage_t* storage, const char* abs_path);
 
 /**
  * @brief Releases all allocated storage resources.
@@ -53,9 +63,13 @@ esp_err_t poom_sd_browser_storage_deinit(poom_sd_browser_storage_t* storage);
  * @brief Reloads directory items for current path.
  *
  * @param[in,out] storage Storage context.
+ * @param[in] filter Optional filter predicate (called for each entry name).
+ * @param[in] user_ctx Filter context pointer.
  * @return esp_err_t
  */
-esp_err_t poom_sd_browser_storage_reload(poom_sd_browser_storage_t* storage);
+esp_err_t poom_sd_browser_storage_reload(poom_sd_browser_storage_t* storage,
+                                        poom_sd_browser_storage_filter_fn_t filter,
+                                        void* user_ctx);
 
 /**
  * @brief Moves selection to next item.

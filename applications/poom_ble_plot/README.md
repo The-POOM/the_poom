@@ -2,6 +2,8 @@
 
 `poom_ble_plot` provides BLE plotting support over Nordic UART Service (NUS).
 
+## Purpose
+
 It is split into two modules:
 
 - `poom_ble_plot`: BLE transport (GAP/GATT + NUS TX notify / RX write)
@@ -67,7 +69,7 @@ Both modules use printf-based logs with compile-time switches:
   - `IMUPLOT_LOG_ENABLED`
   - `IMUPLOT_DEBUG_LOG_ENABLED`
 
-## Runtime Notes
+## Runtime Behavior
 
 - BLE transport uses NUS 128-bit UUIDs compatible with Bluefruit UART plot workflows.
 - Notifications are sent as one CSV line per BLE notification.
@@ -83,7 +85,7 @@ Both modules use printf-based logs with compile-time switches:
 (void)poom_ble_plot_imu_start(IMUPLOT_ACCEL_ONLY, 50);
 ```
 
-## Return Codes
+## Integration
 
 `poom_ble_plot_send_line()` can return negative values when:
 

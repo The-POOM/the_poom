@@ -41,7 +41,7 @@
  * Local log macros (printf)
  * ========================= */
 static const char *POOM_WIFI_CTRL_TAG = "poom_wifi_ctrl";
-
+//#define CONFIG_POOM_WIFI_CTRL_ENABLE_LOG 1
 #if CONFIG_POOM_WIFI_CTRL_ENABLE_LOG
 
     #define POOM_PRINTF_E(fmt, ...) \
@@ -77,6 +77,7 @@ static void *s_evt_user_ctx = NULL;
 /* Event handler instances */
 static esp_event_handler_instance_t s_wifi_any_id_inst;
 static esp_event_handler_instance_t s_ip_got_ip_inst;
+static esp_event_handler_instance_t s_ip_assigned_client_inst;
 static bool s_evt_handlers_registered = false;
 
 /* STA state flags */
@@ -97,6 +98,15 @@ static poom_wifi_ctrl_state_t s_wifi = {0};
 /* =========================
  * Local helpers
  * ========================= */
+
+/**
+ * @brief Returns the text representation for the current state.
+ *
+ * @param[in] dst Parameter passed to the function.
+ * @param[in] dst_size Parameter passed to the function.
+ * @param[in] src Parameter passed to the function.
+ * @return void
+ */
 static void poom_wifi_ctrl_safe_copy_str_(uint8_t *dst, size_t dst_size, const char *src)
 {
     size_t n = 0U;
@@ -120,6 +130,26 @@ static void poom_wifi_ctrl_safe_copy_str_(uint8_t *dst, size_t dst_size, const c
     }
 }
 
+/**
+ * @brief Internal helper for `poom_wifi_ctrl_hostname_or_dash`.
+ *
+ * @param[in] hostname Parameter passed to the function.
+ * @return const char *
+ */
+static const char *poom_wifi_ctrl_hostname_or_dash_(const char *hostname)
+{
+    if ((hostname == NULL) || (hostname[0] == '\0'))
+    {
+        return "-";
+    }
+    return hostname;
+}
+
+/**
+ * @brief Initializes internal resources for this module.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t poom_wifi_ctrl_nvs_init_(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -136,17 +166,30 @@ static esp_err_t poom_wifi_ctrl_nvs_init_(void)
     return err;
 }
 
+/**
+ * @brief Initializes internal resources for this module.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t poom_wifi_ctrl_event_loop_init_(void)
 {
     esp_err_t err = esp_event_loop_create_default();
     if (err == ESP_ERR_INVALID_STATE)
     {
-        /* Already created */
         err = ESP_OK;
     }
     return err;
 }
 
+/**
+ * @brief Internal helper for `poom_wifi_ctrl_event_handler`.
+ *
+ * @param[in] arg Parameter passed to the function.
+ * @param[in] event_base Parameter passed to the function.
+ * @param[in] event_id Parameter passed to the function.
+ * @param[in] event_data Parameter passed to the function.
+ * @return void
+ */
 static void poom_wifi_ctrl_event_handler_(void *arg,
                                          esp_event_base_t event_base,
                                          int32_t event_id,
@@ -161,7 +204,6 @@ static void poom_wifi_ctrl_event_handler_(void *arg,
     {
         if (event_id == WIFI_EVENT_STA_CONNECTED)
         {
-            
             s_sta_connected = true;
             s_sta_has_ip = false;
 
@@ -190,13 +232,43 @@ static void poom_wifi_ctrl_event_handler_(void *arg,
                 s_evt_cb(&info, s_evt_user_ctx);
             }
 
-            /* Optional auto-reconnect (enable only if you want)
-             * (void)esp_wifi_connect();
-             */
+        }
+        else if (event_id == WIFI_EVENT_AP_STACONNECTED)
+        {
+            const wifi_event_ap_staconnected_t *ap_evt =
+                (const wifi_event_ap_staconnected_t *)event_data;
+
+            if (ap_evt != NULL)
+            {
+                POOM_PRINTF_I("AP client connected: mac=%02X:%02X:%02X:%02X:%02X:%02X aid=%u",
+                              ap_evt->mac[0], ap_evt->mac[1], ap_evt->mac[2],
+                              ap_evt->mac[3], ap_evt->mac[4], ap_evt->mac[5],
+                              (unsigned)ap_evt->aid);
+            }
+            else
+            {
+                POOM_PRINTF_I("AP client connected");
+            }
+        }
+        else if (event_id == WIFI_EVENT_AP_STADISCONNECTED)
+        {
+            const wifi_event_ap_stadisconnected_t *ap_evt =
+                (const wifi_event_ap_stadisconnected_t *)event_data;
+
+            if (ap_evt != NULL)
+            {
+                POOM_PRINTF_W("AP client disconnected: mac=%02X:%02X:%02X:%02X:%02X:%02X aid=%u",
+                              ap_evt->mac[0], ap_evt->mac[1], ap_evt->mac[2],
+                              ap_evt->mac[3], ap_evt->mac[4], ap_evt->mac[5],
+                              (unsigned)ap_evt->aid);
+            }
+            else
+            {
+                POOM_PRINTF_W("AP client disconnected");
+            }
         }
         else
         {
-            /* no-op */
         }
     }
     else if ((event_base == IP_EVENT) && (event_id == IP_EVENT_STA_GOT_IP))
@@ -224,9 +296,29 @@ static void poom_wifi_ctrl_event_handler_(void *arg,
             s_evt_cb(&info, s_evt_user_ctx);
         }
     }
+    else if ((event_base == IP_EVENT) && (event_id == IP_EVENT_ASSIGNED_IP_TO_CLIENT))
+    {
+        const ip_event_assigned_ip_to_client_t *ev =
+            (const ip_event_assigned_ip_to_client_t *)event_data;
+
+        if (ev != NULL)
+        {
+            POOM_PRINTF_I("AP DHCP assigned: ip=%u.%u.%u.%u mac=%02X:%02X:%02X:%02X:%02X:%02X host=%s",
+                          (unsigned)(ev->ip.addr & 0xFFU),
+                          (unsigned)((ev->ip.addr >> 8) & 0xFFU),
+                          (unsigned)((ev->ip.addr >> 16) & 0xFFU),
+                          (unsigned)((ev->ip.addr >> 24) & 0xFFU),
+                          ev->mac[0], ev->mac[1], ev->mac[2],
+                          ev->mac[3], ev->mac[4], ev->mac[5],
+                          poom_wifi_ctrl_hostname_or_dash_(ev->hostname));
+        }
+        else
+        {
+            POOM_PRINTF_I("AP DHCP assigned IP to client");
+        }
+    }
     else
     {
-        /* no-op */
     }
 }
 
@@ -236,11 +328,17 @@ static void poom_wifi_ctrl_event_handler_(void *arg,
  * - init wifi driver once
  * - set mode + start
  */
+
+/**
+ * @brief Initializes internal resources for this module.
+ *
+ * @param[in] mode Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
 {
     esp_err_t err;
 
-    /* Always ensure system services (idempotent) */
     err = poom_wifi_ctrl_nvs_init_();
     if (err != ESP_OK)
     {
@@ -262,7 +360,6 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
         return err;
     }
 
-    /* Create default netifs incrementally */
     if ((mode == WIFI_MODE_AP) || (mode == WIFI_MODE_APSTA))
     {
         if (!s_wifi.netif_ap_created)
@@ -283,7 +380,6 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
         }
     }
 
-    /* Init Wi-Fi driver once */
     if (!s_wifi.wifi_initialized)
     {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -306,7 +402,6 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
         POOM_PRINTF_D("Wi-Fi driver initialized");
     }
 
-    /* Set desired mode */
     err = esp_wifi_set_mode(mode);
     if (err != ESP_OK)
     {
@@ -314,7 +409,6 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
         return err;
     }
 
-    /* Save default AP MAC once */
     if (((mode == WIFI_MODE_AP) || (mode == WIFI_MODE_APSTA)) && (!s_wifi.default_ap_mac_saved))
     {
         err = esp_wifi_get_mac(WIFI_IF_AP, s_wifi.default_ap_mac);
@@ -325,7 +419,6 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
         }
     }
 
-    /* Start Wi-Fi */
     err = esp_wifi_start();
     if (err == ESP_ERR_INVALID_STATE)
     {
@@ -350,7 +443,6 @@ esp_err_t poom_wifi_ctrl_register_cb(poom_wifi_ctrl_evt_cb_t cb, void *user_ctx)
     s_evt_cb = cb;
     s_evt_user_ctx = user_ctx;
 
-    /* Ensure event loop exists before registering handlers */
     err = esp_netif_init();
     if ((err != ESP_OK) && (err != ESP_ERR_INVALID_STATE))
     {
@@ -393,6 +485,19 @@ esp_err_t poom_wifi_ctrl_register_cb(poom_wifi_ctrl_evt_cb_t cb, void *user_ctx)
         return err;
     }
 
+    err = esp_event_handler_instance_register(IP_EVENT,
+                                              IP_EVENT_ASSIGNED_IP_TO_CLIENT,
+                                              &poom_wifi_ctrl_event_handler_,
+                                              NULL,
+                                              &s_ip_assigned_client_inst);
+    if (err != ESP_OK)
+    {
+        (void)esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_any_id_inst);
+        (void)esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_got_ip_inst);
+        POOM_PRINTF_E("register AP DHCP IP handler failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
     s_evt_handlers_registered = true;
     POOM_PRINTF_D("Event handlers registered");
     return ESP_OK;
@@ -409,6 +514,7 @@ esp_err_t poom_wifi_ctrl_unregister_cb(void)
 
     (void)esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_any_id_inst);
     (void)esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_got_ip_inst);
+    (void)esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_ASSIGNED_IP_TO_CLIENT, s_ip_assigned_client_inst);
 
     s_evt_handlers_registered = false;
     s_evt_cb = NULL;
@@ -546,8 +652,7 @@ esp_err_t poom_wifi_ctrl_ap_start(wifi_config_t *ap_cfg)
 
     POOM_PRINTF_I("Starting AP SSID: %s", (const char *)ap_cfg->ap.ssid);
 
-    /* Ensure APSTA so STA is also available if needed */
-    err = poom_wifi_ctrl_common_init_(WIFI_MODE_APSTA);
+    err = poom_wifi_ctrl_common_init_(WIFI_MODE_AP);
     if (err != ESP_OK)
     {
         return err;
@@ -603,6 +708,11 @@ esp_err_t poom_wifi_ctrl_sta_disconnect(void)
     return err;
 }
 
+/**
+ * @brief Starts the internal runtime for this module.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t poom_wifi_ctrl_start_(void)
 {
     esp_err_t err = esp_wifi_start();
@@ -623,7 +733,6 @@ esp_err_t poom_wifi_ctrl_sta_connect(const char *ssid, const char *password)
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Ensure STA is initialized (common init path) */
     err = poom_wifi_ctrl_init_sta();
     if (err != ESP_OK)
     {
@@ -646,7 +755,6 @@ esp_err_t poom_wifi_ctrl_sta_connect(const char *ssid, const char *password)
         return err;
     }
 
-    /* Optional but recommended for robustness */
     (void)esp_wifi_disconnect();
 
     return esp_wifi_connect();

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POOM Web MIDI</title>
+  <link rel="stylesheet" href="/midi.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">POOM · Web MIDI Harmony</div>
+    <div class="actions">
+      <a class="link" href="/">Home</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card">
+      <h2>Harmony</h2>
+
+      <div class="grid">
+        <label>Key
+          <select id="key">
+            <option>C</option><option>C#</option><option>D</option><option>D#</option><option>E</option><option>F</option>
+            <option>F#</option><option>G</option><option>G#</option><option>A</option><option>A#</option><option>B</option>
+          </select>
+        </label>
+
+        <label>Scale
+          <select id="scale">
+            <option value="major">major</option>
+            <option value="minor">minor</option>
+            <option value="pentatonic_major">pentatonic_major</option>
+            <option value="pentatonic_minor">pentatonic_minor</option>
+          </select>
+        </label>
+
+        <label>Tempo (BPM)
+          <input id="tempo" type="number" min="20" max="300" value="120" />
+        </label>
+
+        <label>Octave
+          <input id="octave" type="number" min="0" max="8" value="4" />
+        </label>
+
+        <label>Channel
+          <input id="channel" type="number" min="0" max="15" value="0" />
+        </label>
+
+        <label>Program
+          <input id="program" type="number" min="0" max="127" value="0" />
+        </label>
+
+        <label>Pattern
+          <select id="pattern">
+            <option value="chord">chord</option>
+            <option value="arpeggio_up">arpeggio_up</option>
+            <option value="arpeggio_down">arpeggio_down</option>
+            <option value="bass_chord">bass_chord</option>
+          </select>
+        </label>
+
+        <label>Step beats
+          <input id="duration" type="number" min="1" max="16" value="1" />
+        </label>
+
+        <label class="checkbox">
+          <input id="loop" type="checkbox" checked />
+          Loop
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="full">Progression degrees (comma separated)
+          <input id="progression" type="text" value="I,V,vi,IV" />
+        </label>
+      </div>
+
+      <div class="row actions">
+        <button id="btn-generate" type="button">Generate JSON</button>
+        <button id="btn-send" type="button">Send to POOM</button>
+        <button id="btn-stop" type="button">Stop</button>
+        <button id="btn-save" type="button">Download JSON</button>
+        <button id="btn-save-sd" type="button">Save to SD</button>
+        <button id="btn-preview" type="button">Preview (Web MIDI)</button>
+      </div>
+
+      <div class="row">
+        <label class="full">JSON
+          <textarea id="json" spellcheck="false"></textarea>
+        </label>
+      </div>
+
+      <div class="row">
+        <div id="status" class="status">Ready.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Notes</h2>
+      <ul class="notes">
+        <li>This page builds a simple harmony JSON and sends it to POOM.</li>
+        <li>POOM plays it via BLE MIDI toward GarageBand.</li>
+        <li>Preview works only if your browser supports Web MIDI and you allow it.</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="/midi.js"></script>
+</body>
+</html>

@@ -14,6 +14,10 @@
 #include "bsp_pong.h"
 #include "iot_button.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /** @brief GPIO pin mapping for board button A. */
 #define A_BUTTON_PIN        PIN_NUM_A
 /** @brief GPIO pin mapping for board button B. */
@@ -86,3 +90,7 @@ void button_module_reset_idle_timer(void);
  * @param lock true to block published callbacks/events, false to enable them.
  */
 void button_module_set_lock(bool lock);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif

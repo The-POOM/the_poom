@@ -31,6 +31,13 @@ bool poom_led_rainbow_start(void);
  */
 void poom_led_rainbow_stop(void);
 
+/**
+ * @brief Stops rainbow animation and releases RMT resources.
+ *
+ * @return true if animation task was running before deinit.
+ */
+bool poom_led_rainbow_deinit(void);
+
 #ifdef __cplusplus
 }
 #endif

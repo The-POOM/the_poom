@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>POOM CLI Web</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="terminal-card">
+    <textarea id="output" readonly spellcheck="false" wrap="off"></textarea>
+    <div class="input-row">
+      <input type="text" id="command" placeholder="Enter command" autocomplete="off">
+      <button id="send-btn" type="button">Send</button>
+      <button id="files-btn" type="button" title="Manage files">Files</button>
+      <button id="tone-btn" class="hidden" type="button" title="Open tone generator">Tone</button>
+      <button id="midi-btn" class="hidden" type="button" title="Open MIDI harmony composer">MIDI</button>
+    </div>
+    <div id="history" class="history"></div>
+  </main>
+  <div id="status-popup" class="status-popup hidden">Connection lost. Retrying...</div>
+  <div id="file-panel-overlay" class="file-panel-overlay hidden"></div>
+  <section id="file-panel" class="file-panel hidden" aria-label="File manager">
+    <header class="file-panel-header">
+      <h2>SD Card Files</h2>
+      <div class="file-header-actions">
+        <button id="file-up-btn" class="file-up-btn" type="button" aria-label="Go to parent folder">Up</button>
+        <button id="file-panel-close" class="file-close-btn" type="button" aria-label="Close file panel">x</button>
+      </div>
+    </header>
+    <div id="file-current-path" class="file-current-path">Path: /sdcard</div>
+    <div id="file-dropzone" class="file-dropzone">
+      <p>Drop a file here or choose one.</p>
+      <label class="file-upload-btn">
+        <input id="file-input" type="file">
+        Choose file
+      </label>
+    </div>
+    <div id="file-space" class="file-space">Loading...</div>
+    <div id="file-list" class="file-list"></div>
+  </section>
+  <div id="file-viewer-overlay" class="file-viewer-overlay hidden"></div>
+  <section id="file-viewer" class="file-viewer hidden" aria-label="File viewer">
+    <header class="file-viewer-header">
+      <h2 id="file-viewer-title">View file</h2>
+      <button id="file-viewer-close" class="file-close-btn" type="button" aria-label="Close file viewer">x</button>
+    </header>
+    <div id="file-viewer-path" class="file-viewer-path"></div>
+    <textarea id="file-viewer-content" class="file-viewer-content" readonly spellcheck="false" wrap="off"></textarea>
+  </section>
+  <script src="/app.js"></script>
+</body>
+</html>

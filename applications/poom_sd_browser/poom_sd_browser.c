@@ -66,17 +66,15 @@
 #define BUTTON_SINGLE_CLICK (4U)
 #endif
 
-#define POOM_SD_BROWSER_MAX_ROWS (5U)
-#define POOM_SD_BROWSER_PATH_LINE_MAX_LEN (21U)
+#define POOM_SD_BROWSER_MAX_ROWS (4U)
 #define POOM_SD_BROWSER_ITEM_LINE_MAX_LEN (21U)
-#define POOM_SD_BROWSER_ITEM_NAME_VISIBLE_CHARS (12U)
+#define POOM_SD_BROWSER_ITEM_NAME_VISIBLE_CHARS (19U)
 #define POOM_SD_BROWSER_FILE_NAME_MAX_LEN (40U)
 #define POOM_SD_BROWSER_FILE_DETAIL_NAME_VISIBLE_CHARS (12U)
-#define POOM_SD_BROWSER_SCROLLBAR_X (123)
-#define POOM_SD_BROWSER_SCROLLBAR_Y (16)
-#define POOM_SD_BROWSER_SCROLLBAR_W (4)
-#define POOM_SD_BROWSER_SCROLLBAR_H (38)
-#define POOM_SD_BROWSER_SCROLLBAR_THUMB_MIN_H (6)
+#define POOM_SD_BROWSER_HEADER_H (11)
+#define POOM_SD_BROWSER_LIST_Y0 (14)
+#define POOM_SD_BROWSER_ROW_STEP (10)
+#define POOM_SD_BROWSER_ROW_HILITE_H (9)
 
 typedef struct
 {
@@ -96,12 +94,50 @@ static size_t s_selected_file_size = 0U;
 static poom_sd_browser_exit_cb_t s_exit_callback = NULL;
 static void* s_exit_callback_ctx = NULL;
 
+static char s_start_dir[POOM_SD_BROWSER_STORAGE_MAX_PATH_LEN] = POOM_SD_BROWSER_STORAGE_ROOT;
+static poom_sd_browser_filter_cb_t s_filter_cb = NULL;
+static void* s_filter_ctx = NULL;
+static poom_sd_browser_file_selected_cb_t s_file_selected_cb = NULL;
+static void* s_file_selected_ctx = NULL;
 
+/**
+ * @brief Internal helper for `poom_sd_browser_filter_bridge`.
+ *
+ * @param[in] name Parameter passed to the function.
+ * @param[in] is_directory Parameter passed to the function.
+ * @param[in] user_ctx Parameter passed to the function.
+ * @return bool
+ */
+static bool poom_sd_browser_filter_bridge_(const char* name, bool is_directory, void* user_ctx)
+{
+    (void)user_ctx;
+
+    if(s_filter_cb == NULL)
+    {
+        return true;
+    }
+
+    return s_filter_cb(name, is_directory, s_filter_ctx);
+}
+
+
+/**
+ * @brief Internal helper for `poom_sd_browser_row_y`.
+ *
+ * @param[in] row Parameter passed to the function.
+ * @return inline int16_t
+ */
 static inline int16_t poom_sd_browser_row_y_(uint8_t row)
 {
     return (int16_t)((int16_t)row * 8);
 }
 
+/**
+ * @brief Internal helper for `poom_sd_browser_text_width_px`.
+ *
+ * @param[in] s Parameter passed to the function.
+ * @return inline size_t
+ */
 static inline size_t poom_sd_browser_text_width_px_(const char* s)
 {
     if(s == NULL)
@@ -112,12 +148,27 @@ static inline size_t poom_sd_browser_text_width_px_(const char* s)
     return strlen(s) * 6U;
 }
 
+/**
+ * @brief Draws the current module state.
+ *
+ * @param[in] text Parameter passed to the function.
+ * @param[in] x Parameter passed to the function.
+ * @param[in] row Parameter passed to the function.
+ * @return void
+ */
 static void poom_sd_browser_draw_text_row_(const char* text, int16_t x, uint8_t row)
 {
     poom_arduboy_set_cursor(x, poom_sd_browser_row_y_(row));
     (void)poom_arduboy_print((text != NULL) ? text : "");
 }
 
+/**
+ * @brief Draws the current module state.
+ *
+ * @param[in] text Parameter passed to the function.
+ * @param[in] row Parameter passed to the function.
+ * @return void
+ */
 static void poom_sd_browser_draw_text_center_row_(const char* text, uint8_t row)
 {
     const size_t w = poom_sd_browser_text_width_px_(text);
@@ -131,11 +182,63 @@ static void poom_sd_browser_draw_text_center_row_(const char* text, uint8_t row)
     poom_sd_browser_draw_text_row_(text, x, row);
 }
 
+/**
+ * @brief Draws the module header.
+ *
+ * @param[in] title Parameter passed to the function.
+ * @return void
+ */
 static void poom_sd_browser_draw_header_(const char* title)
 {
-    poom_sd_browser_draw_text_center_row_(title, 0);
-    // Invert after drawing so the title becomes black-on-white.
-    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 8, INVERT);
+    const size_t w = poom_sd_browser_text_width_px_(title);
+    int16_t x = 0;
+
+    if(w < (size_t)ARDUBOY_WIDTH)
+    {
+        x = (int16_t)((ARDUBOY_WIDTH - (int16_t)w) / 2);
+    }
+
+    poom_arduboy_set_cursor(x, 2);
+    (void)poom_arduboy_print((title != NULL) ? title : "");
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, POOM_SD_BROWSER_HEADER_H, INVERT);
+}
+
+/**
+ * @brief Formats internal text for display.
+ *
+ * @param[in] storage Parameter passed to the function.
+ * @param[in] out_title Parameter passed to the function.
+ * @param[in] out_title_len Parameter passed to the function.
+ * @return void
+ */
+static void poom_sd_browser_format_header_title_(const poom_sd_browser_storage_t* storage,
+                                                 char* out_title,
+                                                 size_t out_title_len)
+{
+    const char* base_name;
+
+    if((out_title == NULL) || (out_title_len == 0U))
+    {
+        return;
+    }
+
+    if((storage == NULL) ||
+       (storage->current_path[0] == '\0') ||
+       (strcmp(storage->current_path, POOM_SD_BROWSER_STORAGE_ROOT) == 0))
+    {
+        (void)snprintf(out_title, out_title_len, "SD");
+        return;
+    }
+
+    base_name = strrchr(storage->current_path, '/');
+    base_name = (base_name != NULL) ? (base_name + 1) : storage->current_path;
+    if(base_name[0] == '\0')
+    {
+        (void)snprintf(out_title, out_title_len, "SD");
+        return;
+    }
+
+    (void)snprintf(out_title, out_title_len, "%.21s", base_name);
 }
 
 /**
@@ -204,8 +307,8 @@ static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* lin
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
 
-    poom_sd_browser_draw_header_("SD BROWSER");
-    poom_arduboy_draw_rect(0, 10, ARDUBOY_WIDTH, (int16_t)(ARDUBOY_HEIGHT - 10), WHITE);
+    poom_sd_browser_draw_header_("SD");
+    poom_arduboy_draw_rect(0, 12, ARDUBOY_WIDTH, (int16_t)(ARDUBOY_HEIGHT - 12), WHITE);
 
     poom_sd_browser_draw_text_center_row_(text0, 3);
     poom_sd_browser_draw_text_center_row_(text1, 5);
@@ -217,39 +320,6 @@ static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* lin
     }
 
     poom_arduboy_display();
-
-    return ESP_OK;
-}
-
-/**
- * @brief Formats path line for OLED with tail truncation.
- *
- * @param[in] in_path Full path.
- * @param[out] out_line Output path line.
- * @param[in] out_line_len Output buffer length.
- * @return esp_err_t
- */
-static esp_err_t poom_sd_browser_format_path_line_(const char* in_path, char* out_line, size_t out_line_len)
-{
-    size_t in_len;
-
-    if((in_path == NULL) || (out_line == NULL) || (out_line_len == 0U))
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    in_len = strlen(in_path);
-    if(in_len <= (POOM_SD_BROWSER_PATH_LINE_MAX_LEN - 1U))
-    {
-        snprintf(out_line, out_line_len, "%s", in_path);
-        return ESP_OK;
-    }
-
-    snprintf(
-        out_line,
-        out_line_len,
-        "...%s",
-        &in_path[in_len - (POOM_SD_BROWSER_PATH_LINE_MAX_LEN - 4U)]);
 
     return ESP_OK;
 }
@@ -286,66 +356,6 @@ static esp_err_t poom_sd_browser_sync_offset_(const poom_sd_browser_storage_t* s
 }
 
 /**
- * @brief Draws right-side scrollbar for directory listing.
- *
- * @param[in] storage Storage context.
- * @return esp_err_t
- */
-static esp_err_t poom_sd_browser_draw_scrollbar_(const poom_sd_browser_storage_t* storage)
-{
-    size_t thumb_h;
-    size_t thumb_y;
-    size_t max_offset;
-    size_t free_track_h;
-    size_t x;
-    size_t y;
-    size_t w;
-    size_t h;
-
-    if(storage == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if(storage->items_count <= POOM_SD_BROWSER_MAX_ROWS)
-    {
-        return ESP_OK;
-    }
-
-    x = (size_t)POOM_SD_BROWSER_SCROLLBAR_X;
-    y = (size_t)POOM_SD_BROWSER_SCROLLBAR_Y;
-    w = (size_t)POOM_SD_BROWSER_SCROLLBAR_W;
-    h = (size_t)POOM_SD_BROWSER_SCROLLBAR_H;
-
-    poom_arduboy_draw_rect((int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h, WHITE);
-
-    thumb_h = (h * POOM_SD_BROWSER_MAX_ROWS) / storage->items_count;
-    if(thumb_h < POOM_SD_BROWSER_SCROLLBAR_THUMB_MIN_H)
-    {
-        thumb_h = POOM_SD_BROWSER_SCROLLBAR_THUMB_MIN_H;
-    }
-    if(thumb_h > h)
-    {
-        thumb_h = h;
-    }
-
-    max_offset = storage->items_count - POOM_SD_BROWSER_MAX_ROWS;
-    free_track_h = h - thumb_h;
-    thumb_y = y;
-    if((max_offset > 0U) && (free_track_h > 0U))
-    {
-        thumb_y = y + ((free_track_h * s_list_offset) / max_offset);
-    }
-
-    if((w > 2U) && (thumb_h > 2U))
-    {
-        poom_arduboy_fill_rect((int16_t)(x + 1U), (int16_t)(thumb_y + 1U), (int16_t)(w - 2U), (int16_t)(thumb_h - 2U), WHITE);
-    }
-
-    return ESP_OK;
-}
-
-/**
  * @brief Draws current directory listing on display.
  *
  * @param[in] storage Storage context.
@@ -353,7 +363,7 @@ static esp_err_t poom_sd_browser_draw_scrollbar_(const poom_sd_browser_storage_t
  */
 static esp_err_t poom_sd_browser_draw_list_(const poom_sd_browser_storage_t* storage)
 {
-    char path_line[POOM_SD_BROWSER_PATH_LINE_MAX_LEN + 1U];
+    char header_title[22];
     size_t row;
 
     if(storage == NULL)
@@ -362,18 +372,17 @@ static esp_err_t poom_sd_browser_draw_list_(const poom_sd_browser_storage_t* sto
     }
 
     (void)poom_sd_browser_sync_offset_(storage);
-    (void)poom_sd_browser_format_path_line_(storage->current_path, path_line, sizeof(path_line));
+    poom_sd_browser_format_header_title_(storage, header_title, sizeof(header_title));
 
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
 
-    poom_sd_browser_draw_header_("SD BROWSER");
-    poom_sd_browser_draw_text_row_(path_line, 0, 1);
-    poom_arduboy_draw_fast_hline(0, 15, ARDUBOY_WIDTH, WHITE);
+    poom_sd_browser_draw_header_(header_title);
 
     if(storage->items_count == 0U)
     {
-        poom_sd_browser_draw_text_center_row_("(empty)", 4);
+        poom_arduboy_set_cursor(38, 30);
+        (void)poom_arduboy_print(F("(empty)"));
         poom_sd_browser_draw_text_row_("B:Back", 0, 7);
         poom_arduboy_display();
         return ESP_OK;
@@ -391,22 +400,25 @@ static esp_err_t poom_sd_browser_draw_list_(const poom_sd_browser_storage_t* sto
         {
             char item_line[POOM_SD_BROWSER_ITEM_LINE_MAX_LEN + 1U];
             const poom_sd_browser_storage_item_t* item = &storage->items[index];
-            const char* prefix = item->is_directory ? "D:" : "F:";
-            const uint8_t row_idx = (uint8_t)(2U + row);
-            const int16_t y = poom_sd_browser_row_y_(row_idx);
+            const int16_t y = (int16_t)(POOM_SD_BROWSER_LIST_Y0 + row * POOM_SD_BROWSER_ROW_STEP);
+            const int visible_chars = item->is_directory ? (int)(POOM_SD_BROWSER_ITEM_NAME_VISIBLE_CHARS - 1U)
+                                                         : (int)POOM_SD_BROWSER_ITEM_NAME_VISIBLE_CHARS;
 
-            snprintf(item_line, sizeof(item_line), "%s%.*s", prefix, (int)POOM_SD_BROWSER_ITEM_NAME_VISIBLE_CHARS, item->name);
-            poom_sd_browser_draw_text_row_(item_line, 0, row_idx);
+            (void)snprintf(item_line,
+                           sizeof(item_line),
+                           "%.*s%s",
+                           visible_chars,
+                           item->name,
+                           item->is_directory ? "/" : "");
+            poom_arduboy_set_cursor(2, y);
+            (void)poom_arduboy_print(item_line);
 
             if(index == storage->selected_index)
             {
-                // Invert only the list area so the scrollbar stays readable.
-                poom_arduboy_fill_rect(0, y, (int16_t)POOM_SD_BROWSER_SCROLLBAR_X, 8, INVERT);
+                poom_arduboy_fill_rect(1, y - 1, (int16_t)(ARDUBOY_WIDTH - 2), POOM_SD_BROWSER_ROW_HILITE_H, INVERT);
             }
         }
     }
-
-    (void)poom_sd_browser_draw_scrollbar_(storage);
 
     poom_sd_browser_draw_text_row_("A:Open", 0, 7);
     poom_sd_browser_draw_text_row_("B:Back", 76, 7);
@@ -440,7 +452,15 @@ static esp_err_t poom_sd_browser_draw_file_details_(void)
     poom_arduboy_draw_rect((int16_t)box_x, (int16_t)box_y, (int16_t)box_w, (int16_t)box_h, WHITE);
     poom_sd_browser_draw_text_row_(line_name, (int16_t)text_x, 3);
     poom_sd_browser_draw_text_row_(line_size, (int16_t)text_x, 5);
-    poom_sd_browser_draw_text_row_("B:Back", 0, 7);
+    if(s_file_selected_cb != NULL)
+    {
+        poom_sd_browser_draw_text_row_("A:Select", 0, 7);
+        poom_sd_browser_draw_text_row_("B:Back", 76, 7);
+    }
+    else
+    {
+        poom_sd_browser_draw_text_row_("B:Back", 0, 7);
+    }
     poom_arduboy_display();
 
     return ESP_OK;
@@ -498,6 +518,37 @@ static esp_err_t poom_sd_browser_open_selected_(void)
 }
 
 /**
+ * @brief Internal helper for `poom_sd_browser_emit_file_selected`.
+ *
+ * @return esp_err_t
+ */
+static esp_err_t poom_sd_browser_emit_file_selected_(void)
+{
+    char abs_path[POOM_SD_BROWSER_STORAGE_MAX_PATH_LEN];
+
+    if(s_file_selected_cb == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    abs_path[0] = '\0';
+    if((s_storage.current_path[0] == '\0') || (s_selected_file_name[0] == '\0'))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    int written = snprintf(abs_path, sizeof(abs_path), "%s/%s", s_storage.current_path, s_selected_file_name);
+    if((written < 0) || ((size_t)written >= sizeof(abs_path)))
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    (void)poom_sd_browser_stop();
+    s_file_selected_cb(abs_path, s_file_selected_ctx);
+    return ESP_OK;
+}
+
+/**
  * @brief Processes back action depending on current browser mode.
  *
  * @return esp_err_t
@@ -552,9 +603,6 @@ static esp_err_t poom_sd_browser_handle_button_event_(const poom_sd_browser_butt
         return ESP_OK;
     }
 
-    // If start failed (mount/read), keep a minimal UI where:
-    // - A/RIGHT retries
-    // - B/LEFT goes back to the caller via exit callback
     if(s_error_mode)
     {
         if((event->button == BTN_B) || (event->button == BTN_LEFT))
@@ -592,6 +640,10 @@ static esp_err_t poom_sd_browser_handle_button_event_(const poom_sd_browser_butt
         {
             err = poom_sd_browser_open_selected_();
         }
+        else if(s_file_selected_cb != NULL)
+        {
+            err = poom_sd_browser_emit_file_selected_();
+        }
     }
     else if((event->button == BTN_B) || (event->button == BTN_LEFT))
     {
@@ -626,6 +678,11 @@ static void poom_sd_browser_button_topic_handler_(const poom_sbus_msg_t* msg, vo
     }
 }
 
+/**
+ * @brief Internal helper for `poom_sd_browser_ensure_buttons_subscribed`.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t poom_sd_browser_ensure_buttons_subscribed_(void)
 {
     if(s_buttons_subscribed)
@@ -649,6 +706,11 @@ static esp_err_t poom_sd_browser_ensure_buttons_subscribed_(void)
  * @return esp_err_t
  */
 esp_err_t poom_sd_browser_start(void)
+{
+    return poom_sd_browser_start_ex(NULL);
+}
+
+esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
 {
     esp_err_t err;
 
@@ -677,7 +739,24 @@ esp_err_t poom_sd_browser_start(void)
         }
     }
 
-    err = poom_sd_browser_storage_init(&s_storage);
+    if(config != NULL)
+    {
+        (void)snprintf(s_start_dir, sizeof(s_start_dir), "%s", (config->start_dir != NULL) ? config->start_dir : POOM_SD_BROWSER_STORAGE_ROOT);
+        s_filter_cb = config->filter;
+        s_filter_ctx = config->filter_ctx;
+        s_file_selected_cb = config->on_file_selected;
+        s_file_selected_ctx = config->on_file_selected_ctx;
+    }
+    else
+    {
+        (void)snprintf(s_start_dir, sizeof(s_start_dir), "%s", POOM_SD_BROWSER_STORAGE_ROOT);
+        s_filter_cb = NULL;
+        s_filter_ctx = NULL;
+        s_file_selected_cb = NULL;
+        s_file_selected_ctx = NULL;
+    }
+
+    err = poom_sd_browser_storage_init_at(&s_storage, s_start_dir);
     if(err != ESP_OK)
     {
         POOM_SD_BROWSER_PRINTF_E("storage init failed: %s", esp_err_to_name(err));
@@ -689,7 +768,7 @@ esp_err_t poom_sd_browser_start(void)
         return err;
     }
 
-    err = poom_sd_browser_storage_reload(&s_storage);
+    err = poom_sd_browser_storage_reload(&s_storage, poom_sd_browser_filter_bridge_, NULL);
     if(err != ESP_OK)
     {
         POOM_SD_BROWSER_PRINTF_W("storage reload failed: %s", esp_err_to_name(err));

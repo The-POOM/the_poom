@@ -35,5 +35,6 @@ typedef struct http_server_q_msg {
 
 // Public Function Declaration
 esp_err_t http_server_start(void);
+esp_err_t http_server_stop(void);
 
 #endif /* MAIN_HTTP_SERVER_H_ */

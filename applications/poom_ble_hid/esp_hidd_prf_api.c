@@ -47,7 +47,6 @@ esp_err_t esp_hidd_profile_init(void) {
     ESP_LOGE(HID_LE_PRF_TAG, "HID device profile already initialized");
     return ESP_FAIL;
   }
-  // Reset the hid device target environment
   memset(&hidd_le_env, 0, sizeof(hidd_le_env_t));
   hidd_le_env.enabled = true;
   return ESP_OK;
@@ -67,7 +66,6 @@ esp_err_t esp_hidd_profile_deinit(void) {
     return ESP_FAIL;
   }
 
-  /* register the HID device profile to the BTA_GATTS module*/
   esp_ble_gatts_app_unregister(hidd_le_env.gatt_if);
 
   return ESP_OK;

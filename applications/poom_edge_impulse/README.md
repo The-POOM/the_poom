@@ -2,7 +2,7 @@
 
 `poom_edge_impulse` captures IMU samples (accelerometer, gyroscope, temperature), builds an Edge Impulse ingestion payload, and uploads it when triggered by the caller.
 
-## Features
+## Purpose
 
 - Uses `poom_wifi_ctrl` for STA Wi-Fi connection and event handling.
 - Uses `poom_imu_stream` for sensor sampling.
@@ -22,7 +22,7 @@
 - `esp_err_t poom_edge_impulse_trigger_capture(const char* label);`
 - `esp_err_t poom_edge_impulse_get_state(bool* out_initialized, bool* out_wifi_connected, bool* out_capture_running);`
 
-## Trigger Model
+## Runtime Behavior
 
 `poom_edge_impulse` does not subscribe to buttons directly.  
 Your menu/application decides button mapping and calls:
@@ -51,7 +51,7 @@ void app_start_edge_impulse(void)
 }
 ```
 
-## Runtime Flow
+## Integration
 
 ```mermaid
 flowchart TD

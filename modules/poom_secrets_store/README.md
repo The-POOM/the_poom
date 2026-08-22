@@ -44,7 +44,7 @@ It stores values in the NVS namespace `poom_sec`.
 - `esp_err_t poom_secrets_record_exists(const char* id, bool* out_exists);`
 - `esp_err_t poom_secrets_erase_record(const char* id);`
 
-## Usage
+## Basic Usage
 
 ```c
 #include "poom_secrets_store.h"

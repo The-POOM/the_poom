@@ -21,7 +21,6 @@
 #include "lwip/inet.h"
 #include "poom_wifi_ctrl.h"
 #include "sd_card.h"
-#include "ws2812.h"
 
 /**
  * @file poom_wifi_captive.c
@@ -63,9 +62,6 @@
 #define CAPTIVE_MODULE_QUERY_PARAM_MAX_LEN          (254U)
 #define CAPTIVE_MODULE_USER_DUMP_MAX_LEN            (512U)
 #define CAPTIVE_MODULE_FILE_IO_CHUNK_LEN            (512U)
-#define CAPTIVE_MODULE_LED_RESOLUTION_HZ            (10 * 1000 * 1000)
-#define CAPTIVE_MODULE_LED_BRIGHTNESS               (20U)
-#define CAPTIVE_MODULE_LED_BLINK_MS                 (800U)
 
 #ifndef CONFIG_POOM_STA_SSID
 #define CONFIG_POOM_STA_SSID                        "AP"
@@ -95,10 +91,8 @@ typedef struct {
     bool started;
     bool wifi_initialized;
     bool event_handler_registered;
-    bool led_initialized;
     httpd_handle_t http_server;
     dns_server_handle_t dns_server;
-    ws2812_strip_t strip;
 } captive_module_state_t;
 
 static captive_module_state_t s_state = {0};
@@ -113,6 +107,13 @@ static bool s_ap_clone_open_auth = false;
 /* =========================
  * Local helpers
  * ========================= */
+
+/**
+ * @brief Internal helper for `captive_module_hex_to_int`.
+ *
+ * @param[in] c Parameter passed to the function.
+ * @return int
+ */
 static int captive_module_hex_to_int_(char c)
 {
     if((c >= '0') && (c <= '9')) {
@@ -127,6 +128,12 @@ static int captive_module_hex_to_int_(char c)
     return -1;
 }
 
+/**
+ * @brief Internal helper for `captive_module_strdup`.
+ *
+ * @param[in] src Parameter passed to the function.
+ * @return char *
+ */
 static char *captive_module_strdup_(const char *src)
 {
     size_t len = 0U;
@@ -146,6 +153,12 @@ static char *captive_module_strdup_(const char *src)
     return dst;
 }
 
+/**
+ * @brief Internal helper for `captive_module_url_decode`.
+ *
+ * @param[in] input Parameter passed to the function.
+ * @return char *
+ */
 static char *captive_module_url_decode_(const char *input)
 {
     size_t len = 0U;
@@ -192,6 +205,11 @@ static char *captive_module_url_decode_(const char *input)
     return output;
 }
 
+/**
+ * @brief Internal helper for `captive_module_free_user_ctx`.
+ *
+ * @return void
+ */
 static void captive_module_free_user_ctx_(void)
 {
     if(s_user_ctx.user1 != NULL) {
@@ -212,68 +230,46 @@ static void captive_module_free_user_ctx_(void)
     }
 }
 
+/**
+ * @brief Internal helper for `captive_module_show_user_creds`.
+ *
+ * @param[in] user_str Parameter passed to the function.
+ * @return void
+ */
 static void captive_module_show_user_creds_(const char *user_str)
 {
     CAPTIVE_MODULE_PRINTF_I("user data captured:\n%s", (user_str != NULL) ? user_str : "");
 }
 
-static void captive_module_set_led_color_(uint8_t r, uint8_t g, uint8_t b)
-{
-    if((!s_state.led_initialized) || (s_state.strip.led_count <= 0)) {
-        return;
-    }
-
-    for(int i = 0; i < s_state.strip.led_count; ++i) {
-        ws2812_set_pixel(&s_state.strip, i, r, g, b, 0);
-    }
-    (void)ws2812_show(&s_state.strip);
-}
-
-static void captive_module_init_led_strip_(void)
-{
-    if(s_state.led_initialized) {
-        captive_module_set_led_color_(0U, 0U, 0U);
-        return;
-    }
-
-    if(ws2812_init(&s_state.strip,
-                   PIN_NUM_WS2812,
-                   PIN_NUM_LEDS,
-                   false,
-                   CAPTIVE_MODULE_LED_RESOLUTION_HZ) != ESP_OK) {
-        CAPTIVE_MODULE_PRINTF_W("ws2812 init failed");
-        return;
-    }
-
-    ws2812_set_brightness(&s_state.strip, CAPTIVE_MODULE_LED_BRIGHTNESS);
-    s_state.led_initialized = true;
-    captive_module_set_led_color_(0U, 0U, 0U);
-}
-
-static void captive_module_deinit_led_strip_(void)
-{
-    if(!s_state.led_initialized) {
-        return;
-    }
-
-    captive_module_set_led_color_(0U, 0U, 0U);
-    ws2812_deinit(&s_state.strip);
-    memset(&s_state.strip, 0, sizeof(s_state.strip));
-    s_state.led_initialized = false;
-}
-
+/**
+ * @brief Internal helper for `captive_module_send_embedded_root`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @return void
+ */
 static void captive_module_send_embedded_root_(httpd_req_t *req)
 {
     size_t page_len = (size_t)(root_end - root_start);
     httpd_resp_send(req, root_start, page_len);
 }
 
+/**
+ * @brief Internal helper for `captive_module_send_embedded_redirect`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @return void
+ */
 static void captive_module_send_embedded_redirect_(httpd_req_t *req)
 {
     size_t page_len = (size_t)(redirect_end - redirect_start);
     httpd_resp_send(req, redirect_start, page_len);
 }
 
+/**
+ * @brief Loads internal data used by this module.
+ *
+ * @return void
+ */
 static void captive_module_load_sta_creds_from_sd_(void)
 {
     char path[128];
@@ -330,6 +326,13 @@ static void captive_module_load_sta_creds_from_sd_(void)
     CAPTIVE_MODULE_PRINTF_I("STA credentials loaded from SD: SSID='%s'", s_sta_ssid);
 }
 
+/**
+ * @brief Internal helper for `captive_module_wifi_event_handler`.
+ *
+ * @param[in] info Parameter passed to the function.
+ * @param[in] user_ctx Parameter passed to the function.
+ * @return void
+ */
 static void captive_module_wifi_event_handler_(const poom_wifi_ctrl_evt_info_t *info, void *user_ctx)
 {
     (void)user_ctx;
@@ -339,6 +342,11 @@ static void captive_module_wifi_event_handler_(const poom_wifi_ctrl_evt_info_t *
     }
 }
 
+/**
+ * @brief Initializes internal resources for this module.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_wifi_init_apsta_(void)
 {
     wifi_config_t sta_config = {0};
@@ -418,10 +426,15 @@ static esp_err_t captive_module_wifi_init_apsta_(void)
     }
 
     CAPTIVE_MODULE_PRINTF_I("STA connecting to SSID: %s", (char *)sta_config.sta.ssid);
-    captive_module_set_led_color_(0U, 0U, 255U);
     return ESP_OK;
 }
 
+/**
+ * @brief Internal helper for `captive_module_http_root_get_handler`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_http_root_get_handler_(httpd_req_t *req)
 {
     if(req == NULL) {
@@ -463,6 +476,14 @@ static esp_err_t captive_module_http_root_get_handler_(httpd_req_t *req)
     return ESP_OK;
 }
 
+/**
+ * @brief Internal helper for `captive_module_read_and_store_query_param`.
+ *
+ * @param[in] query Parameter passed to the function.
+ * @param[in] key Parameter passed to the function.
+ * @param[in] out_value Parameter passed to the function.
+ * @return void
+ */
 static void captive_module_read_and_store_query_param_(const char *query,
                                                         const char *key,
                                                         char **out_value)
@@ -487,6 +508,12 @@ static void captive_module_read_and_store_query_param_(const char *query,
     }
 }
 
+/**
+ * @brief Internal helper for `captive_module_http_validate_get_handler`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_http_validate_get_handler_(httpd_req_t *req)
 {
     size_t query_len = 0U;
@@ -531,10 +558,6 @@ static esp_err_t captive_module_http_validate_get_handler_(httpd_req_t *req)
         (void)sd_card_append_to_file(CAPTIVE_DATA_PATH, user_dump);
     }
 
-    captive_module_set_led_color_(255U, 0U, 0U);
-    vTaskDelay(pdMS_TO_TICKS(CAPTIVE_MODULE_LED_BLINK_MS));
-    captive_module_set_led_color_(0U, 0U, 255U);
-
     if(query_buf != NULL) {
         free(query_buf);
     }
@@ -545,6 +568,13 @@ static esp_err_t captive_module_http_validate_get_handler_(httpd_req_t *req)
     return ESP_OK;
 }
 
+/**
+ * @brief Internal helper for `captive_module_http_404_handler`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @param[in] err Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_http_404_handler_(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
@@ -555,6 +585,12 @@ static esp_err_t captive_module_http_404_handler_(httpd_req_t *req, httpd_err_co
     return ESP_OK;
 }
 
+/**
+ * @brief Internal helper for `captive_module_http_detect_handler`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_http_detect_handler_(httpd_req_t *req)
 {
     if(req == NULL) {
@@ -574,6 +610,12 @@ static esp_err_t captive_module_http_detect_handler_(httpd_req_t *req)
     return captive_module_http_404_handler_(req, HTTPD_404_NOT_FOUND);
 }
 
+/**
+ * @brief Internal helper for `captive_module_http_redirect_handler`.
+ *
+ * @param[in] req Parameter passed to the function.
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_http_redirect_handler_(httpd_req_t *req)
 {
     if(req == NULL) {
@@ -609,6 +651,11 @@ static const httpd_uri_t s_redirect_uri = {
     .handler = captive_module_http_redirect_handler_,
 };
 
+/**
+ * @brief Starts the internal runtime for this module.
+ *
+ * @return httpd_handle_t
+ */
 static httpd_handle_t captive_module_start_webserver_(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -637,6 +684,11 @@ static httpd_handle_t captive_module_start_webserver_(void)
     return server;
 }
 
+/**
+ * @brief Initializes internal resources for this module.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_init_sd_layout_(void)
 {
     if(sd_card_is_not_mounted()) {
@@ -652,6 +704,11 @@ static esp_err_t captive_module_init_sd_layout_(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Stops the internal runtime for this module.
+ *
+ * @return void
+ */
 static void captive_module_wifi_stack_stop_(void)
 {
     esp_err_t ret;
@@ -673,6 +730,11 @@ static void captive_module_wifi_stack_stop_(void)
     s_state.wifi_initialized = false;
 }
 
+/**
+ * @brief Stops the internal runtime for this module.
+ *
+ * @return void
+ */
 static void captive_module_stop_services_(void)
 {
     if(s_state.dns_server != NULL) {
@@ -694,10 +756,14 @@ static void captive_module_stop_services_(void)
     captive_module_wifi_stack_stop_();
 
     captive_module_free_user_ctx_();
-    captive_module_deinit_led_strip_();
     s_state.started = false;
 }
 
+/**
+ * @brief Starts the internal runtime for this module.
+ *
+ * @return esp_err_t
+ */
 static esp_err_t captive_module_start_services_(void)
 {
     esp_err_t ret;
@@ -764,8 +830,6 @@ void poom_wifi_captive_start(void)
     if(s_state.started) {
         captive_module_stop_services_();
     }
-
-    captive_module_init_led_strip_();
 
     if(captive_module_init_sd_layout_() != ESP_OK) {
         CAPTIVE_MODULE_PRINTF_W("continuing with embedded pages only");

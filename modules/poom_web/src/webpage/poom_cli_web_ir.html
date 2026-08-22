@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>POOM IR</title>
+  <link rel="stylesheet" href="/ir.css">
+</head>
+<body>
+  <main class="ir-app">
+    <header class="ir-header">
+      <div class="ir-title-wrap">
+        <h1>POOM IR</h1>
+        <p id="ir-subtitle" class="hidden"></p>
+      </div>
+      <div class="ir-online">
+        <span class="ir-online-dot"></span>
+        <span>Ready</span>
+      </div>
+    </header>
+
+    <section class="ir-meta-card">
+      <div id="ir-path" class="ir-path">Path: /sdcard</div>
+      <div id="ir-layout" class="ir-layout-chip hidden"></div>
+      <div id="ir-status" class="ir-status">Loading IR commands...</div>
+    </section>
+
+    <section id="ir-content" class="ir-content">
+      <div class="ir-loading-card">Loading remote...</div>
+    </section>
+  </main>
+
+  <script src="/ir.js"></script>
+</body>
+</html>

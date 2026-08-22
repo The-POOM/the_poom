@@ -2,7 +2,7 @@
 
 `i2c` is a shared I2C bus layer that supports multi-device registration and staged TX/TX+RX transactions.
 
-## Structure
+## Folder Layout
 
 ```text
 drivers/i2c
@@ -31,7 +31,7 @@ drivers/i2c
 - `i2c_lock`
 - `i2c_unlock`
 
-## Usage
+## Quick Start
 
 ```c
 #include "i2c.h"
@@ -43,7 +43,7 @@ void app_main(void)
 }
 ```
 
-## Runtime Flow
+## Transaction Flow
 
 ```mermaid
 flowchart LR

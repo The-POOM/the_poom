@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -127,7 +128,21 @@
 #define NOTE_C8  4186
 
 static TaskHandle_t s_poom_buz_theme_melody_task = NULL;
+static poom_buz_theme_event_t *s_poom_buz_theme_custom_events = NULL;
+static size_t s_poom_buz_theme_custom_count = 0U;
+static uint32_t s_poom_buz_theme_custom_pause_ms = 0U;
 
+static bool poom_buz_theme_start_custom_events_(poom_buz_theme_event_t *events, size_t count, uint32_t pause_ms);
+
+/**
+ * @brief Internal helper for `poom_buz_theme_play_sequence`.
+ *
+ * @param[in] melody Parameter passed to the function.
+ * @param[in] durations Parameter passed to the function.
+ * @param[in] count Parameter passed to the function.
+ * @param[in] pause_ms Parameter passed to the function.
+ * @return void
+ */
 static void poom_buz_theme_play_sequence_(const uint32_t *melody,
                                           const uint32_t *durations,
                                           int count,
@@ -310,6 +325,11 @@ void poom_buz_theme_snake_gameover_fx(void)
                                   15U);
 }
 
+/**
+ * @brief Internal helper for `poom_buz_theme_kill_current_melody`.
+ *
+ * @return void
+ */
 static void poom_buz_theme_kill_current_melody_(void)
 {
     if(s_poom_buz_theme_melody_task != NULL) {
@@ -317,7 +337,13 @@ static void poom_buz_theme_kill_current_melody_(void)
         s_poom_buz_theme_melody_task = NULL;
     }
 
-    /* Ensure PWM output is silenced even if the melody task was killed mid-tone. */
+    if(s_poom_buz_theme_custom_events != NULL) {
+        free(s_poom_buz_theme_custom_events);
+        s_poom_buz_theme_custom_events = NULL;
+    }
+    s_poom_buz_theme_custom_count = 0U;
+    s_poom_buz_theme_custom_pause_ms = 0U;
+
     buzzer_tone(0U, 0U);
 }
 
@@ -326,6 +352,51 @@ void poom_buz_theme_stop(void)
     poom_buz_theme_kill_current_melody_();
 }
 
+/**
+ * @brief Runs the internal task for this module.
+ *
+ * @param[in] param Parameter passed to the function.
+ * @return void
+ */
+static void poom_buz_theme_custom_task_(void *param)
+{
+    (void)param;
+
+    if((s_poom_buz_theme_custom_events == NULL) || (s_poom_buz_theme_custom_count == 0U)) {
+        s_poom_buz_theme_melody_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    for(size_t i = 0U; i < s_poom_buz_theme_custom_count; i++) {
+        const uint32_t freq = s_poom_buz_theme_custom_events[i].freq_hz;
+        const uint32_t dur = s_poom_buz_theme_custom_events[i].duration_ms;
+
+        if(freq != 0U) {
+            buzzer_tone(freq, dur);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(dur));
+        }
+        if(s_poom_buz_theme_custom_pause_ms > 0U) {
+            vTaskDelay(pdMS_TO_TICKS(s_poom_buz_theme_custom_pause_ms));
+        }
+    }
+
+    free(s_poom_buz_theme_custom_events);
+    s_poom_buz_theme_custom_events = NULL;
+    s_poom_buz_theme_custom_count = 0U;
+    s_poom_buz_theme_custom_pause_ms = 0U;
+
+    s_poom_buz_theme_melody_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Runs the internal task for this module.
+ *
+ * @param[in] param Parameter passed to the function.
+ * @return void
+ */
 static void poom_buz_theme_melody_task_(void *param)
 {
     poom_buz_theme_melody_id_t id = (poom_buz_theme_melody_id_t)(uintptr_t)param;
@@ -373,4 +444,73 @@ void poom_buz_theme_init_melody(poom_buz_theme_melody_id_t id)
         s_poom_buz_theme_melody_task = NULL;
         POOM_BUZ_THEME_PRINTF_E("failed to create melody task");
     }
+}
+
+bool poom_buz_theme_play_events(const poom_buz_theme_event_t *events, size_t count, uint32_t pause_ms)
+{
+    poom_buz_theme_event_t *copy = NULL;
+
+    if((events == NULL) || (count == 0U) || (count > 1024U)) {
+        return false;
+    }
+
+    copy = (poom_buz_theme_event_t *)calloc(count, sizeof(*copy));
+    if(copy == NULL) {
+        return false;
+    }
+
+    for(size_t i = 0U; i < count; i++) {
+        copy[i].freq_hz = events[i].freq_hz;
+        copy[i].duration_ms = events[i].duration_ms;
+    }
+
+    return poom_buz_theme_start_custom_events_(copy, count, pause_ms);
+}
+
+bool poom_buz_theme_play_events_take_ownership(poom_buz_theme_event_t *events, size_t count, uint32_t pause_ms)
+{
+    if((events == NULL) || (count == 0U) || (count > 1024U)) {
+        free(events);
+        return false;
+    }
+
+    return poom_buz_theme_start_custom_events_(events, count, pause_ms);
+}
+
+/**
+ * @brief Starts the internal runtime for this module.
+ *
+ * @param[in] events Parameter passed to the function.
+ * @param[in] count Parameter passed to the function.
+ * @param[in] pause_ms Parameter passed to the function.
+ * @return bool
+ */
+static bool poom_buz_theme_start_custom_events_(poom_buz_theme_event_t *events, size_t count, uint32_t pause_ms)
+{
+    if((events == NULL) || (count == 0U) || (count > 1024U)) {
+        free(events);
+        return false;
+    }
+
+    poom_buz_theme_kill_current_melody_();
+
+    s_poom_buz_theme_custom_events = events;
+    s_poom_buz_theme_custom_count = count;
+    s_poom_buz_theme_custom_pause_ms = pause_ms;
+
+    if(xTaskCreate(poom_buz_theme_custom_task_,
+                   "poom_buz_theme_custom",
+                   3072,
+                   NULL,
+                   5,
+                   &s_poom_buz_theme_melody_task) != pdPASS) {
+        s_poom_buz_theme_melody_task = NULL;
+        free(s_poom_buz_theme_custom_events);
+        s_poom_buz_theme_custom_events = NULL;
+        s_poom_buz_theme_custom_count = 0U;
+        s_poom_buz_theme_custom_pause_ms = 0U;
+        return false;
+    }
+
+    return true;
 }

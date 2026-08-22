@@ -35,6 +35,9 @@
 #define PIN_NUM_BUZZER  (2)
 #define PIN_NUM_INT_NFC (4)
 
+#define PIN_NUM_IR_TX (3)
+#define PIN_NUM_IR_RX (11)
+
 #elif defined(CONFIG_IDF_TARGET_ESP32C5)
 
 /* ESP32-C5 */
@@ -51,13 +54,14 @@
 #define PIN_NUM_A     (28)
 #define PIN_NUM_B     (9)
 #define PIN_NUM_LEFT  (3)
-#define PIN_NUM_RIGHT (7)
-#define PIN_NUM_UP    (24)
-#define PIN_NUM_DOWN  (23)
+#define PIN_NUM_RIGHT (23) 
+#define PIN_NUM_UP (7)
+#define PIN_NUM_DOWN (24)
 
 #define PIN_NUM_BUZZER  (26)
 #define PIN_NUM_INT_NFC (2)
-
+#define PIN_NUM_IR_TX (25)
+#define PIN_NUM_IR_RX (10)
 #else
 #error "Unsupported target: BSP supports only ESP32-C6 and ESP32-C5."
 #endif

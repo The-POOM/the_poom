@@ -28,11 +28,47 @@ extern "C" {
 typedef void (*poom_sd_browser_exit_cb_t)(void* user_ctx);
 
 /**
+ * @brief File-selected callback invoked when user selects a file.
+ *
+ * @param[in] abs_path Absolute file path (under `/sdcard`).
+ * @param[in] user_ctx User context pointer passed during registration.
+ */
+typedef void (*poom_sd_browser_file_selected_cb_t)(const char* abs_path, void* user_ctx);
+
+/**
+ * @brief Optional predicate used to filter directory entries.
+ *
+ * Return true to show the entry.
+ */
+typedef bool (*poom_sd_browser_filter_cb_t)(const char* name, bool is_directory, void* user_ctx);
+
+typedef struct
+{
+    /** Optional start directory (absolute under `/sdcard`). Defaults to `/sdcard`. */
+    const char* start_dir;
+    /** Optional header title. Defaults to "SD BROWSER". */
+    const char* header;
+    /** Optional filter predicate. */
+    poom_sd_browser_filter_cb_t filter;
+    void* filter_ctx;
+    /** Optional file-selected callback. When set, file details shows `A:Select`. */
+    poom_sd_browser_file_selected_cb_t on_file_selected;
+    void* on_file_selected_ctx;
+} poom_sd_browser_config_t;
+
+/**
  * @brief Starts SD browser and subscribes button handling.
  *
  * @return esp_err_t
  */
 esp_err_t poom_sd_browser_start(void);
+
+/**
+ * @brief Starts SD browser with custom configuration (start dir, filter, callbacks).
+ *
+ * Passing NULL uses defaults (equivalent to `poom_sd_browser_start()`).
+ */
+esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config);
 
 /**
  * @brief Stops SD browser and unsubscribes button handling.

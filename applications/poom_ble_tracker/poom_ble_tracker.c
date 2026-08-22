@@ -81,10 +81,21 @@ static const poom_ble_tracker_signature_t s_tracker_signatures[] = {
     {.adv_cmp = {0x02, 0x01, 0x06, 0x0D}, .name = "Tile", .vendor = "Tile"},
 };
 
+/**
+ * @brief Internal helper for `poom_ble_tracker_rssi_filter_reset`.
+ *
+ * @return void
+ */
 static void poom_ble_tracker_rssi_filter_reset_(void) {
     memset(s_rssi_filters, 0, sizeof(s_rssi_filters));
 }
 
+/**
+ * @brief Internal helper for `poom_ble_tracker_rssi_filter_get_slot`.
+ *
+ * @param[in] mac_address Parameter passed to the function.
+ * @return poom_ble_tracker_rssi_filter_t *
+ */
 static poom_ble_tracker_rssi_filter_t *poom_ble_tracker_rssi_filter_get_slot_(const uint8_t mac_address[6]) {
     int first_free = -1;
     TickType_t oldest_tick = 0;
@@ -121,6 +132,13 @@ static poom_ble_tracker_rssi_filter_t *poom_ble_tracker_rssi_filter_get_slot_(co
     return slot;
 }
 
+/**
+ * @brief Internal helper for `poom_ble_tracker_rssi_filter_update_avg`.
+ *
+ * @param[in] mac_address Parameter passed to the function.
+ * @param[in] rssi_dbm Parameter passed to the function.
+ * @return float
+ */
 static float poom_ble_tracker_rssi_filter_update_avg_(const uint8_t mac_address[6], int rssi_dbm) {
     poom_ble_tracker_rssi_filter_t *slot = poom_ble_tracker_rssi_filter_get_slot_(mac_address);
     if (slot == NULL) {
@@ -285,6 +303,13 @@ static void poom_ble_tracker_handle_gap_event_(esp_gap_ble_cb_event_t event_type
  * @return esp_err_t
  */
 #if (POOM_BLE_TRACKER_SCAN_DURATION_SECONDS > 0)
+
+/**
+ * @brief Runs the internal task for this module.
+ *
+ * @param[in] arg Parameter passed to the function.
+ * @return void
+ */
 static void poom_ble_tracker_timer_task_(void *arg) {
     (void)arg;
 

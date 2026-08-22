@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "src/poom_lua.c"
+        "src/poom_lua_bindings.c"
+        "src/poom_lua_bindings_nfc.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        lua
+        sd_card
+        board
+        buzzer
+        ws2812
+        poom_led_rainbow
+        poom_arduboy_display
+        poom_sbus
+        poom_nfc
+)

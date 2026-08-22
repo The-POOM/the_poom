@@ -2,7 +2,7 @@
 
 This tool gives you a live dashboard to observe if a target HTTP server becomes slow or unavailable while your ESP32 load test is running.
 
-## Features
+## Purpose
 
 - Realtime target checks (`GET` request loop)
 - Latency chart (ms)
@@ -35,7 +35,7 @@ python3 -m pip install -r applications/poom_http_load_test/tools/streamlit_monit
 streamlit run applications/poom_http_load_test/tools/streamlit_monitor/monitor.py
 ```
 
-## Workflow
+## Usage
 
 1. Open the Streamlit URL shown in terminal (usually `http://localhost:8501`).
 2. Set target URL in sidebar, for example:
@@ -57,7 +57,7 @@ Use POOM CLI to configure Wi-Fi and load-test target before starting the test.
 cfg-wifi-set <ssid> <password>
 
 # 2) Save target profile
-cfg-load-target-set <host> <port> <path> [workers]
+cfg-load-target-set <host> <port> <path> [workers] [--scheme http|https]
 # Example:
 cfg-load-target-set 192.168.3.89 8000 / 8
 
@@ -69,7 +69,7 @@ cfg-load-start
 cfg-load-stop
 ```
 
-## Usage
+## Recommended Workflow With POOM Load Test
 
 1. Start local target:
 
@@ -82,6 +82,8 @@ python3 -m http.server 8000
 ```bash
 cfg-wifi-set MyWiFi MyPassword
 cfg-load-target-set 192.168.3.89 8000 /
+# For HTTPS target:
+cfg-load-target-set example.com 443 / --scheme https
 ```
 
 3. Start monitor:

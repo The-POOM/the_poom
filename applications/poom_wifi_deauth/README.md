@@ -11,7 +11,7 @@
 - Launch single-target deauth operations.
 - Run continuous scan + deauth attack loop.
 
-## Features
+## Runtime Behavior
 
 - One-shot AP scan listing.
 - One-shot deauth by index.
@@ -40,23 +40,23 @@ applications/poom_wifi_deauth
 └── poom_wifi_deauth.c
 ```
 
-## Integration Notes
+## Integration
 
 - Add `poom_wifi_deauth` in `REQUIRES` where this API is used.
 - Depends on `poom_wifi_attacks` and `poom_wifi_scanner`.
 - Intended for controlled lab/testing environments.
 
-## Configuration Options
+## Usage
 
 - `CONFIG_POOM_WIFI_DEAUTH_ENABLE_LOG`
   Enables POOM log macros in this module.
 
-## Logging
+## Runtime Behavior
 
 - Uses POOM log format with tag `poom_wifi_deauth`.
 - Attack and scan status are printed to console.
 
-## Usage
+## Usage Example
 
 ```c
 #include "poom_wifi_deauth.h"

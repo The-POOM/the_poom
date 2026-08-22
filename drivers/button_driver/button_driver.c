@@ -25,6 +25,7 @@
 #define BUTTON_EVENT_TYPE_MASK              (0x0FU)
 #define BUTTON_EVENT_ARG_MASK               (0xFFU)
 #define BUTTON_PER_BUTTON_TOPIC_COUNT       (6U)
+#define BUTTON_SHORT_PRESS_TIME_MS_OVERRIDE (60U)
 
 #ifndef ZBUS_PUBLISH_PER_BUTTON
 #define ZBUS_PUBLISH_PER_BUTTON             (0)
@@ -100,6 +101,81 @@ static bool s_lock_input = false;
 static void button_event_cb(void *arg, void *data);
 
 /**
+ * @brief Returns the text representation for the current state.
+ *
+ * @param[in] button_name Parameter passed to the function.
+ * @return const char *
+ */
+static const char *button_name_str_(uint8_t button_name)
+{
+    switch (button_name)
+    {
+        case BUTTON_A:
+            return "A";
+
+        case BUTTON_B:
+            return "B";
+
+        case BUTTON_LEFT:
+            return "LEFT";
+
+        case BUTTON_RIGHT:
+            return "RIGHT";
+
+        case BUTTON_UP:
+            return "UP";
+
+        case BUTTON_DOWN:
+            return "DOWN";
+
+        default:
+            return "UNKNOWN";
+    }
+}
+
+/**
+ * @brief Returns the text representation for the current state.
+ *
+ * @param[in] button_event Parameter passed to the function.
+ * @return const char *
+ */
+static const char *button_event_str_(uint8_t button_event)
+{
+    switch (button_event)
+    {
+        case BUTTON_PRESS_DOWN:
+            return "PRESS_DOWN";
+
+        case BUTTON_PRESS_UP:
+            return "PRESS_UP";
+
+        case BUTTON_PRESS_REPEAT:
+            return "PRESS_REPEAT";
+
+        case BUTTON_PRESS_REPEAT_DONE:
+            return "PRESS_REPEAT_DONE";
+
+        case BUTTON_SINGLE_CLICK:
+            return "SINGLE_CLICK";
+
+        case BUTTON_DOUBLE_CLICK:
+            return "DOUBLE_CLICK";
+
+        case BUTTON_LONG_PRESS_START:
+            return "LONG_PRESS_START";
+
+        case BUTTON_LONG_PRESS_HOLD:
+            return "LONG_PRESS_HOLD";
+
+        case BUTTON_LONG_PRESS_UP:
+            return "LONG_PRESS_UP";
+
+        default:
+            return "UNKNOWN";
+    }
+}
+
+/**
  * @brief Return current system time in milliseconds.
  */
 static uint32_t button_now_ms_(void)
@@ -155,6 +231,7 @@ static void button_init_(uint32_t button_num, uint8_t mask)
 {
     button_config_t btn_cfg = {
         .type = BUTTON_TYPE_GPIO,
+        .short_press_time = BUTTON_SHORT_PRESS_TIME_MS_OVERRIDE,
         .gpio_button_config =
             {
                 .gpio_num = button_num,
@@ -187,6 +264,7 @@ static void button_event_cb(void *arg, void *data)
     event_msg.button = button_name;
     event_msg.event = button_event;
     event_msg.ts_ms = button_now_ms_();
+
 
     (void)poom_sbus_publish(BUTTON_TOPIC_ALL, &event_msg, sizeof(event_msg), 0U);
 

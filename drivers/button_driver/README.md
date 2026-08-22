@@ -2,7 +2,7 @@
 
 `button_driver` initializes board buttons using `espressif/button` and publishes events to SBUS.
 
-## Structure
+## Folder Layout
 
 ```text
 drivers/button_driver
@@ -27,7 +27,7 @@ drivers/button_driver
 - `button_module_reset_idle_timer(void)`
 - `button_module_set_lock(bool lock)`
 
-## Usage
+## Quick Start
 
 ```c
 #include "button_driver.h"
@@ -39,7 +39,7 @@ void app_main(void)
 }
 ```
 
-## Runtime Flow
+## Event Flow
 
 ```mermaid
 flowchart LR
