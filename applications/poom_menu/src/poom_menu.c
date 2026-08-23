@@ -50,6 +50,7 @@
 #include "menu_midi.h"
 #include "menu_midi_harmony.h"
 #include "menu_nfc.h"
+#include "menu_picopass.h"
 #include "menu_nfc_tuning.h"
 #include "menu_plot.h"
 #include "menu_poom_pcap.h"
@@ -579,6 +580,13 @@ static void action_nfc_(void)
     menu_nfc_show();
 }
 
+static void action_picopass_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_picopass_show();
+}
+
 /**
  * @brief Internal helper for `action_wii`.
  *
@@ -872,6 +880,7 @@ static const poom_menu_item_t s_apps_zen[] = {
 //    {"TONE", action_tone_},
     {"CONTROL", action_control_music_},
     {"NFC", action_nfc_},
+    {"PICOPASS", action_picopass_},
     {"IR UNIV", action_ir_universal_},
     {"POOM WEB", action_cli_web_},
 };

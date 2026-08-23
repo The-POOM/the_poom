@@ -18,3 +18,5 @@ managed_components/
 .DS_Store
 *.swp
 *.swo
+.cache/
+sdkconfig.defaults.local

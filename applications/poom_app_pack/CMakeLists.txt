@@ -27,6 +27,7 @@ set(POOM_APP_PACK_REQUIRES
     i2c
     ir
     poom_nfc
+    poom_picopass
     poom_motion_midi
     poom_ble_keyboard
     poom_ble_plot

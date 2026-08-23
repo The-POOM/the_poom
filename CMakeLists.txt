@@ -122,6 +122,7 @@ set(MODULES
     poom_breakout
     poom_menu
     poom_nfc
+    poom_picopass
     poom_motion_midi
     poom_ble_hid
     poom_ble_keyboard
@@ -199,6 +200,7 @@ set(POOM_APPLICATION_DIRS
     ${CMAKE_SOURCE_DIR}/applications/poom_breakout
     ${CMAKE_SOURCE_DIR}/applications/poom_menu
     ${CMAKE_SOURCE_DIR}/applications/poom_nfc
+    ${CMAKE_SOURCE_DIR}/applications/poom_picopass
     ${CMAKE_SOURCE_DIR}/applications/poom_motion_midi
     ${CMAKE_SOURCE_DIR}/applications/poom_ble_hid
     ${CMAKE_SOURCE_DIR}/applications/poom_ble_keyboard
