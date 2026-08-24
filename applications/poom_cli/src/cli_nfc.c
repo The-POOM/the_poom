@@ -7,10 +7,13 @@
 #include "poom_nfc_dump.h"
 #include "poom_nfc_ats.h"
 #include "poom_nfc_emulator.h"
+#include "poom_nfc_emv.h"
 #include "poom_nfc_iso14443_4.h"
+#include "poom_nfc_iso7816.h"
 #include "poom_nfc_mifare_classic.h"
 #include "poom_nfc_profile_store.h"
 #include "poom_nfc_store.h"
+#include "poom_nfc_tlv.h"
 #include "poom_clipper.h"
 #include "sd_card.h"
 #include "esp_timer.h"
@@ -1177,10 +1180,15 @@ static struct
 
 static struct
 {
-    struct arg_str* out_dir;
     struct arg_lit* try_b;
     struct arg_end* end;
 } nfc_mfc_dump_args;
+
+static struct
+{
+    struct arg_str* aid;
+    struct arg_end* end;
+} nfc_emv_select_args;
 
 static struct
 {
@@ -1214,6 +1222,316 @@ static void print_tune_result(const char* title,
     {
         printf("  measureCnt = %u\r\n", (unsigned)r->measure_count);
     }
+}
+
+static void poom_print_hex_compact_(const uint8_t* data, size_t len)
+{
+    if(data == NULL)
+    {
+        return;
+    }
+
+    for(size_t i = 0U; i < len; i++)
+    {
+        printf("%02X", (unsigned)data[i]);
+    }
+}
+
+static void poom_print_hex_spaced_cli_(const uint8_t* data, size_t len)
+{
+    if(data == NULL)
+    {
+        return;
+    }
+
+    for(size_t i = 0U; i < len; i++)
+    {
+        printf("%02X%s", (unsigned)data[i], (i + 1U < len) ? " " : "");
+    }
+}
+
+static void poom_print_ascii_or_hex_(const uint8_t* data, size_t len, bool printable)
+{
+    if(data == NULL)
+    {
+        return;
+    }
+
+    if(printable)
+    {
+        for(size_t i = 0U; i < len; i++)
+        {
+            printf("%c", (char)data[i]);
+        }
+        return;
+    }
+
+    poom_print_hex_compact_(data, len);
+}
+
+static const char* poom_emv_tag_name_(uint32_t tag)
+{
+    enum
+    {
+        POOM_CLI_EMV_TAG_FCI_TEMPLATE = 0x6FU,
+        POOM_CLI_EMV_TAG_DF_NAME = 0x84U,
+        POOM_CLI_EMV_TAG_FCI_PROPRIETARY_TEMPLATE = 0xA5U,
+        POOM_CLI_EMV_TAG_FCI_ISSUER_DISCRETIONARY_DATA = 0xBF0CU,
+        POOM_CLI_EMV_TAG_DIRECTORY_ENTRY = 0x61U,
+        POOM_CLI_EMV_TAG_AID = 0x4FU,
+        POOM_CLI_EMV_TAG_APPLICATION_LABEL = 0x50U,
+        POOM_CLI_EMV_TAG_APPLICATION_PRIORITY = 0x87U,
+    };
+
+    switch(tag)
+    {
+        case POOM_CLI_EMV_TAG_FCI_TEMPLATE: return "FCI Template";
+        case POOM_CLI_EMV_TAG_DF_NAME: return "DF Name";
+        case POOM_CLI_EMV_TAG_FCI_PROPRIETARY_TEMPLATE: return "FCI Proprietary Template";
+        case POOM_CLI_EMV_TAG_FCI_ISSUER_DISCRETIONARY_DATA: return "FCI Issuer Discretionary Data";
+        case POOM_CLI_EMV_TAG_DIRECTORY_ENTRY: return "Directory Entry";
+        case POOM_CLI_EMV_TAG_AID: return "Application Identifier";
+        case POOM_CLI_EMV_TAG_APPLICATION_LABEL: return "Application Label";
+        case POOM_CLI_EMV_TAG_APPLICATION_PRIORITY: return "Application Priority Indicator";
+        default: return NULL;
+    }
+}
+
+static void poom_emv_print_indent_(int depth)
+{
+    for(int i = 0; i < depth; i++)
+    {
+        printf("  ");
+    }
+}
+
+static void poom_emv_print_tlv_tree_(const uint8_t* buf, size_t buf_len, int depth)
+{
+    enum
+    {
+        POOM_CLI_EMV_TAG_DF_NAME = 0x84U,
+        POOM_CLI_EMV_TAG_APPLICATION_LABEL = 0x50U,
+        POOM_CLI_EMV_TAG_APPLICATION_PRIORITY = 0x87U,
+    };
+
+    size_t off = 0U;
+    poom_tlv_view_t tlv;
+
+    while(poom_tlv_next(buf, buf_len, &off, &tlv))
+    {
+        char tag_hex[16];
+        const char* name = poom_emv_tag_name_(tlv.tag);
+
+        poom_tlv_format_tag(tlv.tag, tag_hex, sizeof(tag_hex));
+        poom_emv_print_indent_(depth);
+        printf("%s", tag_hex);
+        if(name != NULL)
+        {
+            printf(" - %s", name);
+        }
+        printf("\r\n");
+
+        if(tlv.constructed)
+        {
+            poom_emv_print_tlv_tree_(tlv.value, tlv.value_len, depth + 1);
+            continue;
+        }
+
+        poom_emv_print_indent_(depth + 1);
+        if(tlv.tag == POOM_CLI_EMV_TAG_APPLICATION_LABEL || tlv.tag == POOM_CLI_EMV_TAG_DF_NAME)
+        {
+            poom_print_ascii_or_hex_(tlv.value,
+                                     tlv.value_len,
+                                     poom_nfc_emv_label_is_printable(tlv.value, tlv.value_len));
+        }
+        else if(tlv.tag == POOM_CLI_EMV_TAG_APPLICATION_PRIORITY && tlv.value_len >= 1U)
+        {
+            printf("%u", (unsigned)tlv.value[0]);
+        }
+        else
+        {
+            poom_print_hex_compact_(tlv.value, tlv.value_len);
+        }
+        printf("\r\n");
+    }
+}
+
+typedef struct
+{
+    size_t app_index;
+} poom_emv_print_ctx_t;
+
+static bool poom_emv_print_app_cb_(const poom_nfc_emv_app_t* app, void* user_ctx)
+{
+    poom_emv_print_ctx_t* ctx = (poom_emv_print_ctx_t*)user_ctx;
+
+    if(app == NULL || ctx == NULL)
+    {
+        return false;
+    }
+
+    ctx->app_index++;
+    printf("\r\nApplication %u\r\n", (unsigned)ctx->app_index);
+    printf("  AID      : ");
+    poom_print_hex_compact_(app->aid, app->aid_len);
+    printf("\r\n");
+
+    if(app->label != NULL && app->label_len > 0U)
+    {
+        printf("  Label    : ");
+        poom_print_ascii_or_hex_(app->label, app->label_len, app->label_printable);
+        printf("\r\n");
+    }
+
+    if(app->has_priority)
+    {
+        printf("  Priority : %u\r\n", (unsigned)app->priority);
+    }
+
+    return true;
+}
+
+static void poom_emv_print_status_(uint8_t sw1, uint8_t sw2)
+{
+    printf("\r\nStatus\r\n");
+    printf("  %02X %02X - %s\r\n",
+           (unsigned)sw1,
+           (unsigned)sw2,
+           poom_iso7816_status_desc(sw1, sw2));
+}
+
+static int cmd_nfc_emv_discover(int argc, char** argv)
+{
+    uint8_t rapdu[260];
+    size_t rapdu_len = 0U;
+    size_t app_count = 0U;
+    poom_iso7816_rapdu_view_t view;
+    poom_emv_print_ctx_t print_ctx = {0};
+    size_t ppse_len = 0U;
+    const uint8_t* ppse_name;
+    uint8_t apdu[32];
+    size_t apdu_len = 0U;
+    bool verbose;
+
+    (void)argc;
+    (void)argv;
+
+    if(!poom_nfc_emv_select_ppse(rapdu, sizeof(rapdu), &rapdu_len))
+    {
+        printf("nfc-emv-discover: ISO-DEP exchange failed. Tip: run nfc-core-start then nfc-card-connect first on an ISO-DEP payment card.\r\n");
+        return 1;
+    }
+
+    if(!poom_iso7816_parse_rapdu(rapdu, rapdu_len, &view))
+    {
+        printf("nfc-emv-discover: invalid R-APDU\r\n");
+        return 1;
+    }
+
+    verbose = poom_reader_is_verbose();
+    ppse_name = poom_nfc_emv_ppse_name(&ppse_len);
+    apdu_len = poom_iso7816_build_select_df_name(ppse_name, ppse_len, apdu, sizeof(apdu));
+
+    printf("EMV payment environment detected\r\n\r\n");
+    printf("PPSE: 2PAY.SYS.DDF01\r\n");
+
+    if(verbose)
+    {
+        printf("\r\nSELECT PPSE\r\n\r\n");
+        printf("C-APDU:\r\n");
+        poom_print_hex_spaced_cli_(apdu, apdu_len);
+        printf("\r\n\r\nDecoded:\r\n\r\n");
+        poom_emv_print_tlv_tree_(view.data, view.data_len, 0);
+    }
+
+    if(poom_iso7816_status_is_ok(view.sw1, view.sw2))
+    {
+        if(!poom_nfc_emv_parse_ppse_apps(rapdu, rapdu_len, NULL, NULL, &app_count))
+        {
+            printf("nfc-emv-discover: invalid PPSE TLV\r\n");
+            poom_emv_print_status_(view.sw1, view.sw2);
+            return 1;
+        }
+
+        printf("\r\nApplications found: %u\r\n", (unsigned)app_count);
+        if(app_count > 0U)
+        {
+            (void)poom_nfc_emv_parse_ppse_apps(rapdu, rapdu_len, poom_emv_print_app_cb_, &print_ctx, NULL);
+        }
+    }
+    else
+    {
+        printf("\r\nPPSE SELECT failed\r\n");
+    }
+
+    poom_emv_print_status_(view.sw1, view.sw2);
+    return poom_iso7816_status_is_ok(view.sw1, view.sw2) ? 0 : 1;
+}
+
+static int cmd_nfc_emv_select(int argc, char** argv)
+{
+    uint8_t aid[32];
+    size_t aid_len = 0U;
+    uint8_t rapdu[260];
+    size_t rapdu_len = 0U;
+    poom_iso7816_rapdu_view_t view;
+    uint8_t apdu[64];
+    size_t apdu_len = 0U;
+    bool verbose;
+    int nerrors = arg_parse(argc, argv, (void**)&nfc_emv_select_args);
+
+    if(nerrors)
+    {
+        arg_print_errors(stderr, nfc_emv_select_args.end, argv[0]);
+        printf("Uso: nfc-emv-select <AID>\r\n");
+        printf("Ej : nfc-emv-select A0000000041010\r\n");
+        return 1;
+    }
+
+    if(!poom_parse_hex_bytes(nfc_emv_select_args.aid->sval[0], aid, sizeof(aid), &aid_len) || aid_len == 0U)
+    {
+        printf("nfc-emv-select: invalid AID hex\r\n");
+        return 1;
+    }
+
+    if(!poom_nfc_emv_select_aid(aid, aid_len, rapdu, sizeof(rapdu), &rapdu_len))
+    {
+        printf("nfc-emv-select: ISO-DEP exchange failed. Tip: run nfc-core-start then nfc-card-connect first on an ISO-DEP payment card.\r\n");
+        return 1;
+    }
+
+    if(!poom_iso7816_parse_rapdu(rapdu, rapdu_len, &view))
+    {
+        printf("nfc-emv-select: invalid R-APDU\r\n");
+        return 1;
+    }
+
+    verbose = poom_reader_is_verbose();
+    apdu_len = poom_iso7816_build_select_df_name(aid, aid_len, apdu, sizeof(apdu));
+
+    printf("EMV application\r\n");
+    printf("  AID : ");
+    poom_print_hex_compact_(aid, aid_len);
+    printf("\r\n");
+
+    if(verbose)
+    {
+        printf("\r\nSELECT AID\r\n\r\n");
+        printf("C-APDU:\r\n");
+        poom_print_hex_spaced_cli_(apdu, apdu_len);
+        printf("\r\n");
+
+        if(view.data_len > 0U)
+        {
+            printf("\r\nDecoded:\r\n\r\n");
+            poom_emv_print_tlv_tree_(view.data, view.data_len, 0);
+        }
+    }
+
+    printf("\r\nSELECT %s\r\n",
+           poom_iso7816_status_is_ok(view.sw1, view.sw2) ? "OK" : "failed");
+    poom_emv_print_status_(view.sw1, view.sw2);
+    return poom_iso7816_status_is_ok(view.sw1, view.sw2) ? 0 : 1;
 }
 
 /**
@@ -3317,24 +3635,57 @@ static int cmd_nfc_mfc_keys(int argc, char** argv)
 static int cmd_nfc_mfc_dump(int argc, char** argv)
 {
     int nerrors = arg_parse(argc, argv, (void**)&nfc_mfc_dump_args);
-    const char* out_dir;
     bool try_b;
     char path[160];
 
     if(nerrors)
     {
         arg_print_errors(stderr, nfc_mfc_dump_args.end, argv[0]);
-        printf("Uso: nfc-mfc-dump [out_dir] [-b]\r\n");
-        printf("Ej : nfc-mfc-dump /nfc -b\r\n");
+        printf("Uso: nfc-mfc-dump [-b]\r\n");
+        printf("Ej : nfc-mfc-dump -b\r\n");
         printf("Tip: run nfc-core-start then nfc-card-connect first.\r\n");
         return 1;
     }
 
-    out_dir = (nfc_mfc_dump_args.out_dir->count > 0) ? nfc_mfc_dump_args.out_dir->sval[0] : "/nfc";
     try_b   = (nfc_mfc_dump_args.try_b->count > 0);
 
     path[0] = '\0';
-    if(!poom_mifare_classic_dump_to_flipper_file(out_dir, try_b, path, sizeof(path)))
+    if(!poom_mifare_classic_dump_to_flipper_file("/nfc", try_b, path, sizeof(path)))
+    {
+        printf("  mifare dump failed. Tip: ensure SD mounted; run nfc-core-start then nfc-card-connect first; then nfc-mfc-discover.\r\n");
+        return 1;
+    }
+
+    printf("  dump saved: %s\r\n", (path[0] != '\0') ? path : "<unknown>");
+    return 0;
+}
+
+/**
+ * @brief Internal helper for `cmd_nfc_mfc_dump_poom`.
+ *
+ * @param[in] argc Parameter passed to the function.
+ * @param[in] argv Parameter passed to the function.
+ * @return int
+ */
+static int cmd_nfc_mfc_dump_poom(int argc, char** argv)
+{
+    int nerrors = arg_parse(argc, argv, (void**)&nfc_mfc_dump_args);
+    bool try_b;
+    char path[160];
+
+    if(nerrors)
+    {
+        arg_print_errors(stderr, nfc_mfc_dump_args.end, argv[0]);
+        printf("Uso: nfc-mfc-dump-poom [-b]\r\n");
+        printf("Ej : nfc-mfc-dump-poom -b\r\n");
+        printf("Tip: run nfc-core-start then nfc-card-connect first.\r\n");
+        return 1;
+    }
+
+    try_b   = (nfc_mfc_dump_args.try_b->count > 0);
+
+    path[0] = '\0';
+    if(!poom_mifare_classic_dump_to_poom_memory_file("/nfc", try_b, path, sizeof(path)))
     {
         printf("  mifare dump failed. Tip: ensure SD mounted; run nfc-core-start then nfc-card-connect first; then nfc-mfc-discover.\r\n");
         return 1;
@@ -3506,6 +3857,26 @@ static void register_poom_nfc_cmds(void)
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_clipper_history));
 
+    nfc_emv_select_args.aid = arg_str1(NULL, NULL, "<AID>", "EMV application AID in hex");
+    nfc_emv_select_args.end = arg_end(1);
+
+    const esp_console_cmd_t nfc_emv_discover = {
+        .command  = "nfc-emv-discover",
+        .help     = "Select PPSE and list advertised EMV payment applications.",
+        .hint     = NULL,
+        .func     = &cmd_nfc_emv_discover,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_emv_discover));
+
+    const esp_console_cmd_t nfc_emv_select = {
+        .command  = "nfc-emv-select",
+        .help     = "Select one EMV application by AID. Example: nfc-emv-select A0000000041010",
+        .hint     = NULL,
+        .func     = &cmd_nfc_emv_select,
+        .argtable = &nfc_emv_select_args,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_emv_select));
+
     nfc_mfc_discover_args.try_b = arg_lit0("b", "try-b", "also try Key B per sector");
     nfc_mfc_discover_args.end   = arg_end(1);
 
@@ -3578,19 +3949,26 @@ static void register_poom_nfc_cmds(void)
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_mfc_keys));
 
-    nfc_mfc_dump_args.out_dir =
-        arg_str0(NULL, NULL, "[out_dir]", "output directory on SD (default: /nfc)");
     nfc_mfc_dump_args.try_b = arg_lit0("b", "try-b", "also try Key B discovery");
-    nfc_mfc_dump_args.end   = arg_end(2);
+    nfc_mfc_dump_args.end   = arg_end(1);
 
     const esp_console_cmd_t nfc_mfc_dump = {
         .command  = "nfc-mfc-dump",
-        .help     = "Dump MIFARE Classic as a Flipper .nfc file to SD.",
+        .help     = "Dump MIFARE Classic as a Flipper .nfc file to /nfc on SD.",
         .hint     = NULL,
         .func     = &cmd_nfc_mfc_dump,
         .argtable = &nfc_mfc_dump_args,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_mfc_dump));
+
+    const esp_console_cmd_t nfc_mfc_dump_poom = {
+        .command  = "nfc-mfc-dump-poom",
+        .help     = "Dump MIFARE Classic as a POOM memory image (.nfc) to /nfc on SD.",
+        .hint     = NULL,
+        .func     = &cmd_nfc_mfc_dump_poom,
+        .argtable = &nfc_mfc_dump_args,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_mfc_dump_poom));
 
     const esp_console_cmd_t nfc_stop = {
         .command = "nfc-core-stop",

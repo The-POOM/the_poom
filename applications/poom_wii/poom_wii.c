@@ -35,6 +35,7 @@
 #define POOM_WII_MAX_DT_S (0.050f)
 #define POOM_WII_BTN_LEFT_MASK (0x01U)
 #define POOM_WII_BTN_RIGHT_MASK (0x02U)
+#define POOM_WII_STOP_TASK_TIMEOUT_MS (500U)
 
 #ifndef POOM_WII_AXIS_SWAP_XY
 #define POOM_WII_AXIS_SWAP_XY 1
@@ -372,6 +373,7 @@ static bool poom_wii_calibrate_gyro_bias_(void)
 static void poom_wii_process_step_(float dt_s)
 {
     poom_imu_data_t imu_data;
+    (void)dt_s;
 
     if (!poom_imu_stream_read_data(&imu_data))
     {
@@ -394,45 +396,38 @@ static void poom_wii_process_step_(float dt_s)
     gy -= s_gyro_bias_dps[1];
     gz -= s_gyro_bias_dps[2];
 
-    if (fabsf(gx) < s_cfg.gyro_deadzone_dps)
-    {
-        gx = 0.0f;
-    }
-
-    if (fabsf(gy) < s_cfg.gyro_deadzone_dps)
-    {
-        gy = 0.0f;
-    }
-
-    if (fabsf(gz) < s_cfg.gyro_deadzone_dps)
-    {
-        gz = 0.0f;
-    }
-
     float gyro_x = POOM_WII_GYRO_SIGN_X *
                    poom_wii_axis_pick_(gx, gy, gz, POOM_WII_GYRO_AXIS_X);
     float gyro_y = POOM_WII_GYRO_SIGN_Y *
                    poom_wii_axis_pick_(gx, gy, gz, POOM_WII_GYRO_AXIS_Y);
 
-    float dx = gyro_x * s_cfg.gain_x * dt_s;
-    float dy = gyro_y * s_cfg.gain_y * dt_s;
-
     s_dx_filter = (s_cfg.smooth_beta * s_dx_filter) +
-                  ((1.0f - s_cfg.smooth_beta) * dx);
+                  ((1.0f - s_cfg.smooth_beta) * gyro_x);
     s_dy_filter = (s_cfg.smooth_beta * s_dy_filter) +
-                  ((1.0f - s_cfg.smooth_beta) * dy);
+                  ((1.0f - s_cfg.smooth_beta) * gyro_y);
 
-    s_dx_residual += s_dx_filter;
-    s_dy_residual += s_dy_filter;
+    float move_x = s_dx_filter * s_cfg.gain_x;
+    float move_y = s_dy_filter * s_cfg.gain_y;
 
-    int ix = (int)s_dx_residual;
-    int iy = (int)s_dy_residual;
+    if (fabsf(move_x) < s_cfg.gyro_deadzone_dps)
+    {
+        move_x = 0.0f;
+    }
 
-    int8_t mx = poom_wii_clamp_i8_(ix);
-    int8_t my = poom_wii_clamp_i8_(iy);
+    if (fabsf(move_y) < s_cfg.gyro_deadzone_dps)
+    {
+        move_y = 0.0f;
+    }
 
-    s_dx_residual -= (float)mx;
-    s_dy_residual -= (float)my;
+    if ((move_x != 0.0f) && (move_y != 0.0f))
+    {
+        const float diagonal_factor = 1.12f;
+        move_x *= diagonal_factor;
+        move_y *= diagonal_factor;
+    }
+
+    int8_t mx = poom_wii_clamp_i8_((int)move_x);
+    int8_t my = poom_wii_clamp_i8_((int)move_y);
 
     if ((mx != 0) || (my != 0))
     {
@@ -529,9 +524,25 @@ static void poom_wii_stop_task_(void)
 {
     if (s_poom_wii_task != NULL)
     {
-        vTaskDelete(s_poom_wii_task);
-        s_poom_wii_task = NULL;
-        POOM_WII_LOGI("Air mouse task stopped");
+        const TickType_t deadline =
+            xTaskGetTickCount() + pdMS_TO_TICKS(POOM_WII_STOP_TASK_TIMEOUT_MS);
+
+        while (s_poom_wii_task != NULL)
+        {
+            const TickType_t now = xTaskGetTickCount();
+            if ((int32_t)(deadline - now) <= 0)
+            {
+                POOM_WII_LOGW("Timed out waiting for air mouse task to stop");
+                break;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(1U));
+        }
+
+        if (s_poom_wii_task == NULL)
+        {
+            POOM_WII_LOGI("Air mouse task stopped");
+        }
     }
 
     poom_wii_reset_motion_state_();
@@ -573,13 +584,13 @@ void poom_wii_get_default_config(poom_wii_config_t *out_cfg)
     }
 
     out_cfg->complementary_alpha = 0.98f;
-    out_cfg->smooth_beta = 0.35f;
-    out_cfg->gyro_deadzone_dps = 2.0f;
-    out_cfg->gain_x = 10.0f;
-    out_cfg->gain_y = 10.0f;
+    out_cfg->smooth_beta = 0.82f;
+    out_cfg->gyro_deadzone_dps = 1.0f;
+    out_cfg->gain_x = 0.20f;
+    out_cfg->gain_y = 0.20f;
     out_cfg->tilt_gain_x = 0.0f;
     out_cfg->tilt_gain_y = 0.0f;
-    out_cfg->task_period_ms = 10U;
+    out_cfg->task_period_ms = 5U;
     out_cfg->calibration_samples = 250U;
     out_cfg->calibration_sample_delay_ms = 2U;
 }
