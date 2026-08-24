@@ -12,6 +12,7 @@ extern "C" {
 
 #define POOM_PICOPASS_BLOCK_LEN      8
 #define POOM_PICOPASS_MAX_APP_BLOCKS 32  // enough for 2KS/16KS AA1 dumps
+#define POOM_PICOPASS_MAX_WIEGAND    2  // 37-bit matches both H10302 and H10304
 
 // iCLASS block indices (AA1).
 #define POOM_PICOPASS_CSN_BLOCK      0
@@ -54,6 +55,17 @@ typedef struct
     uint8_t pacs_encryption;  // block6[7]: 0x14 none, 0x15 DES, 0x17 3DES
     uint8_t credential[POOM_PICOPASS_BLOCK_LEN];  // decrypted, sentinel removed
     uint8_t bit_length;                           // Wiegand bit length
+
+    // Decoded Wiegand credential(s). A 37-bit length is ambiguous (H10302 and
+    // H10304 share a parity scheme), so more than one format can validate.
+    uint8_t wiegand_count;  // number of parity-valid matches in wiegand[]
+    bool parity_error;      // a known length matched but none passed parity
+    struct
+    {
+        const char* format;  // e.g. "H10301"
+        uint32_t facility_code;
+        uint64_t card_number;
+    } wiegand[POOM_PICOPASS_MAX_WIEGAND];
 } PoomPicopassDump;
 
 // Read a standard-keyed iCLASS card into `out`.
