@@ -1,0 +1,13 @@
+menu "SD Card Driver"
+
+    config SD_CARD_ENABLE_LOG
+        bool "Enable SD Card driver logs"
+        default n
+        help
+            Enable printf debug logs inside the sd_card driver (mount,
+            unmount, format, and file I/O status/error messages).
+
+            Uses printf(), so ESP log levels do not filter these
+            messages.
+
+endmenu

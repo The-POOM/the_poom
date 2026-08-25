@@ -26,7 +26,6 @@ drivers/sd_card
 - `sd_card_mount`
 - `sd_card_unmount`
 - `sd_card_check_format`
-- `sd_card_format`
 - `sd_card_create_dir`
 - `sd_card_create_file`
 - `sd_card_read_file`

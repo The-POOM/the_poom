@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "Arduboy2.h"
 #include "poom_sd_browser_storage.h"
 #include "poom_sbus.h"
@@ -88,11 +91,27 @@ static bool s_running = false;
 static bool s_buttons_subscribed = false;
 static bool s_file_details_mode = false;
 static bool s_error_mode = false;
+static esp_err_t s_mount_error = ESP_OK;
+static bool s_format_confirm_mode = false;
+static bool s_format_confirm_yes_selected = false;
 static size_t s_list_offset = 0U;
 static char s_selected_file_name[POOM_SD_BROWSER_FILE_NAME_MAX_LEN + 1U] = {0};
 static size_t s_selected_file_size = 0U;
 static poom_sd_browser_exit_cb_t s_exit_callback = NULL;
 static void* s_exit_callback_ctx = NULL;
+/* Button events timestamped before this are dropped: see the format-replay
+ * guard in poom_sd_browser_button_topic_handler_(). */
+static uint32_t s_input_ignore_before_ms = 0U;
+
+/**
+ * @brief Milliseconds since boot, matching the button event timestamp base.
+ *
+ * @return uint32_t
+ */
+static uint32_t poom_sd_browser_now_ms_(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
 
 static char s_start_dir[POOM_SD_BROWSER_STORAGE_MAX_PATH_LEN] = POOM_SD_BROWSER_STORAGE_ROOT;
 static poom_sd_browser_filter_cb_t s_filter_cb = NULL;
@@ -294,9 +313,11 @@ static esp_err_t poom_sd_browser_format_file_detail_name_(const char* input_name
  *
  * @param[in] line0 Top line text.
  * @param[in] line1 Bottom line text.
+ * @param[in] action_label Left nav label (e.g. "A:Retry"). NULL draws no
+ *                         nav row at all.
  * @return esp_err_t
  */
-static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* line1, bool show_nav)
+static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* line1, const char* action_label)
 {
     char text0[22];
     char text1[22];
@@ -313,11 +334,86 @@ static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* lin
     poom_sd_browser_draw_text_center_row_(text0, 3);
     poom_sd_browser_draw_text_center_row_(text1, 5);
 
-    if(show_nav)
+    if(action_label != NULL)
     {
-        poom_sd_browser_draw_text_row_("A:Retry", 0, 7);
+        poom_sd_browser_draw_text_row_(action_label, 0, 7);
         poom_sd_browser_draw_text_row_("B:Back", 76, 7);
     }
+
+    poom_arduboy_display();
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Draws a mount-failure status screen with wording specific to the
+ *        distinct causes sd_card_mount() reports.
+ *
+ * There is no SD card-detect line on this hardware (gpio_cd is left unset,
+ * so SDSPI_SLOT_NO_CD applies), so ESP_ERR_NOT_FOUND wording must not claim
+ * to know whether a card is physically present -- it only means the mount
+ * attempt could not find/probe a usable card.
+ *
+ * @param[in] err Error returned by sd_card_mount().
+ * @return esp_err_t
+ */
+static esp_err_t poom_sd_browser_draw_mount_error_(esp_err_t err)
+{
+    if(err == ESP_ERR_NOT_SUPPORTED)
+    {
+        /* Card initialised but the FAT mount failed. Usually an unformatted or
+         * non-FAT card, though ESP_FAIL also covers other FatFs failures such
+         * as FR_DISK_ERR, so the wording states the symptom rather than a
+         * cause. "Use FAT format", not "Needs FAT32": the formatter uses
+         * FM_ANY and picks the variant by card size. */
+        return poom_sd_browser_draw_status_("Unreadable FS", "Use FAT format", "A:Format");
+    }
+
+    if(err == ESP_ERR_NOT_FOUND)
+    {
+        /* Card init/probe failed. This can also happen with a card seated
+         * but making bad contact, so the wording must not claim to know a
+         * card is present or absent -- only that access failed. */
+        return poom_sd_browser_draw_status_("Cannot access SD", "Check & retry", "A:Retry");
+    }
+
+    /* Any other code (e.g. ESP_ERR_NO_MEM from SPI bus init) falls back to
+     * the original generic wording. */
+    return poom_sd_browser_draw_status_("SD mount error", "Check card", "A:Retry");
+}
+
+/**
+ * @brief Draws the destructive-action format confirmation screen. Default
+ *        selection is always "NO" -- callers must explicitly move the
+ *        selection before A/RIGHT can format.
+ *
+ * @return esp_err_t
+ */
+static esp_err_t poom_sd_browser_draw_format_confirm_(void)
+{
+    const int16_t sel_y = poom_sd_browser_row_y_(6);
+
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+
+    poom_sd_browser_draw_header_("SD");
+    poom_sd_browser_draw_text_center_row_("Format SD card?", 2);
+    poom_sd_browser_draw_text_center_row_("Erases ALL data!", 4);
+
+    poom_sd_browser_draw_text_row_("YES", 36, 6);
+    poom_sd_browser_draw_text_row_("NO", 84, 6);
+
+    if(s_format_confirm_yes_selected)
+    {
+        poom_arduboy_fill_rect(34, (int16_t)(sel_y - 1), 24, POOM_SD_BROWSER_ROW_HILITE_H, INVERT);
+    }
+    else
+    {
+        poom_arduboy_fill_rect(82, (int16_t)(sel_y - 1), 18, POOM_SD_BROWSER_ROW_HILITE_H, INVERT);
+    }
+
+    poom_sd_browser_draw_text_row_("A:OK", 0, 7);
+    poom_sd_browser_draw_text_row_("B:Back", 76, 7);
 
     poom_arduboy_display();
 
@@ -584,6 +680,79 @@ static esp_err_t poom_sd_browser_go_back_(void)
 }
 
 /**
+ * @brief Reformats the card. Only reached after the confirm screen's
+ *        selection was explicitly moved to YES.
+ *
+ * Uses sd_card_check_format(), which mounts with auto-format enabled, so a
+ * readable card that was swapped in is left untouched and only an unmountable
+ * card is reformatted.
+ *
+ * @return esp_err_t
+ */
+static esp_err_t poom_sd_browser_do_format_(void)
+{
+    esp_err_t err;
+
+    s_format_confirm_mode = false;
+
+    (void)poom_sd_browser_draw_status_("Formatting...", "Please wait", NULL);
+
+    err = sd_card_check_format();
+    if(err != ESP_OK)
+    {
+        POOM_SD_BROWSER_PRINTF_E("sd_card_check_format failed: %s", esp_err_to_name(err));
+        s_mount_error = err;
+        /* Render through the mount-error screen so the shown action label
+         * matches what the A button actually does for this error code (both
+         * are keyed on ESP_ERR_NOT_SUPPORTED). A hard-coded "A:Retry" here
+         * would offer Retry but re-open the format confirm instead. */
+        (void)poom_sd_browser_draw_mount_error_(err);
+        memset(&s_storage, 0, sizeof(s_storage));
+        s_error_mode = true;
+        s_running = true;
+        s_input_ignore_before_ms = poom_sd_browser_now_ms_();
+        return err;
+    }
+
+    s_input_ignore_before_ms = poom_sd_browser_now_ms_();
+    (void)poom_sd_browser_stop();
+    return poom_sd_browser_start();
+}
+
+/**
+ * @brief Handles button input on the format confirmation screen. Default
+ *        selection is NO; only A/RIGHT while YES is selected reaches
+ *        poom_sd_browser_do_format_(). Every other path cancels back to
+ *        the mount error screen without touching the card.
+ *
+ * @param[in] event Button event payload.
+ * @return esp_err_t
+ */
+static esp_err_t poom_sd_browser_handle_format_confirm_button_(const poom_sd_browser_button_event_t* event)
+{
+    if((event->button == BTN_UP) || (event->button == BTN_DOWN))
+    {
+        s_format_confirm_yes_selected = !s_format_confirm_yes_selected;
+        return poom_sd_browser_draw_format_confirm_();
+    }
+
+    if(((event->button == BTN_A) || (event->button == BTN_RIGHT)) && s_format_confirm_yes_selected)
+    {
+        return poom_sd_browser_do_format_();
+    }
+
+    if((event->button == BTN_B) || (event->button == BTN_LEFT) ||
+       (event->button == BTN_A) || (event->button == BTN_RIGHT))
+    {
+        s_format_confirm_mode = false;
+        s_format_confirm_yes_selected = false;
+        return poom_sd_browser_draw_mount_error_(s_mount_error);
+    }
+
+    return ESP_OK;
+}
+
+/**
  * @brief Handles button event message for SD browser controls.
  *
  * @param[in] event Button event payload.
@@ -605,6 +774,11 @@ static esp_err_t poom_sd_browser_handle_button_event_(const poom_sd_browser_butt
 
     if(s_error_mode)
     {
+        if(s_format_confirm_mode)
+        {
+            return poom_sd_browser_handle_format_confirm_button_(event);
+        }
+
         if((event->button == BTN_B) || (event->button == BTN_LEFT))
         {
             (void)poom_sd_browser_stop();
@@ -612,6 +786,12 @@ static esp_err_t poom_sd_browser_handle_button_event_(const poom_sd_browser_butt
         }
         if((event->button == BTN_A) || (event->button == BTN_RIGHT))
         {
+            if(s_mount_error == ESP_ERR_NOT_SUPPORTED)
+            {
+                s_format_confirm_mode = true;
+                s_format_confirm_yes_selected = false;
+                return poom_sd_browser_draw_format_confirm_();
+            }
             (void)poom_sd_browser_stop();
             return poom_sd_browser_start();
         }
@@ -672,6 +852,18 @@ static void poom_sd_browser_button_topic_handler_(const poom_sbus_msg_t* msg, vo
     }
 
     (void)memcpy(&event, msg->data, sizeof(event));
+
+    /* Formatting runs synchronously on this dispatcher task, so presses made
+     * during it queue up and replay afterwards. Left alone, a queued A / UP / A
+     * satisfies the whole confirmation gate with no chance to react, and would
+     * format again - possibly a card swapped in during the first operation.
+     * Discard anything pressed before the format finished. Signed difference so
+     * the comparison survives the 32-bit millisecond wrap. */
+    if((int32_t)(event.ts_ms - s_input_ignore_before_ms) < 0)
+    {
+        return;
+    }
+
     if(poom_sd_browser_handle_button_event_(&event) != ESP_OK)
     {
         POOM_SD_BROWSER_PRINTF_D("button handling returned error");
@@ -721,7 +913,7 @@ esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
 
     s_error_mode = false;
 
-    (void)poom_sd_browser_draw_status_("Mounting SD...", "Please wait", false);
+    (void)poom_sd_browser_draw_status_("Mounting SD...", "Please wait", NULL);
 
     sd_card_begin();
     if(sd_card_is_not_mounted())
@@ -730,7 +922,8 @@ esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
         if(err != ESP_OK)
         {
             POOM_SD_BROWSER_PRINTF_E("sd_card_mount failed: %s", esp_err_to_name(err));
-            (void)poom_sd_browser_draw_status_("SD mount error", "Check card", true);
+            s_mount_error = err;
+            (void)poom_sd_browser_draw_mount_error_(err);
             (void)poom_sd_browser_ensure_buttons_subscribed_();
             memset(&s_storage, 0, sizeof(s_storage));
             s_error_mode = true;
@@ -760,7 +953,7 @@ esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
     if(err != ESP_OK)
     {
         POOM_SD_BROWSER_PRINTF_E("storage init failed: %s", esp_err_to_name(err));
-        (void)poom_sd_browser_draw_status_("Storage error", "Init failed", true);
+        (void)poom_sd_browser_draw_status_("Storage error", "Init failed", "A:Retry");
         (void)poom_sd_browser_ensure_buttons_subscribed_();
         memset(&s_storage, 0, sizeof(s_storage));
         s_error_mode = true;
@@ -773,7 +966,7 @@ esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
     {
         POOM_SD_BROWSER_PRINTF_W("storage reload failed: %s", esp_err_to_name(err));
         (void)poom_sd_browser_storage_deinit(&s_storage);
-        (void)poom_sd_browser_draw_status_("Read error", "Cannot list SD", true);
+        (void)poom_sd_browser_draw_status_("Read error", "Cannot list SD", "A:Retry");
         (void)poom_sd_browser_ensure_buttons_subscribed_();
         memset(&s_storage, 0, sizeof(s_storage));
         s_error_mode = true;
@@ -786,7 +979,7 @@ esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
     {
         (void)poom_sd_browser_storage_deinit(&s_storage);
         memset(&s_storage, 0, sizeof(s_storage));
-        (void)poom_sd_browser_draw_status_("Input error", "No buttons", true);
+        (void)poom_sd_browser_draw_status_("Input error", "No buttons", "A:Retry");
         s_error_mode = true;
         s_running = true;
         return err;
@@ -823,6 +1016,9 @@ esp_err_t poom_sd_browser_stop(void)
 
     s_file_details_mode = false;
     s_error_mode = false;
+    s_mount_error = ESP_OK;
+    s_format_confirm_mode = false;
+    s_format_confirm_yes_selected = false;
     s_list_offset = 0U;
     s_running = false;
 

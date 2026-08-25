@@ -67,13 +67,6 @@ esp_err_t sd_card_unmount(void);
 esp_err_t sd_card_check_format(void);
 
 /**
- * @brief Format mounted SD card using FATFS formatter.
- *
- * @return ESP_OK on success, otherwise an ESP error code.
- */
-esp_err_t sd_card_format(void);
-
-/**
  * @brief Check if SD card is currently mounted and writable.
  *
  * @return true when mounted.
