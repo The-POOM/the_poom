@@ -1,6 +1,5 @@
-//
-// Created by Hugo Trippaers on 25/08/2026.
-//
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Hugo Trippaers <hugo@trippaers.nl>
 
 #ifndef POOM_POOM_I2C_AS5600_DRIVER_H
 #define POOM_POOM_I2C_AS5600_DRIVER_H

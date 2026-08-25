@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Hugo Trippaers <hugo@trippaers.nl>
+
 #pragma once
 
 #include <stdbool.h>

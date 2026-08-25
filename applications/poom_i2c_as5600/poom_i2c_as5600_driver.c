@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Hugo Trippaers <hugo@trippaers.nl>
+
 #include "poom_i2c_as5600_driver.h"
 
 #include "i2c.h"
