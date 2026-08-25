@@ -67,9 +67,9 @@ static bool as5600_read_reg12(uint8_t reg, uint16_t *value)
     return true;
 }
 
-void as5600_init(void)
+bool as5600_init(void)
 {
-    i2c_register_device(AS5600_ADDR);
+    return i2c_register_device(AS5600_ADDR) == I2C_STATUS_OK;
 }
 
 // Plain ACK probe: true when any device answers at 0x36.
@@ -89,58 +89,22 @@ bool as5600_detect_presence(void)
 
 bool as5600_read_status(uint8_t *status)
 {
-    if (status == NULL)
-    {
-        return false;
-    }
-
-    return as5600_read_reg(AS5600_REG_STATUS, status, 1);
+    return status != NULL && as5600_read_reg(AS5600_REG_STATUS, status, 1);
 }
 
 bool as5600_read_agc(uint8_t *agc)
 {
-    if (agc == NULL)
-    {
-        return false;
-    }
-
-    return as5600_read_reg(AS5600_REG_AGC, agc, 1);
+    return agc != NULL && as5600_read_reg(AS5600_REG_AGC, agc, 1);
 }
 
 bool as5600_read_magnitude(uint16_t *magnitude)
 {
-    uint8_t buf[2];
-
-    if (magnitude == NULL)
-    {
-        return false;
-    }
-
-    if (!as5600_read_reg(AS5600_REG_MAGNITUDE, buf, 2))
-    {
-        return false;
-    }
-
-    *magnitude = (uint16_t)(((buf[0] & 0x0FU) << 8) | buf[1]);
-    return true;
+    return magnitude != NULL && as5600_read_reg12(AS5600_REG_MAGNITUDE, magnitude);
 }
 
 bool as5600_read_raw_angle(uint16_t *raw_angle)
 {
-    uint8_t buf[2];
-
-    if (raw_angle == NULL)
-    {
-        return false;
-    }
-
-    if (!as5600_read_reg(AS5600_REG_RAW_ANGLE, buf, 2))
-    {
-        return false;
-    }
-
-    *raw_angle = (uint16_t)(((buf[0] & 0x0FU) << 8) | buf[1]);
-    return true;
+    return raw_angle != NULL && as5600_read_reg12(AS5600_REG_RAW_ANGLE, raw_angle);
 }
 
 float as5600_raw_to_degrees(uint16_t raw_angle)
@@ -213,15 +177,15 @@ bool as5600_read_zmco(uint8_t *zmco)
 
 bool as5600_read_zpos(uint16_t *zpos)
 {
-    return (zpos != NULL) && as5600_read_reg12(AS5600_REG_ZPOS, zpos);
+    return zpos != NULL && as5600_read_reg12(AS5600_REG_ZPOS, zpos);
 }
 
 bool as5600_read_mpos(uint16_t *mpos)
 {
-    return (mpos != NULL) && as5600_read_reg12(AS5600_REG_MPOS, mpos);
+    return mpos != NULL && as5600_read_reg12(AS5600_REG_MPOS, mpos);
 }
 
 bool as5600_read_mang(uint16_t *mang)
 {
-    return (mang != NULL) && as5600_read_reg12(AS5600_REG_MANG, mang);
+    return mang != NULL && as5600_read_reg12(AS5600_REG_MANG, mang);
 }

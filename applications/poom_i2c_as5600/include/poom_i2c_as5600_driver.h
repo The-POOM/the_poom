@@ -16,7 +16,7 @@ extern "C" {
 #define AS5600_STATUS_ML (1U << 4)   // magnet too weak (AGC at maximum)
 #define AS5600_STATUS_MD (1U << 5)   // magnet detected
 
-void as5600_init(void);
+bool as5600_init(void);
 
 // Plain ACK probe: something answers at 0x36 (DETECT state).
 bool as5600_detect_presence(void);

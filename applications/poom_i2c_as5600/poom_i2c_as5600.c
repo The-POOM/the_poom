@@ -58,7 +58,6 @@ typedef struct
 {
     bool detected;
     bool validated;
-    bool error_detected;
     bool magnet_detected;
     bool magnet_ml;
     bool magnet_mh;
@@ -116,8 +115,8 @@ static char s_poom_i2c_as5600_sbus_user[] = "poom_i2c_as5600";
 static poom_i2c_as5600_exit_cb_t s_poom_i2c_as5600_exit_cb;
 static void *s_poom_i2c_as5600_exit_cb_ctx;
 static as5600_state_t s_poom_i2c_as5600_state;
-static poom_i2c_as5600_page_t s_poom_i2c_as5600_page = Detect;
-static bool s_poom_i2c_as5600_a_clicked = false;
+static volatile poom_i2c_as5600_page_t s_poom_i2c_as5600_page = Detect;
+static volatile bool s_poom_i2c_as5600_a_clicked = false;
 static int8_t s_poom_i2c_as5600_preset_idx = -1;
 // Jitter tracking on the Filter page: min/max wrapped delta against a
 // reference sample, reset on page entry and on preset change.
@@ -160,7 +159,12 @@ esp_err_t poom_i2c_as5600_start(void)
     }
     s_poom_i2c_buttons_subscribed = true;
 
-    as5600_init();
+    if (!as5600_init())
+    {
+        (void)poom_sbus_unsubscribe_cb("input/button", poom_i2c_as5600_button_cb, s_poom_i2c_as5600_sbus_user);
+        s_poom_i2c_buttons_subscribed = false;
+        return ESP_FAIL;
+    }
 
     if (xTaskCreate(poom_i2c_as5600_task,
                     "poom_i2c_as5600",
@@ -392,7 +396,14 @@ static void poom_i2c_as5600_set_exit_callback(poom_i2c_as5600_exit_cb_t callback
 void app_poom_i2c_as5600_menu(void)
 {
     poom_i2c_as5600_set_exit_callback(poom_i2c_as5600_exit_cb, NULL);
-    (void)poom_i2c_as5600_start();
+
+    // The menu detaches from input/button before launching and only
+    // re-attaches on poom/menu/resume; if start fails the app task will
+    // never publish it, so do it here or all input stays dead.
+    if (poom_i2c_as5600_start() != ESP_OK)
+    {
+        poom_i2c_as5600_exit_cb(NULL);
+    }
 }
 
 // reset all flags and state variables to their default state
@@ -420,29 +431,25 @@ static void poom_i2c_as5600_update_state(as5600_state_t *state)
     uint8_t status;
     if (!as5600_read_status(&status))
     {
-        state->error_detected = true;
         return;
     };
 
-    state->magnet_detected = status & 1 << 5;
-    state->magnet_ml = status & 1 << 4;
-    state->magnet_mh = status & 1 << 3;
+    state->magnet_detected = status & AS5600_STATUS_MD;
+    state->magnet_ml = status & AS5600_STATUS_ML;
+    state->magnet_mh = status & AS5600_STATUS_MH;
 
     if (!as5600_read_agc(&state->agc))
     {
-        state->error_detected = true;
         return;
     };
 
     if (!as5600_read_magnitude(&state->magnitude))
     {
-        state->error_detected = true;
         return;
     };
 
     if (!as5600_read_raw_angle(&state->raw_angle))
     {
-        state->error_detected = true;
         return;
     }
 
@@ -452,7 +459,6 @@ static void poom_i2c_as5600_update_state(as5600_state_t *state)
         !as5600_read_mpos(&state->mpos) ||
         !as5600_read_mang(&state->mang))
     {
-        state->error_detected = true;
         return;
     }
 
