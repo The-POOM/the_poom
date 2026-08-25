@@ -1,4 +1,4 @@
-set(srcs "poom_i2c_as5600.c")
+set(srcs "poom_i2c_as5600.c" "poom_i2c_as5600_driver.c")
 
 idf_component_register(
     SRCS "${srcs}"
