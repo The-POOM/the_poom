@@ -851,7 +851,7 @@ static void action_poom_i2c_as5600(void)
 {
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
-    poom_i2c_as5600_start();
+    app_poom_i2c_as5600_menu();
 }
 
 // ==============================================================

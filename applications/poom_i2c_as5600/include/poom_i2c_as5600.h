@@ -9,8 +9,9 @@
 extern "C" {
 #endif
 
-// Start the application
-esp_err_t poom_i2c_as5600_start(void);
+// Menu entrypoint
+// See poom_menu.c
+void app_poom_i2c_as5600_menu(void);
 
 #ifdef __cplusplus
 }
