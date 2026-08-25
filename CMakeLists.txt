@@ -143,6 +143,7 @@ set(MODULES
     poom_wii
     poom_wifi_arp
     poom_pcap
+    poom_i2c_as5600
 )
 
 set(COMPONENTS ${MODULES})
@@ -221,6 +222,7 @@ set(POOM_APPLICATION_DIRS
     ${CMAKE_SOURCE_DIR}/applications/poom_wifi_spam
     ${CMAKE_SOURCE_DIR}/applications/poom_wii
     ${CMAKE_SOURCE_DIR}/applications/poom_wifi_arp
+    ${CMAKE_SOURCE_DIR}/applications/poom_i2c_as5600
 )
 
 set(POOM_DRIVER_DIRS
