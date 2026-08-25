@@ -13,8 +13,11 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "bsp_pong.h"
 #include "input_events.h"
+#include "poom_led_rainbow.h"
 #include "poom_sbus.h"
+#include "ws2812.h"
 #include "poom_i2c_as5600_driver.h"
 
 // Logging
@@ -51,6 +54,21 @@
 
 #define POOM_I2C_AS5600_TASK_STACK (3584U)
 #define POOM_I2C_AS5600_TASK_PRIO (4U)
+
+// LED chain layout: one 9-LED WS2812 chain arranged as a split 3x3
+// square, 6 LEDs bottom-left and 3 top-right. The bar cluster shows
+// quantities (AGC, angle sector, jitter), the verdict cluster shows a
+// status color. Flip the ranges if the chain order is reversed on
+// this board.
+#define POOM_I2C_AS5600_LED_BAR_START     (0U)  // bottom-left, 6 LEDs
+#define POOM_I2C_AS5600_LED_BAR_COUNT     (6U)
+#define POOM_I2C_AS5600_LED_VERDICT_START (6U)  // top-right, 3 LEDs
+#define POOM_I2C_AS5600_LED_VERDICT_COUNT (3U)
+#define POOM_I2C_AS5600_LED_BRIGHTNESS    (26U)  // 10% of full scale
+#define POOM_I2C_AS5600_LED_RESOLUTION_HZ (10 * 1000 * 1000)
+// Raw-angle delta (LSB per 100 ms tick) below which rotation counts
+// as standstill for the direction indicator.
+#define POOM_I2C_AS5600_DIR_THRESHOLD     (4)
 
 // Type definitions
 typedef void (*poom_i2c_as5600_exit_cb_t)(void *user_ctx);
@@ -98,6 +116,25 @@ static const poom_i2c_as5600_filter_preset_t s_poom_i2c_as5600_presets[] = {
 #define POOM_I2C_AS5600_PRESET_COUNT \
     (sizeof(s_poom_i2c_as5600_presets) / sizeof(s_poom_i2c_as5600_presets[0]))
 
+// Bar-cluster LED order for the angle sweep. The cluster is laid out
+// as a triangle:
+//   0
+//   1 4
+//   2 3 5
+// so chain indices 4 and 5 are swapped to sweep around the edge
+// (down the left, across the bottom, up the right).
+static const uint8_t s_poom_i2c_as5600_angle_led_order[POOM_I2C_AS5600_LED_BAR_COUNT] = {
+    0U, 1U, 2U, 3U, 5U, 4U,
+};
+
+// Verdict-cluster color per preset (same order as the preset table)
+static const uint8_t s_poom_i2c_as5600_preset_rgb[POOM_I2C_AS5600_PRESET_COUNT][3] = {
+    {255U, 255U, 255U},   // DEFAULT: white
+    {0U,   0U,   255U},   // STABLE: blue
+    {0U,   255U, 0U},     // BALANCED: green
+    {255U, 180U, 0U},     // FAST: yellow
+};
+
 // CONF field decode tables (indexes are the raw datasheet codes)
 static const char *const s_poom_i2c_as5600_pm_str[]   = {"NOM", "LPM1", "LPM2", "LPM3"};
 static const char *const s_poom_i2c_as5600_outs_str[] = {"ANALOG", "ANLG90", "PWM", "RSVD"};
@@ -124,6 +161,15 @@ static bool s_poom_i2c_as5600_jitter_valid = false;
 static uint16_t s_poom_i2c_as5600_jitter_ref = 0U;
 static int16_t s_poom_i2c_as5600_jitter_min = 0;
 static int16_t s_poom_i2c_as5600_jitter_max = 0;
+// LED strip: owned by this app while it runs (taken over from the
+// rainbow animation, handed back on exit)
+static ws2812_strip_t s_poom_i2c_as5600_strip;
+static bool s_poom_i2c_as5600_leds_ready = false;
+static bool s_poom_i2c_as5600_rainbow_was_running = false;
+static uint8_t s_poom_i2c_as5600_led_tick = 0U;
+// Previous raw angle for the rotation-direction indicator
+static bool s_poom_i2c_as5600_dir_valid = false;
+static uint16_t s_poom_i2c_as5600_dir_prev_raw = 0U;
 
 // Function prototypes
 static void poom_i2c_as5600_exit_cb(void *user_ctx);
@@ -140,6 +186,11 @@ static void poom_i2c_as5600_draw_filter(void);
 static void poom_i2c_as5600_draw_config(void);
 static void poom_i2c_as5600_apply_filter_preset(uint8_t idx);
 static void poom_i2c_as5600_update_jitter(uint16_t raw_angle);
+static void poom_i2c_as5600_leds_acquire(void);
+static void poom_i2c_as5600_leds_release(void);
+static void poom_i2c_as5600_leds_set_range(uint8_t start, uint8_t count, uint8_t r, uint8_t g, uint8_t b);
+static void poom_i2c_as5600_leds_bar(uint8_t level, uint8_t r, uint8_t g, uint8_t b);
+static void poom_i2c_as5600_update_leds(void);
 static poom_i2c_as5600_page_t next_page(poom_i2c_as5600_page_t current);
 static poom_i2c_as5600_page_t previous_page(poom_i2c_as5600_page_t current);
 
@@ -186,6 +237,8 @@ esp_err_t poom_i2c_as5600_start(void)
 
 static void poom_i2c_as5600_task(void *parameters) {
 	(void)parameters;
+
+	poom_i2c_as5600_leds_acquire();
 
 	for (;;) {
 	    // Exit on button B
@@ -257,6 +310,8 @@ static void poom_i2c_as5600_task(void *parameters) {
 	        }
 	    }
 
+	    poom_i2c_as5600_update_leds();
+
 		vTaskDelay(pdMS_TO_TICKS(100));
 	}
 
@@ -275,6 +330,8 @@ static void poom_i2c_as5600_cleanup(void *parameters) {
 	if (s_poom_i2c_buttons_subscribed) {
 		(void)poom_sbus_unsubscribe_cb("input/button", poom_i2c_as5600_button_cb, s_poom_i2c_as5600_sbus_user);
 	}
+
+	poom_i2c_as5600_leds_release();
 
 	s_poom_i2c_as5600_running = false;
 
@@ -418,6 +475,10 @@ static void poom_i2c_as5600_reset(void)
     s_poom_i2c_as5600_page = Detect;
     s_poom_i2c_as5600_preset_idx = -1;
     s_poom_i2c_as5600_jitter_valid = false;
+    s_poom_i2c_as5600_leds_ready = false;
+    s_poom_i2c_as5600_rainbow_was_running = false;
+    s_poom_i2c_as5600_led_tick = 0U;
+    s_poom_i2c_as5600_dir_valid = false;
     memset(&s_poom_i2c_as5600_state, 0x00, sizeof(as5600_state_t));
 }
 
@@ -641,6 +702,222 @@ static void poom_i2c_as5600_update_jitter(uint16_t raw_angle)
     {
         s_poom_i2c_as5600_jitter_max = delta;
     }
+}
+
+// Takes the LED strip over from the boot-time rainbow animation.
+// On init failure the rainbow is restored and the app runs screen-only.
+static void poom_i2c_as5600_leds_acquire(void)
+{
+    s_poom_i2c_as5600_rainbow_was_running = poom_led_rainbow_deinit();
+
+    if (ws2812_init(&s_poom_i2c_as5600_strip,
+                    PIN_NUM_WS2812,
+                    PIN_NUM_LEDS,
+                    false,
+                    POOM_I2C_AS5600_LED_RESOLUTION_HZ) != ESP_OK)
+    {
+        POOM_I2C_AS5600_PRINTF_D("LED init failed, running screen-only");
+        poom_led_rainbow_init();
+        if (s_poom_i2c_as5600_rainbow_was_running)
+        {
+            (void)poom_led_rainbow_start();
+        }
+        s_poom_i2c_as5600_rainbow_was_running = false;
+        s_poom_i2c_as5600_leds_ready = false;
+        return;
+    }
+
+    ws2812_set_brightness(&s_poom_i2c_as5600_strip, POOM_I2C_AS5600_LED_BRIGHTNESS);
+    ws2812_clear(&s_poom_i2c_as5600_strip);
+    (void)ws2812_show(&s_poom_i2c_as5600_strip);
+    s_poom_i2c_as5600_leds_ready = true;
+}
+
+// Hands the LED strip back to the rainbow animation.
+static void poom_i2c_as5600_leds_release(void)
+{
+    if (!s_poom_i2c_as5600_leds_ready)
+    {
+        // acquire failed and already restored the rainbow
+        return;
+    }
+
+    ws2812_clear(&s_poom_i2c_as5600_strip);
+    (void)ws2812_show(&s_poom_i2c_as5600_strip);
+    ws2812_deinit(&s_poom_i2c_as5600_strip);
+    s_poom_i2c_as5600_leds_ready = false;
+
+    poom_led_rainbow_init();
+    if (s_poom_i2c_as5600_rainbow_was_running)
+    {
+        (void)poom_led_rainbow_start();
+    }
+    s_poom_i2c_as5600_rainbow_was_running = false;
+}
+
+static void poom_i2c_as5600_leds_set_range(uint8_t start, uint8_t count, uint8_t r, uint8_t g, uint8_t b)
+{
+    for (uint8_t i = 0U; i < count; i++)
+    {
+        ws2812_set_pixel(&s_poom_i2c_as5600_strip, (int)(start + i), r, g, b, 0U);
+    }
+}
+
+// Lights `level` of the bar cluster's LEDs (VU-meter style), rest off.
+static void poom_i2c_as5600_leds_bar(uint8_t level, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (level > POOM_I2C_AS5600_LED_BAR_COUNT)
+    {
+        level = POOM_I2C_AS5600_LED_BAR_COUNT;
+    }
+    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_BAR_START, level, r, g, b);
+}
+
+// Mirrors the on-screen data onto the LED clusters:
+// bar cluster (bottom-left, 6) = quantity, verdict cluster (top-right,
+// 3) = status color. Runs every tick from the same state the draw
+// functions use, so LEDs and screen cannot disagree.
+static void poom_i2c_as5600_update_leds(void)
+{
+    const as5600_state_t *state = &s_poom_i2c_as5600_state;
+    int16_t dir_delta = 0;
+
+    if (!s_poom_i2c_as5600_leds_ready)
+    {
+        return;
+    }
+
+    s_poom_i2c_as5600_led_tick++;
+
+    // Rotation delta for the Angle page direction indicator
+    if (state->validated)
+    {
+        if (s_poom_i2c_as5600_dir_valid)
+        {
+            dir_delta = (int16_t)((((int32_t)state->raw_angle -
+                                    (int32_t)s_poom_i2c_as5600_dir_prev_raw + 2048) & 4095) - 2048);
+        }
+        s_poom_i2c_as5600_dir_prev_raw = state->raw_angle;
+        s_poom_i2c_as5600_dir_valid = true;
+    }
+    else
+    {
+        s_poom_i2c_as5600_dir_valid = false;
+    }
+
+    ws2812_clear(&s_poom_i2c_as5600_strip);
+
+    if (!state->detected || !state->validated)
+    {
+        // Slow pulse: red = nothing at 0x36, orange = present but invalid
+        if ((s_poom_i2c_as5600_led_tick / 5U) & 1U)
+        {
+            if (state->detected)
+            {
+                poom_i2c_as5600_leds_set_range(0U, PIN_NUM_LEDS, 255U, 100U, 0U);
+            }
+            else
+            {
+                poom_i2c_as5600_leds_set_range(0U, PIN_NUM_LEDS, 255U, 0U, 0U);
+            }
+        }
+    }
+    else
+    {
+        switch (s_poom_i2c_as5600_page)
+        {
+            case Detect:
+            {
+                // All good: steady green on the verdict cluster
+                poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                               POOM_I2C_AS5600_LED_VERDICT_COUNT, 0U, 255U, 0U);
+                break;
+            }
+            case Magnet:
+            {
+                // Bar: AGC 0..128 (3.3V range); verdict: placement quality
+                poom_i2c_as5600_leds_bar((uint8_t)(((uint16_t)state->agc * POOM_I2C_AS5600_LED_BAR_COUNT) / 128U),
+                                         255U, 255U, 255U);
+                if (!state->magnet_detected)
+                {
+                    // verdict off
+                }
+                else if (state->magnet_mh)
+                {
+                    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                                   POOM_I2C_AS5600_LED_VERDICT_COUNT, 255U, 0U, 0U);
+                }
+                else if (state->magnet_ml)
+                {
+                    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                                   POOM_I2C_AS5600_LED_VERDICT_COUNT, 0U, 0U, 255U);
+                }
+                else
+                {
+                    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                                   POOM_I2C_AS5600_LED_VERDICT_COUNT, 0U, 255U, 0U);
+                }
+                break;
+            }
+            case Angle:
+            {
+                // Bar: one lit LED marks the 60-degree sector of the
+                // shaft; verdict: green = one direction, red = the
+                // other, off = standstill
+                uint8_t sector = (uint8_t)(((uint32_t)state->raw_angle * POOM_I2C_AS5600_LED_BAR_COUNT) / 4096U);
+                ws2812_set_pixel(&s_poom_i2c_as5600_strip,
+                                 (int)(POOM_I2C_AS5600_LED_BAR_START + s_poom_i2c_as5600_angle_led_order[sector]),
+                                 255U, 255U, 255U, 0U);
+                if (dir_delta > POOM_I2C_AS5600_DIR_THRESHOLD)
+                {
+                    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                                   POOM_I2C_AS5600_LED_VERDICT_COUNT, 0U, 255U, 0U);
+                }
+                else if (dir_delta < -POOM_I2C_AS5600_DIR_THRESHOLD)
+                {
+                    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                                   POOM_I2C_AS5600_LED_VERDICT_COUNT, 255U, 0U, 0U);
+                }
+                break;
+            }
+            case Filter:
+            {
+                // Bar: observed jitter spread (LSB), colored by how bad
+                // it is; verdict: current preset color
+                int16_t spread = (int16_t)(s_poom_i2c_as5600_jitter_max - s_poom_i2c_as5600_jitter_min);
+                uint8_t level = (uint8_t)((spread >= 24) ? POOM_I2C_AS5600_LED_BAR_COUNT
+                                                         : (((uint16_t)spread * POOM_I2C_AS5600_LED_BAR_COUNT + 23U) / 24U));
+                if (spread <= 4)
+                {
+                    poom_i2c_as5600_leds_bar(level, 0U, 255U, 0U);
+                }
+                else if (spread <= 12)
+                {
+                    poom_i2c_as5600_leds_bar(level, 255U, 180U, 0U);
+                }
+                else
+                {
+                    poom_i2c_as5600_leds_bar(level, 255U, 0U, 0U);
+                }
+                if (s_poom_i2c_as5600_preset_idx >= 0)
+                {
+                    const uint8_t *rgb = s_poom_i2c_as5600_preset_rgb[s_poom_i2c_as5600_preset_idx];
+                    poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                                   POOM_I2C_AS5600_LED_VERDICT_COUNT, rgb[0], rgb[1], rgb[2]);
+                }
+                break;
+            }
+            case Config:
+            {
+                // Parked: dim white on the verdict cluster only
+                poom_i2c_as5600_leds_set_range(POOM_I2C_AS5600_LED_VERDICT_START,
+                                               POOM_I2C_AS5600_LED_VERDICT_COUNT, 40U, 40U, 40U);
+                break;
+            }
+        }
+    }
+
+    (void)ws2812_show(&s_poom_i2c_as5600_strip);
 }
 
 // Filter tuning page: A cycles SF/HYST/FTH presets (volatile), the

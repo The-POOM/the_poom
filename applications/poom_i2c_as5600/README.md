@@ -49,7 +49,8 @@ must ACK at `0x36` and its registers must behave like an AS5600's.
 
 ## Usage
 
-The app cycles through five pages with `LEFT`/`RIGHT`:
+The app steps through five pages with `LEFT`/`RIGHT` (no wraparound at
+either end):
 
 1. **DETECT** — I2C presence at `0x36` and the AS5600 validation verdict.
 2. **MAGNET** — magnet state (OK / TOO WEAK / TOO STRONG / not detected),
@@ -74,6 +75,35 @@ Notes:
 - All configuration writes are **volatile** and revert on sensor power cycle.
   The BURN register is deliberately not exposed by the driver.
 
+### LED feedback
+
+The onboard 9-LED WS2812 chain (split 3x3 square: 6 LEDs bottom-left, 3
+top-right) mirrors the data on screen. The app takes the strip over from the
+boot-time rainbow animation and hands it back on exit (if the strip cannot be
+acquired the app runs screen-only). Brightness is capped at 10% of full
+scale. The bottom-left cluster shows quantities, the top-right cluster shows
+a status color.
+
+The bar cluster is laid out as a triangle (chain indices):
+
+```
+0
+1 4
+2 3 5
+```
+
+The ANGLE page sweeps around the triangle's edge (0, 1, 2, 3, 5, 4); the bar
+displays fill in plain chain order.
+
+| Page   | Bottom-left (bar, 6)                  | Top-right (verdict, 3)              |
+|--------|---------------------------------------|-------------------------------------|
+| any    | pulse red = no device, orange = invalid (all 9 LEDs) | |
+| DETECT | off                                   | green = AS5600 validated            |
+| MAGNET | AGC bar (0..128 -> 0..6 white LEDs)   | green OK / blue weak / red strong / off no magnet |
+| ANGLE  | lit LED = 60-degree shaft sector      | green / red = rotation direction, off = standstill |
+| FILTER | jitter bar (green/amber/red by spread)| preset color (white/blue/green/yellow) |
+| CONFIG | off                                   | dim white (parked)                  |
+
 ## Public API
 
 ```c
@@ -81,7 +111,7 @@ Notes:
 void app_poom_i2c_as5600_menu(void);
 
 // Driver (include/poom_i2c_as5600_driver.h)
-void as5600_init(void);
+bool as5600_init(void);
 bool as5600_detect_presence(void);
 bool as5600_read_status(uint8_t *status);
 bool as5600_read_agc(uint8_t *agc);
@@ -134,6 +164,8 @@ flowchart TD
     G & I & J & K & L -->|LEFT/RIGHT| H
     G & I & J & K & L -->|B| N[Exit]
 
+    B -->|start fails| P
     N --> O[Unsubscribe input/button]
-    O --> P[Publish poom/menu/resume]
+    O --> O2[Hand LED strip back to rainbow]
+    O2 --> P[Publish poom/menu/resume]
 ```
