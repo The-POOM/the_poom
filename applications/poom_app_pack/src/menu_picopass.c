@@ -3,6 +3,7 @@
 // modeled on menu_nfc / menu_fw_info.
 
 #include "menu_picopass.h"
+#include "poom_nfc_controller.h"  // release the NFC core on exit
 #include "poom_picopass.h"
 
 #include <stdbool.h>
@@ -164,16 +165,39 @@ static void pp_draw_(void)
             poom_arduboy_set_cursor(0, 16);
             (void)poom_arduboy_print(l);
 
-            if(s_dump.pacs_present)
+            if(s_dump.wiegand_count > 0)
             {
-                (void)snprintf(l, sizeof(l), "BITS:%u", s_dump.bit_length);
+                // One line per matching format (37-bit yields two).
+                for(uint8_t i = 0; i < s_dump.wiegand_count; i++)
+                {
+                    (void)snprintf(
+                        l, sizeof(l), "%s F:%lu C:%llu",
+                        s_dump.wiegand[i].format,
+                        (unsigned long)s_dump.wiegand[i].facility_code,
+                        (unsigned long long)s_dump.wiegand[i].card_number);
+                    poom_arduboy_set_cursor(0, (int16_t)(28 + i * 11));
+                    (void)poom_arduboy_print(l);
+                }
+            }
+            else if(s_dump.pacs_present)
+            {
+                // Bad parity on a recognized length shows as e.g. "BITS:26!".
+                (void)snprintf(l, sizeof(l), "BITS:%u%s", s_dump.bit_length,
+                               s_dump.parity_error ? "!" : "");
                 poom_arduboy_set_cursor(0, 30);
                 (void)poom_arduboy_print(l);
-                (void)snprintf(l, sizeof(l), "%02X%02X%02X%02X%02X%02X%02X%02X",
-                               s_dump.credential[0], s_dump.credential[1],
-                               s_dump.credential[2], s_dump.credential[3],
-                               s_dump.credential[4], s_dump.credential[5],
-                               s_dump.credential[6], s_dump.credential[7]);
+                // Show only the significant bytes (drop leading zeros).
+                int nb = (s_dump.bit_length + 7) / 8;
+                if(nb < 1)
+                    nb = 1;
+                if(nb > 8)
+                    nb = 8;
+                char* q = l;
+                for(int i = 8 - nb; i < 8; i++)
+                {
+                    q += snprintf(q, sizeof(l) - (size_t)(q - l), "%02X",
+                                  s_dump.credential[i]);
+                }
                 poom_arduboy_set_cursor(0, 42);
                 (void)poom_arduboy_print(l);
             }
@@ -211,6 +235,8 @@ static void menu_picopass_exit_(void)
                                        s_sbus_user);
         s_buttons_subscribed = false;
     }
+    // Release the NFC core so we don't leave the RF field on after exiting.
+    poom_nfc_controller_stop();
     const uint8_t token = 1U;
     (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
 }

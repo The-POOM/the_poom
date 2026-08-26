@@ -11,6 +11,7 @@
 #include "optimized_cipher.h"
 #include "poom_des.h"
 #include "poom_nfc_controller.h"  // poom_nfc_controller_start(): bring up RFAL/ST25R3916
+#include "poom_wiegand.h"
 #include "rfal_picopass.h"
 #include <stdio.h>
 #include <string.h>
@@ -84,6 +85,22 @@ static void poom_picopass_decode_pacs(PoomPicopassDump* out)
     memcpy(&swapped, out->credential, sizeof(swapped));
     swapped ^= sentinel;
     memcpy(out->credential, &swapped, sizeof(swapped));
+
+    // Decode every Wiegand format whose length matches and parity validates
+    // (37-bit is ambiguous and can yield both H10302 and H10304).
+    poom_wiegand_result_t w[POOM_PICOPASS_MAX_WIEGAND];
+    bool any_len = false;
+    int n        = poom_wiegand_decode(out->credential, out->bit_length, w,
+                                       POOM_PICOPASS_MAX_WIEGAND, &any_len);
+    out->wiegand_count = (uint8_t)n;
+    for(int i = 0; i < n; i++)
+    {
+        out->wiegand[i].format        = w[i].format;
+        out->wiegand[i].facility_code = w[i].facility_code;
+        out->wiegand[i].card_number   = w[i].card_number;
+    }
+    // A known length matched but nothing passed parity -> flag it.
+    out->parity_error = (n == 0) && any_len;
 }
 
 PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
@@ -217,13 +234,27 @@ int poom_picopass_format(const PoomPicopassDump* dump, char* buf, int buf_len)
                           : dump->pacs_encryption == 0x14 ? "none"
                           : dump->pacs_encryption == 0x15 ? "DES"
                                                           : "?";
-        ADV(snprintf(p, rem, "PACS     enc=%s bits=%u\n", enc,
-                     dump->bit_length));
-        ADV(snprintf(
-            p, rem, "CRED     %02X %02X %02X %02X %02X %02X %02X %02X\n",
-            dump->credential[0], dump->credential[1], dump->credential[2],
-            dump->credential[3], dump->credential[4], dump->credential[5],
-            dump->credential[6], dump->credential[7]));
+        ADV(snprintf(p, rem, "PACS     enc=%s bits=%u%s\n", enc,
+                     dump->bit_length, dump->parity_error ? "!" : ""));
+        // Credential, significant bytes only (drop leading zeros).
+        int nb = (dump->bit_length + 7) / 8;
+        if(nb < 1)
+            nb = 1;
+        if(nb > 8)
+            nb = 8;
+        ADV(snprintf(p, rem, "%s", "CRED    "));
+        for(int i = 8 - nb; i < 8; i++)
+        {
+            ADV(snprintf(p, rem, " %02X", dump->credential[i]));
+        }
+        ADV(snprintf(p, rem, "%s", "\n"));
+        for(uint8_t i = 0; i < dump->wiegand_count; i++)
+        {
+            ADV(snprintf(p, rem, "WIEGAND  %s FC=%lu CN=%llu\n",
+                         dump->wiegand[i].format,
+                         (unsigned long)dump->wiegand[i].facility_code,
+                         (unsigned long long)dump->wiegand[i].card_number));
+        }
     }
     for(uint8_t i = 0; i < dump->app_block_count; i++)
     {

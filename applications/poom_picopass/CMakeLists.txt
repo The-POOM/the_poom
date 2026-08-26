@@ -9,6 +9,7 @@ idf_component_register(
     SRCS
         "src/rfal_picopass.c"
         "src/poom_picopass.c"
+        "src/poom_wiegand.c"
         "src/poom_des.c"
         "src/loclass/optimized_cipher.c"
         "src/loclass/optimized_cipherutils.c"
