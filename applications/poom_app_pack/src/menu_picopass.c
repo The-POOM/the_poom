@@ -44,6 +44,16 @@
 #define BUTTON_SINGLE_CLICK (4U)
 #endif
 
+// iCLASS config fuses (config block byte 7): the card is unsecure when the
+// crypt fuses read as CRYPT0 alone.
+#define PP_FUSE_CRYPT0  0x08
+#define PP_FUSE_CRYPT1  0x10
+#define PP_FUSE_CRYPT10 (PP_FUSE_CRYPT0 | PP_FUSE_CRYPT1)
+// SE/SEOS marker: block 6 byte 0 reads 0x30 on an SIO card.
+#define PP_SIO_MARKER   0x30
+
+#define PP_RAW_ROWS_PER_PAGE 5
+
 typedef struct
 {
     uint8_t button;
@@ -55,7 +65,9 @@ typedef enum
 {
     PP_MENU,
     PP_READING,
-    PP_RESULT
+    PP_RESULT,
+    PP_INFO,  // decoded card metadata (security, key, SIO)
+    PP_RAW    // paged raw block hex
 } pp_state_t;
 
 // Submenu options. Add real entries (Emulate, Write, ...) here as they land.
@@ -75,6 +87,7 @@ static char s_sbus_user[]          = "menu_picopass";
 
 static pp_state_t s_state          = PP_MENU;
 static pp_opt_t s_opt              = PP_OPT_READ;
+static int s_raw_page              = 0;  // current page in the PP_RAW hex view
 static PoomPicopassStatus s_status = PoomPicopassOk;
 static PoomPicopassDump s_dump;
 
@@ -115,6 +128,39 @@ static void pp_draw_header_(void)
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
 }
 
+// Rows for the raw hex view: the four always-read blocks followed by the AA1
+// application blocks (6..app_limit) we authenticated to read.
+static int pp_raw_row_count(void)
+{
+    return 4 + s_dump.app_block_count;
+}
+
+static const uint8_t* pp_raw_row(int row, char* label, size_t label_sz)
+{
+    switch(row)
+    {
+        case 0:
+            snprintf(label, label_sz, "CSN");
+            return s_dump.csn;
+        case 1:
+            snprintf(label, label_sz, "CFG");
+            return s_dump.config;
+        case 2:
+            snprintf(label, label_sz, "EPR");
+            return s_dump.epurse;
+        case 3:
+            snprintf(label, label_sz, "AIA");
+            return s_dump.aia;
+        default:
+        {
+            int blk = row - 4;
+            snprintf(label, label_sz, "B%02d",
+                     POOM_PICOPASS_PACS_CFG_BLOCK + blk);
+            return s_dump.blocks[blk];
+        }
+    }
+}
+
 static void pp_draw_(void)
 {
     poom_arduboy_clear();
@@ -148,8 +194,8 @@ static void pp_draw_(void)
         poom_arduboy_set_cursor(0, 56);
         (void)poom_arduboy_print(F("B:CANCEL"));
     }
-    else
-    {  // PP_RESULT
+    else if(s_state == PP_RESULT)
+    {
         char l[24];
         if(s_status != PoomPicopassOk && s_status != PoomPicopassErrAuth)
         {
@@ -204,8 +250,99 @@ static void pp_draw_(void)
         }
         poom_arduboy_set_cursor(0, 56);
         (void)poom_arduboy_print(F("A:AGAIN"));
-        poom_arduboy_set_cursor(72, 56);
+        poom_arduboy_set_cursor(46, 56);
+        (void)poom_arduboy_print(F("v:INFO"));
+        poom_arduboy_set_cursor(92, 56);
         (void)poom_arduboy_print(F("B:BACK"));
+    }
+    else if(s_state == PP_INFO)
+    {
+        char l[24];
+        (void)snprintf(l, sizeof(l), "CSN:%02X%02X%02X%02X%02X%02X%02X%02X",
+                       s_dump.csn[0], s_dump.csn[1], s_dump.csn[2],
+                       s_dump.csn[3], s_dump.csn[4], s_dump.csn[5],
+                       s_dump.csn[6], s_dump.csn[7]);
+        poom_arduboy_set_cursor(0, 16);
+        (void)poom_arduboy_print(l);
+
+        // Credential summary: SIO-only card, an unusable PACS, or "(bits) hex".
+        // block 6 == 0x30 means a pure SIO (SE/SEOS); block 10 == 0x30 next to a
+        // legacy PACS means an SR card, shown as "+SIO".
+        bool sio =
+            (s_dump.app_block_count >= 1) && (s_dump.blocks[0][0] == PP_SIO_MARKER);
+        bool sr = (s_dump.app_block_count >= 5) &&
+                  (s_dump.blocks[4][0] == PP_SIO_MARKER);
+        if(sio)
+        {
+            (void)snprintf(l, sizeof(l), "SIO");
+        }
+        else if(!s_dump.pacs_present || s_dump.bit_length == 0 ||
+                s_dump.bit_length == 255)
+        {
+            (void)snprintf(l, sizeof(l), "Invalid PACS");
+        }
+        else
+        {
+            int nb = (s_dump.bit_length + 7) / 8;
+            if(nb < 1)
+                nb = 1;
+            if(nb > 8)
+                nb = 8;
+            char* q = l;
+            q += snprintf(q, sizeof(l), "(%u) ", (unsigned)s_dump.bit_length);
+            for(int i = 8 - nb; i < 8; i++)
+            {
+                q += snprintf(q, sizeof(l) - (size_t)(q - l), "%02X",
+                              s_dump.credential[i]);
+            }
+            if(sr)
+                (void)snprintf(q, sizeof(l) - (size_t)(q - l), " +SIO");
+        }
+        poom_arduboy_set_cursor(0, 27);
+        (void)poom_arduboy_print(l);
+
+        // Security fuse, then which key authenticated.
+        bool unsecure =
+            (s_dump.config[7] & PP_FUSE_CRYPT10) == PP_FUSE_CRYPT0;
+        poom_arduboy_set_cursor(0, 38);
+        (void)poom_arduboy_print(unsecure ? F("Unsecure card") : F("Secure"));
+        poom_arduboy_set_cursor(0, 46);
+        (void)poom_arduboy_print(s_dump.authenticated ? F("Key: Standard")
+                                                       : F("Key: Not Standard"));
+
+        poom_arduboy_set_cursor(0, 56);
+        (void)poom_arduboy_print(F("B:BACK"));
+        poom_arduboy_set_cursor(72, 56);
+        (void)poom_arduboy_print(F("v:RAW"));
+    }
+    else if(s_state == PP_RAW)
+    {
+        int total = pp_raw_row_count();
+        int pages = (total + PP_RAW_ROWS_PER_PAGE - 1) / PP_RAW_ROWS_PER_PAGE;
+        if(pages < 1)
+            pages = 1;
+        if(s_raw_page >= pages)
+            s_raw_page = pages - 1;
+        int start = s_raw_page * PP_RAW_ROWS_PER_PAGE;
+        for(int i = 0; i < PP_RAW_ROWS_PER_PAGE && (start + i) < total; i++)
+        {
+            char lbl[6];
+            const uint8_t* d = pp_raw_row(start + i, lbl, sizeof(lbl));
+            char line[24];
+            (void)snprintf(line, sizeof(line),
+                           "%s:%02X%02X%02X%02X%02X%02X%02X%02X", lbl, d[0],
+                           d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+            poom_arduboy_set_cursor(0, (int16_t)(14 + i * 8));
+            (void)poom_arduboy_print(line);
+        }
+        char foot[24];
+        (void)snprintf(foot, sizeof(foot), "%d/%d", s_raw_page + 1, pages);
+        poom_arduboy_set_cursor(0, 56);
+        (void)poom_arduboy_print(F("B:BACK"));
+        poom_arduboy_set_cursor(56, 56);
+        (void)poom_arduboy_print(foot);
+        poom_arduboy_set_cursor(100, 56);
+        (void)poom_arduboy_print(F("^v"));
     }
     poom_arduboy_display();
 }
@@ -291,6 +428,43 @@ static void menu_picopass_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx)
         {
             s_cancel_read = false;
             s_state       = PP_READING;
+        }
+        else if(ev.button == BTN_DOWN &&
+                (s_status == PoomPicopassOk || s_status == PoomPicopassErrAuth))
+        {
+            s_state = PP_INFO;
+        }
+    }
+    else if(s_state == PP_INFO)
+    {
+        if(ev.button == BTN_B)
+            s_state = PP_RESULT;
+        else if(ev.button == BTN_DOWN)
+        {
+            s_raw_page = 0;
+            s_state    = PP_RAW;
+        }
+    }
+    else if(s_state == PP_RAW)
+    {
+        if(ev.button == BTN_B)
+        {
+            s_state = PP_INFO;
+        }
+        else if(ev.button == BTN_UP)
+        {
+            if(s_raw_page > 0)
+                s_raw_page--;
+        }
+        else if(ev.button == BTN_DOWN)
+        {
+            int total = pp_raw_row_count();
+            int pages =
+                (total + PP_RAW_ROWS_PER_PAGE - 1) / PP_RAW_ROWS_PER_PAGE;
+            if(pages < 1)
+                pages = 1;
+            if(s_raw_page + 1 < pages)
+                s_raw_page++;
         }
     }
 }
