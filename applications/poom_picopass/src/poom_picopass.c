@@ -183,6 +183,11 @@ PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
     }
     out->authenticated = true;
 
+    // Capture the key blocks (Kd/Kc) now that we're authenticated, so a saved
+    // dump is complete. Cards mask these, but we store whatever they return.
+    out->kd_valid = read_block(POOM_PICOPASS_KD_BLOCK, out->kd) == PoomPicopassOk;
+    out->kc_valid = read_block(POOM_PICOPASS_KC_BLOCK, out->kc) == PoomPicopassOk;
+
     // Read AA1 application blocks from block 6 up to (but not including)
     // app_limit.
     uint8_t last  = out->app_limit;

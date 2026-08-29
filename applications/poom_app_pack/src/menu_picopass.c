@@ -66,8 +66,10 @@ typedef enum
     PP_MENU,
     PP_READING,
     PP_RESULT,
-    PP_INFO,  // decoded card metadata (security, key, SIO)
-    PP_RAW    // paged raw block hex
+    PP_INFO,    // decoded card metadata (security, key, SIO)
+    PP_RAW,     // paged raw block hex
+    PP_SAVING,  // writing the dump to SD
+    PP_SAVED    // save outcome
 } pp_state_t;
 
 // Submenu options. Add real entries (Emulate, Write, ...) here as they land.
@@ -88,6 +90,10 @@ static char s_sbus_user[]          = "menu_picopass";
 static pp_state_t s_state          = PP_MENU;
 static pp_opt_t s_opt              = PP_OPT_READ;
 static int s_raw_page              = 0;  // current page in the PP_RAW hex view
+static esp_err_t s_save_status     = ESP_OK;
+static char s_save_path[64]        = {0};
+static bool s_sd_ok                = false;  // SD usable (probed on Info entry)
+static bool s_sd_probe_pending     = false;
 static PoomPicopassStatus s_status = PoomPicopassOk;
 static PoomPicopassDump s_dump;
 
@@ -118,6 +124,19 @@ static const char* status_short(PoomPicopassStatus s)
 static bool status_is_no_card(PoomPicopassStatus s)
 {
     return (s == PoomPicopassErrNoCard) || (s == PoomPicopassErrIdentify);
+}
+
+static const char* save_error_text(esp_err_t e)
+{
+    switch(e)
+    {
+        case ESP_ERR_NOT_SUPPORTED:
+            return "Format needed";
+        case ESP_ERR_NOT_FOUND:
+            return "No SD card";
+        default:
+            return "Save failed";
+    }
 }
 
 static void pp_draw_header_(void)
@@ -312,7 +331,13 @@ static void pp_draw_(void)
 
         poom_arduboy_set_cursor(0, 56);
         (void)poom_arduboy_print(F("B:BACK"));
-        poom_arduboy_set_cursor(72, 56);
+        // Only offer Save when an SD card is usable.
+        if(s_sd_ok)
+        {
+            poom_arduboy_set_cursor(44, 56);
+            (void)poom_arduboy_print(F("^:SAVE"));
+        }
+        poom_arduboy_set_cursor(92, 56);
         (void)poom_arduboy_print(F("v:RAW"));
     }
     else if(s_state == PP_RAW)
@@ -343,6 +368,31 @@ static void pp_draw_(void)
         (void)poom_arduboy_print(foot);
         poom_arduboy_set_cursor(100, 56);
         (void)poom_arduboy_print(F("^v"));
+    }
+    else if(s_state == PP_SAVING)
+    {
+        poom_arduboy_set_cursor(0, 28);
+        (void)poom_arduboy_print(F("Saving..."));
+    }
+    else if(s_state == PP_SAVED)
+    {
+        if(s_save_status == ESP_OK)
+        {
+            poom_arduboy_set_cursor(0, 20);
+            (void)poom_arduboy_print(F("Saved"));
+            // Show the file name (drop the "/picopass/" directory prefix).
+            const char* name = strrchr(s_save_path, '/');
+            name             = (name != NULL) ? name + 1 : s_save_path;
+            poom_arduboy_set_cursor(0, 32);
+            (void)poom_arduboy_print(name);
+        }
+        else
+        {
+            poom_arduboy_set_cursor(0, 28);
+            (void)poom_arduboy_print(save_error_text(s_save_status));
+        }
+        poom_arduboy_set_cursor(0, 56);
+        (void)poom_arduboy_print(F("B:BACK"));
     }
     poom_arduboy_display();
 }
@@ -432,18 +482,26 @@ static void menu_picopass_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx)
         else if(ev.button == BTN_DOWN &&
                 (s_status == PoomPicopassOk || s_status == PoomPicopassErrAuth))
         {
-            s_state = PP_INFO;
+            s_sd_probe_pending = true;  // task checks SD before drawing Info
+            s_state            = PP_INFO;
         }
     }
     else if(s_state == PP_INFO)
     {
         if(ev.button == BTN_B)
             s_state = PP_RESULT;
+        else if(ev.button == BTN_UP && s_sd_ok)
+            s_state = PP_SAVING;  // task performs the write
         else if(ev.button == BTN_DOWN)
         {
             s_raw_page = 0;
             s_state    = PP_RAW;
         }
+    }
+    else if(s_state == PP_SAVED)
+    {
+        if(ev.button == BTN_B)
+            s_state = PP_INFO;
     }
     else if(s_state == PP_RAW)
     {
@@ -507,6 +565,23 @@ static void menu_picopass_task_(void* arg)
                 s_state = PP_RESULT;  // hard error (init/select/etc): report it
             }
             continue;
+        }
+
+        if(s_state == PP_SAVING)
+        {
+            pp_draw_();  // show "Saving..." before the (brief) blocking write
+            s_save_status =
+                poom_picopass_save(&s_dump, s_save_path, sizeof(s_save_path));
+            s_state = PP_SAVED;
+            continue;
+        }
+
+        // Probe the SD once on entering Info (off the read path) so the Save
+        // hint only shows when a card is usable.
+        if(s_sd_probe_pending)
+        {
+            s_sd_ok            = poom_picopass_sd_ready();
+            s_sd_probe_pending = false;
         }
 
         pp_draw_();
