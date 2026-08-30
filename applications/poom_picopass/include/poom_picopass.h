@@ -4,7 +4,10 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +46,13 @@ typedef struct
     uint8_t aia[POOM_PICOPASS_BLOCK_LEN];  // block 5 (application issuer area)
     uint8_t div_key[POOM_PICOPASS_BLOCK_LEN];  // diversified key used for auth
 
+    // Key blocks 3 (Kd) and 4 (Kc), as read back post-auth. Cards mask these,
+    // but they are captured for a faithful dump.
+    uint8_t kd[POOM_PICOPASS_BLOCK_LEN];
+    uint8_t kc[POOM_PICOPASS_BLOCK_LEN];
+    bool kd_valid;
+    bool kc_valid;
+
     bool authenticated;
     uint8_t app_block_count;  // number of valid entries in blocks[]
     uint8_t blocks[POOM_PICOPASS_MAX_APP_BLOCKS]
@@ -77,6 +87,17 @@ PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
 
 // Format `dump` as human-readable hex lines into `buf` (returns bytes written).
 int poom_picopass_format(const PoomPicopassDump* dump, char* buf, int buf_len);
+
+// Save `dump` as a Flipper-compatible .picopass file on the SD card under
+// /picopass, auto-named from the CSN. Writes the relative path into
+// `out_rel_path` (if non-NULL). Returns ESP_OK or an ESP error code.
+esp_err_t poom_picopass_save(const PoomPicopassDump* dump,
+                             char* out_rel_path,
+                             size_t out_rel_path_len);
+
+// True if an SD card is mounted (mounting it if needed). Lets the UI hide the
+// save option when there's no usable card. Mounts the card as a side effect.
+bool poom_picopass_sd_ready(void);
 
 // Well-known standard iCLASS debit key.
 extern const uint8_t poom_picopass_standard_key[POOM_PICOPASS_BLOCK_LEN];
