@@ -5,6 +5,7 @@
 #include "menu_picopass.h"
 #include "poom_nfc_controller.h"  // release the NFC core on exit
 #include "poom_picopass.h"
+#include "poom_ui_keyboard.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,7 +20,8 @@
 #include "poom_sbus.h"
 
 #define POOM_MENU_RESUME_TOPIC   "poom/menu/resume"
-#define MENU_PICOPASS_REFRESH_MS (150U)
+#define MENU_PICOPASS_REFRESH_MS    (150U)
+#define MENU_PICOPASS_KB_REFRESH_MS (30U)  // faster redraw while typing a name
 #define MENU_PICOPASS_POLL_MS    (120U)  // gap between read attempts while polling
 #define MENU_PICOPASS_STACK      (8192U)  // read flow + loclass/DES need the stack
 #define MENU_PICOPASS_PRIO       (4U)
@@ -67,9 +69,10 @@ typedef enum
     PP_READING,
     PP_RESULT,
     PP_INFO,    // decoded card metadata (security, key, SIO)
-    PP_RAW,     // paged raw block hex
-    PP_SAVING,  // writing the dump to SD
-    PP_SAVED    // save outcome
+    PP_RAW,      // paged raw block hex
+    PP_KEYBOARD, // entering the save file name
+    PP_SAVING,   // writing the dump to SD
+    PP_SAVED     // save outcome
 } pp_state_t;
 
 // Submenu options. Add real entries (Emulate, Write, ...) here as they land.
@@ -94,6 +97,8 @@ static esp_err_t s_save_status     = ESP_OK;
 static char s_save_path[64]        = {0};
 static bool s_sd_ok                = false;  // SD usable (probed on Info entry)
 static bool s_sd_probe_pending     = false;
+static poom_ui_keyboard_t s_kb;
+static char s_name[POOM_PICOPASS_NAME_MAX + 1];  // save file name being edited
 static PoomPicopassStatus s_status = PoomPicopassOk;
 static PoomPicopassDump s_dump;
 
@@ -182,6 +187,16 @@ static const uint8_t* pp_raw_row(int row, char* label, size_t label_sz)
 
 static void pp_draw_(void)
 {
+    if(s_state == PP_KEYBOARD)
+    {
+        // s_kb is edited on the button-callback thread and read here on the
+        // task thread (like s_state elsewhere in this file); a stale read is at
+        // worst a one-frame glitch. The keyboard draws its own full-screen
+        // modal (clears + displays).
+        poom_ui_keyboard_draw(&s_kb);
+        return;
+    }
+
     poom_arduboy_clear();
     pp_draw_header_();
 
@@ -491,12 +506,27 @@ static void menu_picopass_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx)
         if(ev.button == BTN_B)
             s_state = PP_RESULT;
         else if(ev.button == BTN_UP && s_sd_ok)
-            s_state = PP_SAVING;  // task performs the write
+        {
+            // Start with a blank name; an empty entry falls back to the CSN.
+            s_name[0] = '\0';
+            poom_ui_keyboard_init(&s_kb, s_name, sizeof(s_name), "NAME");
+            s_state = PP_KEYBOARD;
+        }
         else if(ev.button == BTN_DOWN)
         {
             s_raw_page = 0;
             s_state    = PP_RAW;
         }
+    }
+    else if(s_state == PP_KEYBOARD)
+    {
+        // B cancels back to Info; every other button drives the keyboard, and
+        // OK returns ACCEPT to start the save with the entered name.
+        if(ev.button == BTN_B)
+            s_state = PP_INFO;
+        else if(poom_ui_keyboard_handle_button(&s_kb, ev.button) ==
+                POOM_UI_KEYBOARD_ACTION_ACCEPT)
+            s_state = PP_SAVING;
     }
     else if(s_state == PP_SAVED)
     {
@@ -570,8 +600,8 @@ static void menu_picopass_task_(void* arg)
         if(s_state == PP_SAVING)
         {
             pp_draw_();  // show "Saving..." before the (brief) blocking write
-            s_save_status =
-                poom_picopass_save(&s_dump, s_save_path, sizeof(s_save_path));
+            s_save_status = poom_picopass_save(&s_dump, s_name, s_save_path,
+                                               sizeof(s_save_path));
             s_state = PP_SAVED;
             continue;
         }
@@ -585,7 +615,10 @@ static void menu_picopass_task_(void* arg)
         }
 
         pp_draw_();
-        vTaskDelay(pdMS_TO_TICKS(MENU_PICOPASS_REFRESH_MS));
+        // Redraw faster while typing so the keyboard feels responsive.
+        vTaskDelay(pdMS_TO_TICKS(s_state == PP_KEYBOARD
+                                     ? MENU_PICOPASS_KB_REFRESH_MS
+                                     : MENU_PICOPASS_REFRESH_MS));
     }
     s_task = NULL;
     vTaskDelete(NULL);
