@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /**
- * @brief Opens SD browser menu.
+ * @brief Opens the SD tools menu.
  * @return void
  */
 void app_sd_browser_menu(void);

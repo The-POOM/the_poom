@@ -9,6 +9,7 @@
 #include "poom_sbus.h"
 #include "button_driver.h"
 #include "nvs_flash.h"
+#include "poom_boot_policy.h"
 #include "poom_menu.h"
 #if CONFIG_ZB_ENABLED
 #include "zb_cli.h"
@@ -34,6 +35,8 @@ extern "C" void app_main(void)
     uint8_t* found_addresses = NULL;
     size_t num_addresses = 0;
 	const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
+    (void)poom_boot_policy_init();
+    (void)poom_boot_policy_apply_startup_policy();
     i2c_init();
     i2c_unlock(); 
     poom_sbus_init(); 

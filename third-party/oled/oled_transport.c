@@ -131,7 +131,9 @@ void oled_transport_init(oled_driver_t *dev, int width, int height)
         return;
     }
 
+    i2c_lock();
     err = i2c_tx_dev((uint8_t)dev->_address, init_seq, (uint16_t)sizeof(init_seq), true, true);
+    i2c_unlock();
     if (err != I2C_STATUS_OK)
     {
         OLED_PRINTF_E("OLED init transmit failed (%d)", err);
@@ -163,8 +165,6 @@ void oled_transport_display_image(oled_driver_t *dev,
     mapped_page = oled_transport_get_page_index_(dev, page);
     oled_transport_build_page_setup_cmd_(mapped_page, seg, page_setup_cmd, sizeof(page_setup_cmd));
 
-    (void)i2c_tx_dev((uint8_t)dev->_address, page_setup_cmd, (uint16_t)sizeof(page_setup_cmd), true, true);
-
     tx_buf = (uint8_t *)malloc((size_t)width + 1U);
     if (tx_buf == NULL)
     {
@@ -174,6 +174,10 @@ void oled_transport_display_image(oled_driver_t *dev,
 
     tx_buf[0] = OLED_CONTROL_BYTE_DATA_STREAM;
     (void)memcpy(&tx_buf[1], images, (size_t)width);
+
+    i2c_lock();
+    (void)i2c_tx_dev((uint8_t)dev->_address, page_setup_cmd, (uint16_t)sizeof(page_setup_cmd), true, true);
     (void)i2c_tx_dev((uint8_t)dev->_address, tx_buf, (uint16_t)((size_t)width + 1U), true, true);
+    i2c_unlock();
     free(tx_buf);
 }

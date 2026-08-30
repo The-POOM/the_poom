@@ -28,6 +28,18 @@
 #define LIST_Y0 (14)
 #define ROW_STEP (10)
 #define ROW_HILITE_H (9)
+#define MENU_DEAUTH_LIST_TEXT_X (2)
+#define MENU_DEAUTH_LIST_ARROW_X (120)
+#define MENU_DEAUTH_ATTACK_SSID_X (0)
+#define MENU_DEAUTH_RUNNING_X (97)
+#define MENU_DEAUTH_LIST_TEXT_CHARS \
+    (((MENU_DEAUTH_LIST_ARROW_X) - (MENU_DEAUTH_LIST_TEXT_X)) / 6U)
+#define MENU_DEAUTH_LIST_TEXT_BUF_LEN (MENU_DEAUTH_LIST_TEXT_CHARS + 1U)
+#define MENU_DEAUTH_ATTACK_SSID_CHARS \
+    (((MENU_DEAUTH_RUNNING_X) - (MENU_DEAUTH_ATTACK_SSID_X)) / 6U)
+#define MENU_DEAUTH_ATTACK_SSID_BUF_LEN (MENU_DEAUTH_ATTACK_SSID_CHARS + 1U)
+#define MENU_DEAUTH_SCROLL_STEP_MS (350U)
+#define MENU_DEAUTH_SCROLL_GAP_CHARS (3U)
 
 #define MENU_DEAUTH_REFRESH_MS (100U)
 #define MENU_DEAUTH_SCAN_SETTLE_MS (2000U)
@@ -67,10 +79,137 @@ static bool s_scan_requested = false;
 static bool s_ui_dirty = true;
 static bool s_buttons_subscribed = false;
 static TaskHandle_t s_ui_task = NULL;
+static uint32_t s_text_scroll_origin_ms = 0U;
+static uint32_t s_text_scroll_last_slot = 0U;
 
 static void menu_deauth_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_deauth_ui_task_(void *arg);
 static void menu_deauth_exit_(void);
+
+/**
+ * @brief Gets the current tick count in milliseconds.
+ *
+ * @return uint32_t
+ */
+static uint32_t menu_deauth_now_ms_(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+/**
+ * @brief Restarts the text marquee from its first position.
+ *
+ * @return void
+ */
+static void menu_deauth_reset_text_scroll_(void)
+{
+    s_text_scroll_origin_ms = menu_deauth_now_ms_();
+    s_text_scroll_last_slot = 0U;
+}
+
+/**
+ * @brief Checks whether two AP records advertise the same named network.
+ *
+ * Hidden networks are treated as distinct entries.
+ *
+ * @param[in] lhs Parameter passed to the helper.
+ * @param[in] rhs Parameter passed to the helper.
+ * @return bool
+ */
+static bool menu_deauth_same_network_(const wifi_ap_record_t *lhs,
+                                      const wifi_ap_record_t *rhs)
+{
+    if ((lhs == NULL) || (rhs == NULL))
+    {
+        return false;
+    }
+
+    if ((lhs->ssid[0] == 0U) || (rhs->ssid[0] == 0U))
+    {
+        return false;
+    }
+
+    return strncmp((const char *)lhs->ssid,
+                   (const char *)rhs->ssid,
+                   sizeof(lhs->ssid)) == 0;
+}
+
+/**
+ * @brief Formats one visible text row, optionally with horizontal scrolling.
+ *
+ * @param[out] dst Parameter passed to the helper.
+ * @param[in] dst_len Parameter passed to the helper.
+ * @param[in] src Parameter passed to the helper.
+ * @param[in] visible_chars Parameter passed to the helper.
+ * @param[in] animate Parameter passed to the helper.
+ * @return void
+ */
+static void menu_deauth_format_scrolling_text_(char *dst,
+                                               size_t dst_len,
+                                               const char *src,
+                                               size_t visible_chars,
+                                               bool animate)
+{
+    size_t src_len;
+
+    if ((dst == NULL) || (dst_len == 0U))
+    {
+        return;
+    }
+
+    dst[0] = '\0';
+    if (src == NULL)
+    {
+        return;
+    }
+
+    src_len = strlen(src);
+    if ((!animate) || (src_len <= visible_chars))
+    {
+        (void)snprintf(dst, dst_len, "%.*s", (int)visible_chars, src);
+        return;
+    }
+
+    size_t cycle_len = src_len + MENU_DEAUTH_SCROLL_GAP_CHARS;
+    size_t scroll_slot = (size_t)(((menu_deauth_now_ms_() - s_text_scroll_origin_ms) /
+                                   MENU_DEAUTH_SCROLL_STEP_MS) % cycle_len);
+
+    for (size_t out_index = 0U; (out_index < visible_chars) && (out_index + 1U < dst_len); out_index++)
+    {
+        size_t src_index = (scroll_slot + out_index) % cycle_len;
+        dst[out_index] = (src_index < src_len) ? src[src_index] : ' ';
+        dst[out_index + 1U] = '\0';
+    }
+}
+
+/**
+ * @brief Checks whether the current view needs marquee refreshes.
+ *
+ * @return bool
+ */
+static bool menu_deauth_scroll_active_(void)
+{
+    if ((s_view == MENU_DEAUTH_VIEW_WIFI_LIST) &&
+        (s_selected_index >= 0) &&
+        (s_selected_index < s_wifi_count))
+    {
+        return strlen(s_ssid_buf[s_selected_index]) > MENU_DEAUTH_LIST_TEXT_CHARS;
+    }
+
+    if ((s_view == MENU_DEAUTH_VIEW_ATTACK_LIST) || (s_view == MENU_DEAUTH_VIEW_ATTACK_RUNNING))
+    {
+        if (s_wifi_selected_ap >= 0)
+        {
+            wifi_ap_record_t *ap = poom_wifi_scanner_get_ap_record((unsigned)s_wifi_selected_ap);
+            if ((ap != NULL) && ap->ssid[0] != 0U)
+            {
+                return strlen((const char *)ap->ssid) > MENU_DEAUTH_ATTACK_SSID_CHARS;
+            }
+        }
+    }
+
+    return false;
+}
 
 /**
  * @brief Draws the menu header.
@@ -200,36 +339,20 @@ static void menu_deauth_render_wifi_list_(void)
 
         const int16_t y = (int16_t)(LIST_Y0 + row * ROW_STEP);
 
-        char ssid_line[16];
-        (void)snprintf(ssid_line, sizeof(ssid_line), "%.14s", s_ssid_buf[idx]);
+        char ssid_line[MENU_DEAUTH_LIST_TEXT_BUF_LEN];
+        menu_deauth_format_scrolling_text_(ssid_line,
+                                           sizeof(ssid_line),
+                                           s_ssid_buf[idx],
+                                           MENU_DEAUTH_LIST_TEXT_CHARS,
+                                           idx == s_selected_index);
 
-        poom_arduboy_set_cursor(2, y);
+        poom_arduboy_set_cursor(MENU_DEAUTH_LIST_TEXT_X, y);
         (void)poom_arduboy_print(ssid_line);
-
-        char rssi_small[10];
-        (void)snprintf(rssi_small, sizeof(rssi_small), "%dd", (int)s_rssi_buf[idx]);
-        poom_arduboy_set_cursor(86, y);
-        (void)poom_arduboy_print(rssi_small);
-
-        char ch_small[6];
-        (void)snprintf(ch_small, sizeof(ch_small), "C%u", (unsigned)s_ch_buf[idx]);
-        poom_arduboy_set_cursor(110, y);
-        (void)poom_arduboy_print(ch_small);
 
         if (idx == s_selected_index)
         {
             poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, ROW_HILITE_H, INVERT);
         }
-    }
-
-    if (s_scroll > 0)
-    {
-        poom_arduboy_fill_triangle(124, (int16_t)(LIST_Y0 - 3), 120, (int16_t)(LIST_Y0 + 1), 127, (int16_t)(LIST_Y0 + 1), WHITE);
-    }
-    if (s_scroll < max_scroll)
-    {
-        const int16_t y = (int16_t)(LIST_Y0 + (VISIBLE_ROWS - 1) * ROW_STEP + 6);
-        poom_arduboy_fill_triangle(120, y, 127, y, 124, (int16_t)(y + 4), WHITE);
     }
 
     poom_arduboy_display();
@@ -258,9 +381,13 @@ static void menu_deauth_render_attack_list_(bool running)
 
     menu_deauth_draw_header_(F("ATTACK"));
 
-    char ssid_line[15];
-    (void)snprintf(ssid_line, sizeof(ssid_line), "%.14s", ssid);
-    poom_arduboy_set_cursor(0, 14);
+    char ssid_line[MENU_DEAUTH_ATTACK_SSID_BUF_LEN];
+    menu_deauth_format_scrolling_text_(ssid_line,
+                                       sizeof(ssid_line),
+                                       ssid,
+                                       MENU_DEAUTH_ATTACK_SSID_CHARS,
+                                       true);
+    poom_arduboy_set_cursor(MENU_DEAUTH_ATTACK_SSID_X, 14);
     (void)poom_arduboy_print(ssid_line);
 
     if (running)
@@ -303,8 +430,27 @@ static void menu_deauth_build_wifi_list_(void)
     s_wifi_count = 0;
 
     (void)poom_wifi_scanner_clear_ap_records();
-    (void)poom_wifi_scanner_scan();
-    vTaskDelay(pdMS_TO_TICKS(MENU_DEAUTH_SCAN_SETTLE_MS));
+    esp_err_t scan_status = poom_wifi_scanner_scan();
+    if (scan_status != ESP_OK)
+    {
+        if (!s_exit_requested)
+        {
+            ESP_LOGW("menu_deauth", "Scan failed: %s", esp_err_to_name(scan_status));
+        }
+        return;
+    }
+
+    uint32_t settle_deadline_ms = menu_deauth_now_ms_() + MENU_DEAUTH_SCAN_SETTLE_MS;
+    while (!s_exit_requested &&
+           ((int32_t)(menu_deauth_now_ms_() - settle_deadline_ms) < 0))
+    {
+        vTaskDelay(pdMS_TO_TICKS(50U));
+    }
+
+    if (s_exit_requested)
+    {
+        return;
+    }
 
     poom_wifi_scanner_ap_records_t *r = poom_wifi_scanner_get_ap_records();
     if ((r == NULL) || (r->count == 0))
@@ -313,18 +459,37 @@ static void menu_deauth_build_wifi_list_(void)
         return;
     }
 
-    const int count = (r->count > MAX_WIFI_ITEMS) ? MAX_WIFI_ITEMS : (int)r->count;
-    for (int i = 0; i < count; i++)
+    const int raw_count = (r->count > MAX_WIFI_ITEMS) ? MAX_WIFI_ITEMS : (int)r->count;
+    int item_count = 0;
+
+    for (int i = 0; (i < raw_count) && (item_count < MAX_WIFI_ITEMS); i++)
     {
         wifi_ap_record_t *ap = &r->records[i];
+        bool duplicate = false;
 
-        (void)snprintf(s_ssid_buf[i], sizeof(s_ssid_buf[i]), "%.32s", (const char *)ap->ssid);
-        s_rssi_buf[i] = (int8_t)ap->rssi;
-        s_ch_buf[i] = (uint8_t)ap->primary;
-        s_wifi_ap_map[i] = i;
+        for (int listed_index = 0; listed_index < item_count; listed_index++)
+        {
+            wifi_ap_record_t *listed = &r->records[s_wifi_ap_map[listed_index]];
+            if (menu_deauth_same_network_(ap, listed))
+            {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if (duplicate)
+        {
+            continue;
+        }
+
+        (void)snprintf(s_ssid_buf[item_count], sizeof(s_ssid_buf[item_count]), "%.32s", (const char *)ap->ssid);
+        s_rssi_buf[item_count] = (int8_t)ap->rssi;
+        s_ch_buf[item_count] = (uint8_t)ap->primary;
+        s_wifi_ap_map[item_count] = i;
+        item_count++;
     }
 
-    s_wifi_count = count;
+    s_wifi_count = item_count;
 }
 
 /**
@@ -353,6 +518,7 @@ static void menu_deauth_start_attack_(int attack_type)
     poom_wifi_attacks_handle((poom_wifi_attacks_type_t)attack_type, target);
 
     s_view = MENU_DEAUTH_VIEW_ATTACK_RUNNING;
+    menu_deauth_reset_text_scroll_();
     s_ui_dirty = true;
 }
 
@@ -425,11 +591,23 @@ static void menu_deauth_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         {
             poom_wifi_attacks_stop_all();
             s_view = (s_wifi_count > 0) ? MENU_DEAUTH_VIEW_WIFI_LIST : MENU_DEAUTH_VIEW_IDLE;
+            menu_deauth_reset_text_scroll_();
             s_ui_dirty = true;
             return;
         }
 
         s_exit_requested = true;
+        if (s_view == MENU_DEAUTH_VIEW_SCANNING)
+        {
+            esp_err_t stop_status = esp_wifi_scan_stop();
+            if ((stop_status != ESP_OK) &&
+                (stop_status != ESP_ERR_WIFI_NOT_INIT) &&
+                (stop_status != ESP_ERR_WIFI_NOT_STARTED) &&
+                (stop_status != ESP_ERR_WIFI_STATE))
+            {
+                ESP_LOGW("menu_deauth", "Scan stop failed: %s", esp_err_to_name(stop_status));
+            }
+        }
         return;
     }
 
@@ -461,11 +639,13 @@ static void menu_deauth_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         if ((ev.button == BUTTON_UP) && (s_selected_index > 0))
         {
             s_selected_index--;
+            menu_deauth_reset_text_scroll_();
             s_ui_dirty = true;
         }
         else if ((ev.button == BUTTON_DOWN) && (s_selected_index < (s_wifi_count - 1)))
         {
             s_selected_index++;
+            menu_deauth_reset_text_scroll_();
             s_ui_dirty = true;
         }
         else if (ev.button == BUTTON_A)
@@ -473,6 +653,7 @@ static void menu_deauth_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
             s_wifi_selected_ap = s_wifi_ap_map[s_selected_index];
             s_attack_selected = 0;
             s_view = MENU_DEAUTH_VIEW_ATTACK_LIST;
+            menu_deauth_reset_text_scroll_();
             s_ui_dirty = true;
         }
 
@@ -497,6 +678,7 @@ static void menu_deauth_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
             {
                 poom_wifi_attacks_stop_all();
                 s_view = MENU_DEAUTH_VIEW_ATTACK_LIST;
+                menu_deauth_reset_text_scroll_();
                 s_ui_dirty = true;
             }
             else
@@ -535,10 +717,16 @@ static void menu_deauth_ui_task_(void *arg)
 
             menu_deauth_build_wifi_list_();
 
+            if (s_exit_requested)
+            {
+                continue;
+            }
+
             s_selected_index = 0;
             s_scroll = 0;
             s_wifi_selected_ap = -1;
             s_attack_selected = 0;
+            menu_deauth_reset_text_scroll_();
 
             if (s_wifi_count > 0)
             {
@@ -550,6 +738,17 @@ static void menu_deauth_ui_task_(void *arg)
             }
 
             s_ui_dirty = true;
+        }
+
+        if ((!s_ui_dirty) && menu_deauth_scroll_active_())
+        {
+            uint32_t scroll_slot =
+                (menu_deauth_now_ms_() - s_text_scroll_origin_ms) / MENU_DEAUTH_SCROLL_STEP_MS;
+            if (scroll_slot != s_text_scroll_last_slot)
+            {
+                s_text_scroll_last_slot = scroll_slot;
+                s_ui_dirty = true;
+            }
         }
 
         if (s_ui_dirty)
@@ -614,6 +813,7 @@ void app_deauth(void)
     s_exit_requested = false;
     s_scan_requested = false;
     s_ui_dirty = true;
+    menu_deauth_reset_text_scroll_();
 
     if (!s_buttons_subscribed)
     {

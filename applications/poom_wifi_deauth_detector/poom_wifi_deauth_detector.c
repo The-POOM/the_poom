@@ -3,6 +3,7 @@
 
 #include "poom_wifi_deauth_detector.h"
 
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,18 +16,13 @@
 
 #define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MIN            (1U)
 #define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MAX            (POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT)
-#define POOM_WIFI_DEAUTH_DETECTOR_HOP_INTERVAL_MS        (1000U)
+#define POOM_WIFI_DEAUTH_DETECTOR_HOP_INTERVAL_MS        (250U)
+#define POOM_WIFI_DEAUTH_DETECTOR_ATTACK_DWELL_MS        (1000U)
 #define POOM_WIFI_DEAUTH_DETECTOR_HOP_TASK_STACK         (2048U)
 #define POOM_WIFI_DEAUTH_DETECTOR_HOP_TASK_PRIO          (4U)
-#define POOM_WIFI_DEAUTH_DETECTOR_PPS_WINDOW_MS          (1000U)
 #define POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT          (8U)
 #define POOM_WIFI_DEAUTH_DETECTOR_TRACKER_VICTIM_SLOTS   (4U)
 #define POOM_WIFI_DEAUTH_DETECTOR_TRACKER_REASON_SLOTS   (3U)
-
-#define POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS             (10U)
-#define POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS            (25U)
-#define POOM_WIFI_DEAUTH_DETECTOR_TH_MED_BCAST_PPS       (5U)
-#define POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_BCAST_PPS      (12U)
 
 static const char *POOM_WIFI_DEAUTH_DETECTOR_TAG __attribute__((unused)) = "poom_wifi_deauth_detector";
 
@@ -77,7 +73,7 @@ typedef struct
 static volatile bool s_poom_wifi_deauth_detector_running = false;
 static TaskHandle_t s_poom_wifi_deauth_detector_hop_task = NULL;
 static poom_wifi_deauth_detector_stats_t s_poom_wifi_deauth_detector_stats;
-static poom_wifi_deauth_detector_tracker_t s_poom_wifi_deauth_detector_trackers[POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT];
+static poom_wifi_deauth_detector_tracker_t *s_poom_wifi_deauth_detector_trackers = NULL;
 static uint32_t s_poom_wifi_deauth_detector_bad_len = 0;
 static uint32_t s_poom_wifi_deauth_detector_protected = 0;
 static uint32_t s_poom_wifi_deauth_detector_weird_ds = 0;
@@ -85,10 +81,21 @@ static TickType_t s_poom_wifi_deauth_detector_window_start = 0;
 static uint32_t s_poom_wifi_deauth_detector_window_deauth = 0;
 static uint32_t s_poom_wifi_deauth_detector_window_disassoc = 0;
 static uint32_t s_poom_wifi_deauth_detector_window_bcast_deauth = 0;
+static TickType_t s_poom_wifi_deauth_detector_last_activity_tick = 0;
+static uint8_t s_poom_wifi_deauth_detector_last_activity_channel = 0U;
 static portMUX_TYPE s_poom_wifi_deauth_detector_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t s_poom_wifi_deauth_detector_saved_channel = POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_HOP_SENTINEL;
 
 static void poom_wifi_deauth_detector_window_rollover_(TickType_t now_tick);
+static poom_wifi_deauth_detector_alert_t poom_wifi_deauth_detector_classify_alert_(uint32_t deauth_pps,
+                                                                                    uint32_t disassoc_pps,
+                                                                                    uint32_t bcast_deauth,
+                                                                                    uint32_t top_pps,
+                                                                                    uint16_t top_unique_victims,
+                                                                                    bool top_valid);
+static bool poom_wifi_deauth_detector_should_extend_dwell_(uint8_t channel, TickType_t now_tick);
+static esp_err_t poom_wifi_deauth_detector_alloc_trackers_(void);
+static void poom_wifi_deauth_detector_free_trackers_(void);
 
 /**
  * @brief Internal helper for `poom_wifi_deauth_detector_is_broadcast`.
@@ -187,6 +194,11 @@ static int poom_wifi_deauth_detector_find_or_alloc_tracker_(const uint8_t *bssid
     int lru_idx = 0;
     TickType_t oldest_tick = (TickType_t)(~(TickType_t)0);
 
+    if(s_poom_wifi_deauth_detector_trackers == NULL)
+    {
+        return -1;
+    }
+
     for(i = 0; i < POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT; i++)
     {
         poom_wifi_deauth_detector_tracker_t *t = &s_poom_wifi_deauth_detector_trackers[i];
@@ -222,6 +234,41 @@ static int poom_wifi_deauth_detector_find_or_alloc_tracker_(const uint8_t *bssid
 }
 
 /**
+ * @brief Allocates tracker storage only while the detector is active.
+ *
+ * @return esp_err_t
+ */
+static esp_err_t poom_wifi_deauth_detector_alloc_trackers_(void)
+{
+    if(s_poom_wifi_deauth_detector_trackers != NULL)
+    {
+        return ESP_OK;
+    }
+
+    s_poom_wifi_deauth_detector_trackers =
+        (poom_wifi_deauth_detector_tracker_t *)calloc(POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT,
+                                                      sizeof(*s_poom_wifi_deauth_detector_trackers));
+    if(s_poom_wifi_deauth_detector_trackers == NULL)
+    {
+        POOM_PRINTF_E("Failed to allocate tracker table");
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Frees tracker storage when detector stops.
+ *
+ * @return void
+ */
+static void poom_wifi_deauth_detector_free_trackers_(void)
+{
+    free(s_poom_wifi_deauth_detector_trackers);
+    s_poom_wifi_deauth_detector_trackers = NULL;
+}
+
+/**
  * @brief Advances detector channel in hopping mode.
  * @param[in,out] task_arg Task parameter (unused).
  * @return void
@@ -245,6 +292,17 @@ static void poom_wifi_deauth_detector_hop_task_(void *task_arg)
             break;
         }
 
+        if(poom_wifi_deauth_detector_should_extend_dwell_(current_channel, xTaskGetTickCount()))
+        {
+            (void)ulTaskNotifyTake(pdTRUE,
+                                   pdMS_TO_TICKS(POOM_WIFI_DEAUTH_DETECTOR_ATTACK_DWELL_MS -
+                                                 POOM_WIFI_DEAUTH_DETECTOR_HOP_INTERVAL_MS));
+            if(!s_poom_wifi_deauth_detector_running)
+            {
+                break;
+            }
+        }
+
         taskENTER_CRITICAL(&s_poom_wifi_deauth_detector_lock);
         s_poom_wifi_deauth_detector_stats.current_channel =
             (s_poom_wifi_deauth_detector_stats.current_channel >= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MAX)
@@ -255,6 +313,36 @@ static void poom_wifi_deauth_detector_hop_task_(void *task_arg)
 
     s_poom_wifi_deauth_detector_hop_task = NULL;
     vTaskDelete(NULL);
+}
+
+/**
+ * @brief Returns whether the hop task should stay longer on a channel.
+ *
+ * A channel is extended only when activity was seen during the current visit,
+ * which keeps normal hopping fast while giving the UI time to show the hit.
+ *
+ * @param[in] channel Current Wi-Fi channel.
+ * @param[in] now_tick Current tick count.
+ * @return bool
+ */
+static bool poom_wifi_deauth_detector_should_extend_dwell_(uint8_t channel, TickType_t now_tick)
+{
+    bool extend = false;
+
+    if((channel >= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MIN) && (channel <= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MAX))
+    {
+        const TickType_t recent_window = pdMS_TO_TICKS(POOM_WIFI_DEAUTH_DETECTOR_HOP_INTERVAL_MS + 50U);
+
+        taskENTER_CRITICAL(&s_poom_wifi_deauth_detector_lock);
+        if((s_poom_wifi_deauth_detector_last_activity_channel == channel) &&
+           ((now_tick - s_poom_wifi_deauth_detector_last_activity_tick) <= recent_window))
+        {
+            extend = true;
+        }
+        taskEXIT_CRITICAL(&s_poom_wifi_deauth_detector_lock);
+    }
+
+    return extend;
 }
 
 /**
@@ -352,6 +440,11 @@ static void poom_wifi_deauth_detector_window_rollover_(TickType_t now_tick)
     s_poom_wifi_deauth_detector_window_disassoc = 0;
     s_poom_wifi_deauth_detector_window_bcast_deauth = 0;
 
+    if(s_poom_wifi_deauth_detector_trackers == NULL)
+    {
+        return;
+    }
+
     for(i = 0; i < POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT; i++)
     {
         poom_wifi_deauth_detector_tracker_t *t = &s_poom_wifi_deauth_detector_trackers[i];
@@ -363,6 +456,52 @@ static void poom_wifi_deauth_detector_window_rollover_(TickType_t now_tick)
             (void)memset(t->reasons, 0, sizeof(t->reasons));
         }
     }
+}
+
+/**
+ * @brief Classifies detector activity into OLED-friendly alert levels.
+ *
+ * @param[in] deauth_pps Current deauth rate inside the active window.
+ * @param[in] disassoc_pps Current disassoc rate inside the active window.
+ * @param[in] bcast_deauth Current broadcast/multicast deauth rate.
+ * @param[in] top_pps Highest single-source rate in the active window.
+ * @param[in] top_unique_victims Unique victims seen for the top source.
+ * @param[in] top_valid Whether the top-source fields are valid.
+ * @return poom_wifi_deauth_detector_alert_t
+ */
+static poom_wifi_deauth_detector_alert_t poom_wifi_deauth_detector_classify_alert_(uint32_t deauth_pps,
+                                                                                    uint32_t disassoc_pps,
+                                                                                    uint32_t bcast_deauth,
+                                                                                    uint32_t top_pps,
+                                                                                    uint16_t top_unique_victims,
+                                                                                    bool top_valid)
+{
+    const bool high_volume = (deauth_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS) ||
+                             (disassoc_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS) ||
+                             (bcast_deauth >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_BCAST_PPS);
+    const bool med_volume = (deauth_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS) ||
+                            (disassoc_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS) ||
+                            (bcast_deauth >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_BCAST_PPS);
+    const bool high_actor = top_valid &&
+                            ((top_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_SRC_PPS) ||
+                             ((top_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_MULTI_VICTIM_PPS) &&
+                              (top_unique_victims >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_VICTIMS)));
+    const bool med_actor = top_valid &&
+                           ((top_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_SRC_PPS) ||
+                            ((top_pps >= 2U) &&
+                             (top_unique_victims >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_VICTIMS)));
+
+    if(high_volume || high_actor)
+    {
+        return POOM_WIFI_DEAUTH_DETECTOR_ALERT_HIGH;
+    }
+
+    if(med_volume || med_actor)
+    {
+        return POOM_WIFI_DEAUTH_DETECTOR_ALERT_MED;
+    }
+
+    return POOM_WIFI_DEAUTH_DETECTOR_ALERT_OK;
 }
 
 /**
@@ -486,6 +625,9 @@ static void poom_wifi_deauth_detector_promisc_cb_(void *buffer, wifi_promiscuous
         s_poom_wifi_deauth_detector_window_disassoc++;
     }
 
+    s_poom_wifi_deauth_detector_last_activity_channel = rx_channel;
+    s_poom_wifi_deauth_detector_last_activity_tick = now_tick;
+
     tracker_idx = poom_wifi_deauth_detector_find_or_alloc_tracker_(bssid, src, now_tick);
     if(tracker_idx >= 0)
     {
@@ -568,7 +710,12 @@ static void poom_wifi_deauth_detector_reset_stats_internal_(void)
 
     taskENTER_CRITICAL(&s_poom_wifi_deauth_detector_lock);
     (void)memset(&s_poom_wifi_deauth_detector_stats, 0, sizeof(s_poom_wifi_deauth_detector_stats));
-    (void)memset(s_poom_wifi_deauth_detector_trackers, 0, sizeof(s_poom_wifi_deauth_detector_trackers));
+    if(s_poom_wifi_deauth_detector_trackers != NULL)
+    {
+        (void)memset(s_poom_wifi_deauth_detector_trackers,
+                     0,
+                     sizeof(*s_poom_wifi_deauth_detector_trackers) * POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT);
+    }
     s_poom_wifi_deauth_detector_bad_len = 0;
     s_poom_wifi_deauth_detector_protected = 0;
     s_poom_wifi_deauth_detector_weird_ds = 0;
@@ -576,6 +723,8 @@ static void poom_wifi_deauth_detector_reset_stats_internal_(void)
     s_poom_wifi_deauth_detector_window_deauth = 0;
     s_poom_wifi_deauth_detector_window_disassoc = 0;
     s_poom_wifi_deauth_detector_window_bcast_deauth = 0;
+    s_poom_wifi_deauth_detector_last_activity_tick = 0;
+    s_poom_wifi_deauth_detector_last_activity_channel = 0U;
     s_poom_wifi_deauth_detector_stats.current_channel = start_channel;
     s_poom_wifi_deauth_detector_stats.channel_hopping = channel_hopping;
     taskEXIT_CRITICAL(&s_poom_wifi_deauth_detector_lock);
@@ -604,6 +753,12 @@ esp_err_t poom_wifi_deauth_detector_start(void)
         return status;
     }
 
+    status = poom_wifi_deauth_detector_alloc_trackers_();
+    if(status != ESP_OK)
+    {
+        return status;
+    }
+
     poom_wifi_deauth_detector_reset_stats_internal_();
 
     taskENTER_CRITICAL(&s_poom_wifi_deauth_detector_lock);
@@ -614,6 +769,7 @@ esp_err_t poom_wifi_deauth_detector_start(void)
     status = poom_wifi_ctrl_set_channel(start_channel);
     if(status != ESP_OK)
     {
+        poom_wifi_deauth_detector_free_trackers_();
         POOM_PRINTF_E("poom_wifi_ctrl_set_channel(%u) failed: %s",
                       (unsigned)start_channel,
                       esp_err_to_name(status));
@@ -623,6 +779,7 @@ esp_err_t poom_wifi_deauth_detector_start(void)
     status = poom_wifi_ctrl_set_promiscuous_rx_cb(poom_wifi_deauth_detector_promisc_cb_);
     if(status != ESP_OK)
     {
+        poom_wifi_deauth_detector_free_trackers_();
         POOM_PRINTF_E("poom_wifi_ctrl_set_promiscuous_rx_cb failed: %s", esp_err_to_name(status));
         return status;
     }
@@ -631,6 +788,7 @@ esp_err_t poom_wifi_deauth_detector_start(void)
     if(status != ESP_OK)
     {
         (void)poom_wifi_ctrl_set_promiscuous_rx_cb(NULL);
+        poom_wifi_deauth_detector_free_trackers_();
         POOM_PRINTF_E("poom_wifi_ctrl_set_promiscuous(true) failed: %s", esp_err_to_name(status));
         return status;
     }
@@ -649,6 +807,7 @@ esp_err_t poom_wifi_deauth_detector_start(void)
         (void)poom_wifi_ctrl_set_promiscuous(false);
         (void)poom_wifi_ctrl_set_promiscuous_rx_cb(NULL);
         s_poom_wifi_deauth_detector_hop_task = NULL;
+        poom_wifi_deauth_detector_free_trackers_();
         POOM_PRINTF_E("Failed to create hop task");
         return ESP_FAIL;
     }
@@ -685,6 +844,8 @@ esp_err_t poom_wifi_deauth_detector_stop(void)
     {
         POOM_PRINTF_W("poom_wifi_ctrl_set_promiscuous_rx_cb(NULL) failed: %s", esp_err_to_name(status_cb));
     }
+
+    poom_wifi_deauth_detector_free_trackers_();
 
     if((status_promisc != ESP_OK) && (status_promisc != ESP_ERR_WIFI_NOT_INIT))
     {
@@ -755,24 +916,7 @@ esp_err_t poom_wifi_deauth_detector_get_report(poom_wifi_deauth_detector_report_
     out_report->protected_frames = s_poom_wifi_deauth_detector_protected;
     out_report->weird_ds = s_poom_wifi_deauth_detector_weird_ds;
 
-    if((out_report->deauth_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS) ||
-       (out_report->disassoc_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS) ||
-       (s_poom_wifi_deauth_detector_window_bcast_deauth >= POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_BCAST_PPS))
-    {
-        out_report->alert = POOM_WIFI_DEAUTH_DETECTOR_ALERT_HIGH;
-    }
-    else if((out_report->deauth_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS) ||
-            (out_report->disassoc_pps >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS) ||
-            (s_poom_wifi_deauth_detector_window_bcast_deauth >= POOM_WIFI_DEAUTH_DETECTOR_TH_MED_BCAST_PPS))
-    {
-        out_report->alert = POOM_WIFI_DEAUTH_DETECTOR_ALERT_MED;
-    }
-    else
-    {
-        out_report->alert = POOM_WIFI_DEAUTH_DETECTOR_ALERT_OK;
-    }
-
-    for(i = 0; i < POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT; i++)
+    for(i = 0; (s_poom_wifi_deauth_detector_trackers != NULL) && (i < POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT); i++)
     {
         const poom_wifi_deauth_detector_tracker_t *t = &s_poom_wifi_deauth_detector_trackers[i];
         if(t->in_use && (t->window_count > 0U))
@@ -809,6 +953,13 @@ esp_err_t poom_wifi_deauth_detector_get_report(poom_wifi_deauth_detector_report_
         out_report->top_reason_count = top_reason_count;
         out_report->top_valid = true;
     }
+
+    out_report->alert = poom_wifi_deauth_detector_classify_alert_(out_report->deauth_pps,
+                                                                  out_report->disassoc_pps,
+                                                                  s_poom_wifi_deauth_detector_window_bcast_deauth,
+                                                                  out_report->top_pps,
+                                                                  out_report->top_unique_victims,
+                                                                  out_report->top_valid);
 
     taskEXIT_CRITICAL(&s_poom_wifi_deauth_detector_lock);
 
@@ -880,11 +1031,27 @@ esp_err_t poom_wifi_deauth_detector_reset_stats(void)
 {
     uint8_t keep_channel;
     bool keep_hopping;
+    TickType_t now_tick = xTaskGetTickCount();
 
     taskENTER_CRITICAL(&s_poom_wifi_deauth_detector_lock);
     keep_channel = s_poom_wifi_deauth_detector_stats.current_channel;
     keep_hopping = s_poom_wifi_deauth_detector_stats.channel_hopping;
     (void)memset(&s_poom_wifi_deauth_detector_stats, 0, sizeof(s_poom_wifi_deauth_detector_stats));
+    if(s_poom_wifi_deauth_detector_trackers != NULL)
+    {
+        (void)memset(s_poom_wifi_deauth_detector_trackers,
+                     0,
+                     sizeof(*s_poom_wifi_deauth_detector_trackers) * POOM_WIFI_DEAUTH_DETECTOR_TRACKER_COUNT);
+    }
+    s_poom_wifi_deauth_detector_bad_len = 0;
+    s_poom_wifi_deauth_detector_protected = 0;
+    s_poom_wifi_deauth_detector_weird_ds = 0;
+    s_poom_wifi_deauth_detector_window_start = now_tick;
+    s_poom_wifi_deauth_detector_window_deauth = 0;
+    s_poom_wifi_deauth_detector_window_disassoc = 0;
+    s_poom_wifi_deauth_detector_window_bcast_deauth = 0;
+    s_poom_wifi_deauth_detector_last_activity_tick = 0;
+    s_poom_wifi_deauth_detector_last_activity_channel = 0U;
     s_poom_wifi_deauth_detector_stats.current_channel = keep_channel;
     s_poom_wifi_deauth_detector_stats.channel_hopping = keep_hopping;
     taskEXIT_CRITICAL(&s_poom_wifi_deauth_detector_lock);

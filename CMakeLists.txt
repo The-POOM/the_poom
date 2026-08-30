@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.16)
 #
 set(POOM_FIRMWARE_VERSION "")
 set(POOM_FW_VERSION "1.0")
-set(POOM_FW_RELEASE "4")
+set(POOM_FW_RELEASE "5")
 
 if(DEFINED ENV{POOM_FIRMWARE_VERSION} AND NOT "$ENV{POOM_FIRMWARE_VERSION}" STREQUAL "")
     set(POOM_FIRMWARE_VERSION "$ENV{POOM_FIRMWARE_VERSION}")
@@ -85,6 +85,7 @@ set(MODULES
     # Local modules
     nfcal
     poom_ble_scan
+    poom_boot_policy
     poom_buz_theme
     poom_button_sound
     poom_web
@@ -149,6 +150,7 @@ set(COMPONENTS ${MODULES})
 
 set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_scan
+    ${CMAKE_SOURCE_DIR}/modules/poom_boot_policy
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_client
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_dynamic
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_server
@@ -247,4 +249,10 @@ list(APPEND EXTRA_COMPONENT_DIRS
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# The bootloader return-to-base policy is implemented through a dedicated
+# bootloader hook component. Ignore the old full-main override to avoid
+# ambiguous resolution in the bootloader sub-build.
+set(BOOTLOADER_IGNORE_EXTRA_COMPONENT "main")
+
 project(poom)

@@ -325,6 +325,27 @@ static esp_err_t poom_sd_browser_draw_status_(const char* line0, const char* lin
 }
 
 /**
+ * @brief Draws a mount-failure screen with a more specific message.
+ *
+ * @param[in] err Error returned by `sd_card_mount()`.
+ * @return esp_err_t
+ */
+static esp_err_t poom_sd_browser_draw_mount_error_(esp_err_t err)
+{
+    if(err == ESP_ERR_NOT_SUPPORTED)
+    {
+        return poom_sd_browser_draw_status_("Bad filesystem", "Use SD menu", true);
+    }
+
+    if(err == ESP_ERR_NOT_FOUND)
+    {
+        return poom_sd_browser_draw_status_("Cannot access SD", "Check card", true);
+    }
+
+    return poom_sd_browser_draw_status_("SD mount error", "Check card", true);
+}
+
+/**
  * @brief Keeps selected item visible by adjusting list offset.
  *
  * @param[in] storage Storage context.
@@ -730,7 +751,7 @@ esp_err_t poom_sd_browser_start_ex(const poom_sd_browser_config_t* config)
         if(err != ESP_OK)
         {
             POOM_SD_BROWSER_PRINTF_E("sd_card_mount failed: %s", esp_err_to_name(err));
-            (void)poom_sd_browser_draw_status_("SD mount error", "Check card", true);
+            (void)poom_sd_browser_draw_mount_error_(err);
             (void)poom_sd_browser_ensure_buttons_subscribed_();
             memset(&s_storage, 0, sizeof(s_storage));
             s_error_mode = true;

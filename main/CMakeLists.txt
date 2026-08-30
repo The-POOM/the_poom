@@ -2,6 +2,7 @@ set(COMPONENT_REQUIRES
     button_driver
     i2c
     nvs_flash
+    poom_boot_policy
     poom_menu
     poom_nfc
     poom_sbus

@@ -51,6 +51,7 @@
 #include "menu_midi_harmony.h"
 #include "menu_nfc.h"
 #include "menu_picopass.h"
+#include "menu_poom_boot_policy.h"
 #include "menu_nfc_tuning.h"
 #include "menu_plot.h"
 #include "menu_poom_pcap.h"
@@ -612,6 +613,18 @@ static void action_breakout_(void)
 }
 
 /**
+ * @brief Internal helper for `action_game_slot`.
+ *
+ * @return void
+ */
+static void action_game_slot_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_poom_boot_policy_show();
+}
+
+/**
  * @brief Internal helper for `action_tiny_control`.
  *
  * @return void
@@ -886,6 +899,7 @@ static const poom_menu_item_t s_apps_zen[] = {
 };
 
 static const poom_menu_item_t s_apps_gamer[] = {
+    {"GAME SLOT", action_game_slot_},
     //{"BREAKOUT", action_breakout_},
     {"TINY CONTROL", action_tiny_control_},
     {"WII", action_wii_},
@@ -911,7 +925,7 @@ static const poom_menu_item_t s_apps_settings[] = {
     //{"BOOT", action_reboot_},
     {"WI-FI", action_wifi_scan_},
     //{"NFC TUNE", action_nfc_tune_},
-    {"FILES", action_files_},
+    {"SD", action_files_},
 };
 
 static const poom_menu_submenu_t s_submenus[] = {

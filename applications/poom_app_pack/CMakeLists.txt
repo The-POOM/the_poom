@@ -34,6 +34,7 @@ set(POOM_APP_PACK_REQUIRES
     poom_ble_scan
     poom_ble_spam
     poom_ble_tracker
+    poom_boot_policy
     poom_buz_theme
     poom_drone
     poom_drone_emul

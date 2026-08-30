@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "Arduboy2.h"
@@ -31,6 +32,15 @@
 #define MENU_POOM_WIFI_SCAN_INFO_HOLD_CYCLES (6U)
 #define MENU_POOM_WIFI_SCAN_PASS_MAX_LEN (63U)
 #define MENU_POOM_WIFI_SCAN_VISIBLE_AP_LINES (3U)
+#define MENU_POOM_WIFI_SCAN_LIST_TEXT_X (2)
+#define MENU_POOM_WIFI_SCAN_LIST_ARROW_X (120)
+#define MENU_POOM_WIFI_SCAN_LIST_TEXT_CHARS \
+    (((MENU_POOM_WIFI_SCAN_LIST_ARROW_X) - (MENU_POOM_WIFI_SCAN_LIST_TEXT_X)) / (MENU_POOM_WIFI_SCAN_OLED_COL))
+#define MENU_POOM_WIFI_SCAN_LIST_TEXT_BUF_LEN (MENU_POOM_WIFI_SCAN_LIST_TEXT_CHARS + 1U)
+#define MENU_POOM_WIFI_SCAN_CONNECT_TEXT_CHARS \
+    ((((ARDUBOY_WIDTH) - (MENU_POOM_WIFI_SCAN_LIST_TEXT_X)) / (MENU_POOM_WIFI_SCAN_OLED_COL)) - 5U)
+#define MENU_POOM_WIFI_SCAN_SCROLL_STEP_MS (350U)
+#define MENU_POOM_WIFI_SCAN_SCROLL_GAP_CHARS (3U)
 
 #ifndef BTN_A
 #define BTN_A (0U)
@@ -95,6 +105,7 @@ static bool s_menu_poom_wifi_scan_exit_requested = false;
 static bool s_menu_poom_wifi_scan_scan_request_pending = false;
 static bool s_menu_poom_wifi_scan_connect_request_pending = false;
 static TaskHandle_t s_menu_poom_wifi_scan_status_task = NULL;
+static portMUX_TYPE s_menu_poom_wifi_scan_task_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_menu_poom_wifi_scan_sbus_user[] = "menu_poom_wifi_scan";
 static menu_poom_wifi_scan_state_t s_menu_poom_wifi_scan_state = MENU_POOM_WIFI_SCAN_STATE_SCANNING;
 static uint16_t s_menu_poom_wifi_scan_selected_ap = 0U;
@@ -105,10 +116,12 @@ static size_t s_menu_poom_wifi_scan_password_len = 0U;
 static poom_ui_keyboard_t s_menu_poom_wifi_scan_keyboard;
 static bool s_menu_poom_wifi_scan_save_yes_selected = true;
 static uint32_t s_menu_poom_wifi_scan_connect_start_ms = 0U;
-static uint8_t s_menu_poom_wifi_scan_info_hold_cycles = 0U;
+static uint32_t s_menu_poom_wifi_scan_info_until_ms = 0U;
 static char s_menu_poom_wifi_scan_status[22] = "Initializing";
+static uint32_t s_menu_poom_wifi_scan_selection_tick_ms = 0U;
 
 static esp_err_t menu_poom_wifi_scan_exit_(void);
+static void menu_poom_wifi_scan_status_task_(void *task_arg);
 static void menu_poom_wifi_scan_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_poom_wifi_scan_wifi_evt_cb_(const poom_wifi_ctrl_evt_info_t *info, void *user_ctx);
 
@@ -187,11 +200,36 @@ static const char *menu_poom_wifi_scan_selected_ssid_label_(void)
 }
 
 /**
- * @brief Internal helper for `menu_poom_wifi_scan_get_ap_count`.
+ * @brief Checks if two scan entries refer to the same broadcast SSID.
+ *
+ * @param[in] lhs Parameter passed to the helper.
+ * @param[in] rhs Parameter passed to the helper.
+ * @return bool
+ */
+static bool menu_poom_wifi_scan_same_network_(const wifi_ap_record_t *lhs,
+                                              const wifi_ap_record_t *rhs)
+{
+    if((lhs == NULL) || (rhs == NULL))
+    {
+        return false;
+    }
+
+    if((lhs->ssid[0] == 0U) || (rhs->ssid[0] == 0U))
+    {
+        return false;
+    }
+
+    return strncmp((const char *)lhs->ssid,
+                   (const char *)rhs->ssid,
+                   sizeof(lhs->ssid)) == 0;
+}
+
+/**
+ * @brief Gets the current raw AP count bounded by the scanner capacity.
  *
  * @return uint16_t
  */
-static uint16_t menu_poom_wifi_scan_get_ap_count_(void)
+static uint16_t menu_poom_wifi_scan_raw_ap_count_(void)
 {
     poom_wifi_scanner_ap_records_t *records = poom_wifi_scanner_get_ap_records();
 
@@ -200,7 +238,189 @@ static uint16_t menu_poom_wifi_scan_get_ap_count_(void)
         return 0U;
     }
 
+    if(records->count > POOM_WIFI_SCANNER_MAX_AP)
+    {
+        return POOM_WIFI_SCANNER_MAX_AP;
+    }
+
     return records->count;
+}
+
+/**
+ * @brief Checks whether a raw AP entry is hidden by an earlier duplicate.
+ *
+ * @param[in] raw_index Parameter passed to the helper.
+ * @return bool
+ */
+static bool menu_poom_wifi_scan_ap_is_duplicate_(uint16_t raw_index)
+{
+    poom_wifi_scanner_ap_records_t *records = poom_wifi_scanner_get_ap_records();
+
+    if(records == NULL)
+    {
+        return false;
+    }
+
+    if(raw_index >= menu_poom_wifi_scan_raw_ap_count_())
+    {
+        return false;
+    }
+
+    for(uint16_t earlier_index = 0U; earlier_index < raw_index; earlier_index++)
+    {
+        if(menu_poom_wifi_scan_same_network_(&records->records[raw_index],
+                                             &records->records[earlier_index]))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * @brief Counts how many AP rows should be shown in the menu.
+ *
+ * @return uint16_t
+ */
+static uint16_t menu_poom_wifi_scan_visible_ap_total_(void)
+{
+    uint16_t total = 0U;
+    uint16_t raw_total = menu_poom_wifi_scan_raw_ap_count_();
+
+    for(uint16_t raw_index = 0U; raw_index < raw_total; raw_index++)
+    {
+        if(!menu_poom_wifi_scan_ap_is_duplicate_(raw_index))
+        {
+            total++;
+        }
+    }
+
+    return total;
+}
+
+/**
+ * @brief Gets an AP record by visible menu index.
+ *
+ * @param[in] visible_index Parameter passed to the helper.
+ * @return wifi_ap_record_t *
+ */
+static wifi_ap_record_t *menu_poom_wifi_scan_get_visible_ap_(uint16_t visible_index)
+{
+    uint16_t raw_total = menu_poom_wifi_scan_raw_ap_count_();
+    uint16_t current_visible = 0U;
+
+    for(uint16_t raw_index = 0U; raw_index < raw_total; raw_index++)
+    {
+        if(menu_poom_wifi_scan_ap_is_duplicate_(raw_index))
+        {
+            continue;
+        }
+
+        if(current_visible == visible_index)
+        {
+            return poom_wifi_scanner_get_ap_record(raw_index);
+        }
+
+        current_visible++;
+    }
+
+    return NULL;
+}
+
+/**
+ * @brief Arms the transient INFO screen timeout.
+ *
+ * @return void
+ */
+static void menu_poom_wifi_scan_begin_info_timeout_(void)
+{
+    s_menu_poom_wifi_scan_info_until_ms =
+        menu_poom_wifi_scan_now_ms_() +
+        (MENU_POOM_WIFI_SCAN_INFO_HOLD_CYCLES * MENU_POOM_WIFI_SCAN_REFRESH_MS);
+
+    if(s_menu_poom_wifi_scan_info_until_ms == 0U)
+    {
+        s_menu_poom_wifi_scan_info_until_ms = 1U;
+    }
+}
+
+/**
+ * @brief Checks if the INFO timeout elapsed.
+ *
+ * @return bool
+ */
+static bool menu_poom_wifi_scan_info_timeout_elapsed_(void)
+{
+    if(s_menu_poom_wifi_scan_info_until_ms == 0U)
+    {
+        return false;
+    }
+
+    return ((int32_t)(menu_poom_wifi_scan_now_ms_() - s_menu_poom_wifi_scan_info_until_ms) >= 0);
+}
+
+/**
+ * @brief Requests an early wake-up for the menu task.
+ *
+ * @return void
+ */
+static void menu_poom_wifi_scan_wake_worker_(void)
+{
+    portENTER_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+    if(s_menu_poom_wifi_scan_status_task != NULL)
+    {
+        (void)xTaskNotifyGive(s_menu_poom_wifi_scan_status_task);
+    }
+    portEXIT_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+}
+
+/**
+ * @brief Formats the visible label for one AP row.
+ *
+ * @param[out] dst Parameter passed to the helper.
+ * @param[in] dst_len Parameter passed to the helper.
+ * @param[in] label Parameter passed to the helper.
+ * @param[in] highlighted Parameter passed to the helper.
+ * @return void
+ */
+static void menu_poom_wifi_scan_format_ap_row_(char *dst,
+                                               size_t dst_len,
+                                               const char *label,
+                                               bool highlighted)
+{
+    size_t label_len;
+
+    if((dst == NULL) || (dst_len == 0U))
+    {
+        return;
+    }
+
+    dst[0] = '\0';
+    if(label == NULL)
+    {
+        return;
+    }
+
+    label_len = strlen(label);
+    if(!highlighted || (label_len <= MENU_POOM_WIFI_SCAN_LIST_TEXT_CHARS))
+    {
+        (void)snprintf(dst, dst_len, "%.*s", (int)MENU_POOM_WIFI_SCAN_LIST_TEXT_CHARS, label);
+        return;
+    }
+
+    size_t cycle_width = label_len + MENU_POOM_WIFI_SCAN_SCROLL_GAP_CHARS;
+    size_t phase = (size_t)(((menu_poom_wifi_scan_now_ms_() - s_menu_poom_wifi_scan_selection_tick_ms) /
+                              MENU_POOM_WIFI_SCAN_SCROLL_STEP_MS) % cycle_width);
+
+    for(size_t out_index = 0U;
+        (out_index < MENU_POOM_WIFI_SCAN_LIST_TEXT_CHARS) && (out_index + 1U < dst_len);
+        out_index++)
+    {
+        size_t source_index = (phase + out_index) % cycle_width;
+        dst[out_index] = (source_index < label_len) ? label[source_index] : ' ';
+        dst[out_index + 1U] = '\0';
+    }
 }
 
 /**
@@ -225,7 +445,7 @@ static void menu_poom_wifi_scan_clear_password_(void)
  */
 static void menu_poom_wifi_scan_enter_password_state_(void)
 {
-    wifi_ap_record_t *ap_record = poom_wifi_scanner_get_ap_record(s_menu_poom_wifi_scan_selected_ap);
+    wifi_ap_record_t *ap_record = menu_poom_wifi_scan_get_visible_ap_(s_menu_poom_wifi_scan_selected_ap);
 
     if(ap_record == NULL)
     {
@@ -292,8 +512,7 @@ static esp_err_t menu_poom_wifi_scan_draw_(void)
     {
         case MENU_POOM_WIFI_SCAN_STATE_SELECT_AP:
         {
-            poom_wifi_scanner_ap_records_t *records = poom_wifi_scanner_get_ap_records();
-            uint16_t count = (records != NULL) ? records->count : 0U;
+            uint16_t count = menu_poom_wifi_scan_visible_ap_total_();
 
             char count_buf[10];
             (void)snprintf(count_buf, sizeof(count_buf), "AP:%u", (unsigned)count);
@@ -326,8 +545,7 @@ static esp_err_t menu_poom_wifi_scan_draw_(void)
 
         case MENU_POOM_WIFI_SCAN_STATE_SELECT_AP:
         {
-            poom_wifi_scanner_ap_records_t *records = poom_wifi_scanner_get_ap_records();
-            uint16_t count = (records != NULL) ? records->count : 0U;
+            uint16_t count = menu_poom_wifi_scan_visible_ap_total_();
 
             if(count == 0U)
             {
@@ -349,18 +567,28 @@ static esp_err_t menu_poom_wifi_scan_draw_(void)
                     break;
                 }
 
+                wifi_ap_record_t *ap_record = menu_poom_wifi_scan_get_visible_ap_(index);
                 char ssid[33];
-                menu_poom_wifi_scan_copy_ssid_(ssid, sizeof(ssid), records->records[index].ssid);
+
+                if(ap_record == NULL)
+                {
+                    break;
+                }
+
+                menu_poom_wifi_scan_copy_ssid_(ssid, sizeof(ssid), ap_record->ssid);
                 if(ssid[0] == '\0')
                 {
                     (void)snprintf(ssid, sizeof(ssid), "%s", "<hidden>");
                 }
 
-                char ap_line[16];
-                (void)snprintf(ap_line, sizeof(ap_line), "%.14s", ssid);
+                char ap_line[MENU_POOM_WIFI_SCAN_LIST_TEXT_BUF_LEN];
+                menu_poom_wifi_scan_format_ap_row_(ap_line,
+                                                   sizeof(ap_line),
+                                                   ssid,
+                                                   index == s_menu_poom_wifi_scan_selected_ap);
 
                 const int16_t y = (int16_t)(14 + (int16_t)row * 10);
-                poom_arduboy_set_cursor(2, y);
+                poom_arduboy_set_cursor(MENU_POOM_WIFI_SCAN_LIST_TEXT_X, y);
                 (void)poom_arduboy_print(ap_line);
 
                 if(index == s_menu_poom_wifi_scan_selected_ap)
@@ -392,7 +620,11 @@ static esp_err_t menu_poom_wifi_scan_draw_(void)
         case MENU_POOM_WIFI_SCAN_STATE_CONNECTING:
             poom_arduboy_set_cursor(22, 26);
             (void)poom_arduboy_print(F("Connecting..."));
-            (void)snprintf(line1, sizeof(line1), "SSID:%.14s", menu_poom_wifi_scan_selected_ssid_label_());
+            (void)snprintf(line1,
+                           sizeof(line1),
+                           "SSID:%.*s",
+                           (int)MENU_POOM_WIFI_SCAN_CONNECT_TEXT_CHARS,
+                           menu_poom_wifi_scan_selected_ssid_label_());
             poom_arduboy_set_cursor(2, 38);
             (void)poom_arduboy_print(line1);
             poom_arduboy_set_cursor(72, 56);
@@ -450,7 +682,6 @@ static esp_err_t menu_poom_wifi_scan_draw_(void)
 static esp_err_t menu_poom_wifi_scan_run_scan_(void)
 {
     esp_err_t status;
-    uint16_t count;
 
     s_menu_poom_wifi_scan_state = MENU_POOM_WIFI_SCAN_STATE_SCANNING;
     (void)snprintf(s_menu_poom_wifi_scan_status, sizeof(s_menu_poom_wifi_scan_status), "Scanning...");
@@ -465,12 +696,12 @@ static esp_err_t menu_poom_wifi_scan_run_scan_(void)
         return status;
     }
 
-    count = menu_poom_wifi_scan_get_ap_count_();
     s_menu_poom_wifi_scan_selected_ap = 0U;
     s_menu_poom_wifi_scan_ap_window_start = 0U;
+    s_menu_poom_wifi_scan_selection_tick_ms = menu_poom_wifi_scan_now_ms_();
     s_menu_poom_wifi_scan_state = MENU_POOM_WIFI_SCAN_STATE_SELECT_AP;
 
-    if(count == 0U)
+    if(menu_poom_wifi_scan_visible_ap_total_() == 0U)
     {
         (void)snprintf(s_menu_poom_wifi_scan_status, sizeof(s_menu_poom_wifi_scan_status), "No APs");
     }
@@ -514,7 +745,7 @@ static void menu_poom_wifi_scan_update_connect_state_(void)
  */
 static void menu_poom_wifi_scan_handle_select_ap_button_(uint8_t button)
 {
-    uint16_t count = menu_poom_wifi_scan_get_ap_count_();
+    uint16_t count = menu_poom_wifi_scan_visible_ap_total_();
 
     if(count == 0U)
     {
@@ -530,6 +761,7 @@ static void menu_poom_wifi_scan_handle_select_ap_button_(uint8_t button)
         if(s_menu_poom_wifi_scan_selected_ap > 0U)
         {
             s_menu_poom_wifi_scan_selected_ap--;
+            s_menu_poom_wifi_scan_selection_tick_ms = menu_poom_wifi_scan_now_ms_();
         }
     }
     else if(button == BTN_DOWN)
@@ -537,6 +769,7 @@ static void menu_poom_wifi_scan_handle_select_ap_button_(uint8_t button)
         if(s_menu_poom_wifi_scan_selected_ap < (uint16_t)(count - 1U))
         {
             s_menu_poom_wifi_scan_selected_ap++;
+            s_menu_poom_wifi_scan_selection_tick_ms = menu_poom_wifi_scan_now_ms_();
         }
     }
     else if((button == BTN_A) || (button == BTN_RIGHT))
@@ -599,7 +832,7 @@ static void menu_poom_wifi_scan_handle_save_confirm_(void)
     }
 
     s_menu_poom_wifi_scan_state = MENU_POOM_WIFI_SCAN_STATE_INFO;
-    s_menu_poom_wifi_scan_info_hold_cycles = MENU_POOM_WIFI_SCAN_INFO_HOLD_CYCLES;
+    menu_poom_wifi_scan_begin_info_timeout_();
 }
 
 /**
@@ -610,24 +843,25 @@ static void menu_poom_wifi_scan_handle_save_confirm_(void)
 static esp_err_t menu_poom_wifi_scan_exit_(void)
 {
     TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+    TaskHandle_t worker_to_delete = NULL;
 
     s_menu_poom_wifi_scan_active = false;
     s_menu_poom_wifi_scan_exit_requested = false;
     s_menu_poom_wifi_scan_scan_request_pending = false;
     s_menu_poom_wifi_scan_connect_request_pending = false;
 
-    if(s_menu_poom_wifi_scan_status_task != NULL)
+    portENTER_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+    if((s_menu_poom_wifi_scan_status_task != NULL) &&
+       (s_menu_poom_wifi_scan_status_task != current_task))
     {
-        if(s_menu_poom_wifi_scan_status_task != current_task)
-        {
-            TaskHandle_t status_task = s_menu_poom_wifi_scan_status_task;
-            s_menu_poom_wifi_scan_status_task = NULL;
-            vTaskDelete(status_task);
-        }
-        else
-        {
-            s_menu_poom_wifi_scan_status_task = NULL;
-        }
+        worker_to_delete = s_menu_poom_wifi_scan_status_task;
+    }
+    s_menu_poom_wifi_scan_status_task = NULL;
+    portEXIT_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+
+    if(worker_to_delete != NULL)
+    {
+        vTaskDelete(worker_to_delete);
     }
 
     if(s_menu_poom_wifi_scan_buttons_subscribed)
@@ -718,7 +952,22 @@ static void menu_poom_wifi_scan_button_cb_(const poom_sbus_msg_t *msg, void *use
             else
             {
                 s_menu_poom_wifi_scan_exit_requested = true;
+
+                if(s_menu_poom_wifi_scan_state == MENU_POOM_WIFI_SCAN_STATE_SCANNING)
+                {
+                    esp_err_t stop_status = esp_wifi_scan_stop();
+                    if((stop_status != ESP_OK) &&
+                       (stop_status != ESP_ERR_WIFI_NOT_INIT) &&
+                       (stop_status != ESP_ERR_WIFI_NOT_STARTED) &&
+                       (stop_status != ESP_ERR_WIFI_STATE))
+                    {
+                        printf("[W] [menu_poom_wifi_scan] scan stop failed: %s\n",
+                               esp_err_to_name(stop_status));
+                    }
+                }
             }
+
+            menu_poom_wifi_scan_wake_worker_();
             return;
         }
 
@@ -758,6 +1007,8 @@ static void menu_poom_wifi_scan_button_cb_(const poom_sbus_msg_t *msg, void *use
             default:
                 break;
         }
+
+        menu_poom_wifi_scan_wake_worker_();
     }
     else if((button_msg.button == BTN_A) &&
             menu_poom_wifi_scan_is_long_press_event_(button_msg.event))
@@ -782,6 +1033,8 @@ static void menu_poom_wifi_scan_button_cb_(const poom_sbus_msg_t *msg, void *use
             s_menu_poom_wifi_scan_state = MENU_POOM_WIFI_SCAN_STATE_CONNECTING;
             (void)snprintf(s_menu_poom_wifi_scan_status, sizeof(s_menu_poom_wifi_scan_status), "Connecting...");
         }
+
+        menu_poom_wifi_scan_wake_worker_();
     }
 }
 
@@ -807,6 +1060,11 @@ static void menu_poom_wifi_scan_status_task_(void *task_arg)
         {
             s_menu_poom_wifi_scan_scan_request_pending = false;
             (void)menu_poom_wifi_scan_run_scan_();
+
+            if(s_menu_poom_wifi_scan_exit_requested)
+            {
+                continue;
+            }
         }
 
         if(s_menu_poom_wifi_scan_connect_request_pending)
@@ -840,21 +1098,23 @@ static void menu_poom_wifi_scan_status_task_(void *task_arg)
         {
             menu_poom_wifi_scan_update_connect_state_();
         }
-        else if((s_menu_poom_wifi_scan_state == MENU_POOM_WIFI_SCAN_STATE_INFO) &&
-                (s_menu_poom_wifi_scan_info_hold_cycles > 0U))
-        {
-            s_menu_poom_wifi_scan_info_hold_cycles--;
-            if(s_menu_poom_wifi_scan_info_hold_cycles == 0U)
-            {
-                s_menu_poom_wifi_scan_exit_requested = true;
-            }
-        }
 
         (void)menu_poom_wifi_scan_draw_();
-        vTaskDelay(pdMS_TO_TICKS(MENU_POOM_WIFI_SCAN_REFRESH_MS));
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(MENU_POOM_WIFI_SCAN_REFRESH_MS));
+
+        if((s_menu_poom_wifi_scan_state == MENU_POOM_WIFI_SCAN_STATE_INFO) &&
+           menu_poom_wifi_scan_info_timeout_elapsed_())
+        {
+            s_menu_poom_wifi_scan_exit_requested = true;
+        }
     }
 
-    s_menu_poom_wifi_scan_status_task = NULL;
+    portENTER_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+    if(s_menu_poom_wifi_scan_status_task == xTaskGetCurrentTaskHandle())
+    {
+        s_menu_poom_wifi_scan_status_task = NULL;
+    }
+    portEXIT_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
     vTaskDelete(NULL);
 }
 
@@ -868,7 +1128,8 @@ void menu_poom_wifi_scan_show(void)
     s_menu_poom_wifi_scan_selected_ap = 0U;
     s_menu_poom_wifi_scan_ap_window_start = 0U;
     s_menu_poom_wifi_scan_save_yes_selected = true;
-    s_menu_poom_wifi_scan_info_hold_cycles = 0U;
+    s_menu_poom_wifi_scan_info_until_ms = 0U;
+    s_menu_poom_wifi_scan_selection_tick_ms = menu_poom_wifi_scan_now_ms_();
     (void)memset(s_menu_poom_wifi_scan_selected_ssid, 0, sizeof(s_menu_poom_wifi_scan_selected_ssid));
     menu_poom_wifi_scan_clear_password_();
     (void)snprintf(s_menu_poom_wifi_scan_status, sizeof(s_menu_poom_wifi_scan_status), "Scanning...");
@@ -893,13 +1154,33 @@ void menu_poom_wifi_scan_show(void)
         }
     }
 
-    if(s_menu_poom_wifi_scan_status_task == NULL)
+    bool should_create_task;
+    portENTER_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+    should_create_task = (s_menu_poom_wifi_scan_status_task == NULL);
+    portEXIT_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+
+    if(should_create_task)
     {
-        (void)xTaskCreate(menu_poom_wifi_scan_status_task_,
-                          "menu_wifi_scan",
-                          MENU_POOM_WIFI_SCAN_STATUS_STACK,
-                          NULL,
-                          MENU_POOM_WIFI_SCAN_STATUS_PRIO,
-                          &s_menu_poom_wifi_scan_status_task);
+        TaskHandle_t created_task = NULL;
+        if(xTaskCreate(menu_poom_wifi_scan_status_task_,
+                       "menu_wifi_scan",
+                       MENU_POOM_WIFI_SCAN_STATUS_STACK,
+                       NULL,
+                       MENU_POOM_WIFI_SCAN_STATUS_PRIO,
+                       &created_task) == pdPASS)
+        {
+            portENTER_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+            if(s_menu_poom_wifi_scan_status_task == NULL)
+            {
+                s_menu_poom_wifi_scan_status_task = created_task;
+                created_task = NULL;
+            }
+            portEXIT_CRITICAL(&s_menu_poom_wifi_scan_task_lock);
+
+            if(created_task != NULL)
+            {
+                vTaskDelete(created_task);
+            }
+        }
     }
 }
