@@ -16,6 +16,8 @@ extern "C" {
 #define POOM_PICOPASS_BLOCK_LEN      8
 #define POOM_PICOPASS_MAX_APP_BLOCKS 32  // enough for 2KS/16KS AA1 dumps
 #define POOM_PICOPASS_MAX_WIEGAND    2  // 37-bit matches both H10302 and H10304
+// Max save-name length: name (22) + ".picopass" (9) = 31, FATFS's exact limit.
+#define POOM_PICOPASS_NAME_MAX       22
 
 // iCLASS block indices (AA1).
 #define POOM_PICOPASS_CSN_BLOCK      0
@@ -89,9 +91,11 @@ PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
 int poom_picopass_format(const PoomPicopassDump* dump, char* buf, int buf_len);
 
 // Save `dump` as a Flipper-compatible .picopass file on the SD card under
-// /picopass, auto-named from the CSN. Writes the relative path into
-// `out_rel_path` (if non-NULL). Returns ESP_OK or an ESP error code.
+// /picopass. `name` is the base filename (no extension); it is sanitized to
+// FAT-safe characters and falls back to the CSN if empty. Writes the relative
+// path into `out_rel_path` (if non-NULL). Returns ESP_OK or an ESP error code.
 esp_err_t poom_picopass_save(const PoomPicopassDump* dump,
+                             const char* name,
                              char* out_rel_path,
                              size_t out_rel_path_len);
 

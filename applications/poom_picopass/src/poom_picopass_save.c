@@ -35,6 +35,21 @@ static const uint8_t* block_for_index(const PoomPicopassDump* d, int i)
     }
 }
 
+// Copy `in` into `out` keeping only FAT-safe characters (replacing the rest
+// with '_'), capped so "<name>.picopass" fits the FATFS long-name limit.
+static void sanitize_name(const char* in, char* out, size_t out_cap)
+{
+    size_t j = 0;
+    for(size_t i = 0; in != NULL && in[i] != '\0' && j + 1 < out_cap; i++)
+    {
+        char c    = in[i];
+        bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        out[j++] = safe ? c : '_';
+    }
+    out[j] = '\0';
+}
+
 static void fprint_block(FILE* f, const uint8_t* b)
 {
     for(int j = 0; j < POOM_PICOPASS_BLOCK_LEN; j++)
@@ -55,6 +70,7 @@ bool poom_picopass_sd_ready(void)
 }
 
 esp_err_t poom_picopass_save(const PoomPicopassDump* dump,
+                             const char* name,
                              char* out_rel_path,
                              size_t out_rel_path_len)
 {
@@ -76,15 +92,19 @@ esp_err_t poom_picopass_save(const PoomPicopassDump* dump,
     if(err != ESP_OK)
         return err;
 
-    // Name the file after the CSN. Keep the filename component within POOM's
-    // FATFS long-name limit (CONFIG_FATFS_MAX_LFN, 31): 16 hex + ".picopass"
-    // is 25 chars; a longer prefix would overflow and fail to open.
+    // Filename is the sanitized name, or the CSN if that comes out empty. The
+    // name is capped at POOM_PICOPASS_NAME_MAX so "<name>.picopass" stays within
+    // POOM's FATFS long-name limit (31); a longer name fails to open.
+    char safe[POOM_PICOPASS_NAME_MAX + 1];
+    sanitize_name(name, safe, sizeof(safe));
+    if(safe[0] == '\0')
+        (void)snprintf(safe, sizeof(safe),
+                       "%02X%02X%02X%02X%02X%02X%02X%02X", dump->csn[0],
+                       dump->csn[1], dump->csn[2], dump->csn[3], dump->csn[4],
+                       dump->csn[5], dump->csn[6], dump->csn[7]);
+
     char rel[64];
-    (void)snprintf(rel, sizeof(rel),
-                   "%s/%02X%02X%02X%02X%02X%02X%02X%02X.picopass",
-                   POOM_PICOPASS_DIR, dump->csn[0], dump->csn[1], dump->csn[2],
-                   dump->csn[3], dump->csn[4], dump->csn[5], dump->csn[6],
-                   dump->csn[7]);
+    (void)snprintf(rel, sizeof(rel), "%s/%s.picopass", POOM_PICOPASS_DIR, safe);
 
     char abs[96];
     (void)snprintf(abs, sizeof(abs), "%s%s", SD_CARD_PATH, rel);
