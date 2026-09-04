@@ -56,9 +56,10 @@ The menu is wired into the UI via `poom_app_pack` (`menu_picopass.c`) and
 
 ## Public API
 
-- `PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out, const uint8_t* key, bool elite)`
-  - reads a card into `out`; `key == NULL` uses the standard debit key,
-    `elite` selects elite key diversification
+- `PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out)`
+  - reads a card into `out`, trying known keys until one authenticates: the
+    standard debit key and standard dictionary, then the elite dictionary and
+    the VB6 LCG elite keygen
 - `int poom_picopass_format(const PoomPicopassDump* dump, char* buf, int buf_len)`
   - renders a dump as human-readable hex lines
 - `const uint8_t poom_picopass_standard_key[8]`
