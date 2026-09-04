@@ -281,6 +281,18 @@ static void pp_draw_(void)
                 poom_arduboy_set_cursor(0, 42);
                 (void)poom_arduboy_print(l);
             }
+            else if(s_dump.factory)
+            {
+                // Factory-keyed card: no real credential to show.
+                poom_arduboy_set_cursor(0, 30);
+                (void)poom_arduboy_print(F("Factory default"));
+            }
+            else if(!s_dump.authenticated)
+            {
+                // No key worked: say so rather than leaving just the CSN.
+                poom_arduboy_set_cursor(0, 30);
+                (void)poom_arduboy_print(F("Auth failed"));
+            }
         }
         poom_arduboy_set_cursor(0, 56);
         (void)poom_arduboy_print(F("A:AGAIN"));
@@ -306,7 +318,11 @@ static void pp_draw_(void)
             (s_dump.app_block_count >= 1) && (s_dump.blocks[0][0] == PP_SIO_MARKER);
         bool sr = (s_dump.app_block_count >= 5) &&
                   (s_dump.blocks[4][0] == PP_SIO_MARKER);
-        if(sio)
+        if(s_dump.factory)
+        {
+            (void)snprintf(l, sizeof(l), "Factory default");
+        }
+        else if(sio)
         {
             (void)snprintf(l, sizeof(l), "SIO");
         }
@@ -335,14 +351,38 @@ static void pp_draw_(void)
         poom_arduboy_set_cursor(0, 27);
         (void)poom_arduboy_print(l);
 
-        // Security fuse, then which key authenticated.
+        // Security fuse.
         bool unsecure =
             (s_dump.config[7] & PP_FUSE_CRYPT10) == PP_FUSE_CRYPT0;
         poom_arduboy_set_cursor(0, 38);
         (void)poom_arduboy_print(unsecure ? F("Unsecure card") : F("Secure"));
-        poom_arduboy_set_cursor(0, 46);
-        (void)poom_arduboy_print(s_dump.authenticated ? F("Key: Standard")
-                                                       : F("Key: Not Standard"));
+
+        // Which key authenticated: the well-known debit key shows as "Standard";
+        // any other key is shown in hex.
+        if(s_dump.authenticated)
+        {
+            poom_arduboy_set_cursor(0, 46);
+            if(s_dump.factory)
+            {
+                (void)poom_arduboy_print(F("Key: Factory"));
+            }
+            else if(memcmp(s_dump.key, poom_picopass_standard_key,
+                           POOM_PICOPASS_BLOCK_LEN) == 0)
+            {
+                (void)poom_arduboy_print(F("Key: Standard"));
+            }
+            else
+            {
+                char* q = l;
+                q += snprintf(q, sizeof(l), "Key:");
+                for(int i = 0; i < POOM_PICOPASS_BLOCK_LEN; i++)
+                {
+                    q += snprintf(q, sizeof(l) - (size_t)(q - l), "%02X",
+                                  s_dump.key[i]);
+                }
+                (void)poom_arduboy_print(l);
+            }
+        }
 
         poom_arduboy_set_cursor(0, 56);
         (void)poom_arduboy_print(F("B:BACK"));
@@ -574,7 +614,7 @@ static void menu_picopass_task_(void* arg)
             // be moved into the field.
             pp_draw_();  // show "Reading..." before the (brief) blocking
                          // attempt
-            s_status = poom_picopass_read(&s_dump, NULL, false);
+            s_status = poom_picopass_read(&s_dump);
             if(s_cancel_read)
             {
                 s_cancel_read = false;

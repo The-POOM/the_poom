@@ -56,6 +56,8 @@ typedef struct
     bool kc_valid;
 
     bool authenticated;
+    bool factory;  // authed with the PicoPass factory default key (no real PACS)
+    uint8_t key[POOM_PICOPASS_BLOCK_LEN];  // key that authenticated
     uint8_t app_block_count;  // number of valid entries in blocks[]
     uint8_t blocks[POOM_PICOPASS_MAX_APP_BLOCKS]
                   [POOM_PICOPASS_BLOCK_LEN];  // AA1 from block 6
@@ -80,12 +82,13 @@ typedef struct
     } wiegand[POOM_PICOPASS_MAX_WIEGAND];
 } PoomPicopassDump;
 
-// Read a standard-keyed iCLASS card into `out`.
-// key: 8-byte iCLASS key. Pass NULL to use the well-known standard debit key.
-// elite: true if `key` is an elite key (needs diversified keygen).
-PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
-                                      const uint8_t* key,
-                                      bool elite);
+// Read an iCLASS card into `out`, trying known keys until one authenticates:
+// the well-known debit key and the standard dictionary (standard
+// diversification), then the elite dictionary (elite diversification). The card
+// is selected once. Returns Ok when a key works (out->key records it), ErrAuth
+// if none match, or a select/comms error. Pre-auth blocks (CSN/config/epurse/
+// AIA) are populated even when auth fails.
+PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out);
 
 // Format `dump` as human-readable hex lines into `buf` (returns bytes written).
 int poom_picopass_format(const PoomPicopassDump* dump, char* buf, int buf_len);
