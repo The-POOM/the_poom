@@ -11,6 +11,8 @@
 #include "optimized_cipher.h"
 #include "poom_des.h"
 #include "poom_nfc_controller.h"  // poom_nfc_controller_start(): bring up RFAL/ST25R3916
+#include "poom_picopass_elite_dict.h"
+#include "poom_picopass_standard_dict.h"
 #include "poom_wiegand.h"
 #include "rfal_picopass.h"
 #include <stdio.h>
@@ -28,6 +30,13 @@ static const uint8_t iclass_3des_key[16] = {0xb4, 0x21, 0x2c, 0xca, 0xb7, 0xed,
 
 const uint8_t poom_picopass_standard_key[POOM_PICOPASS_BLOCK_LEN] = {
     0xaf, 0xa7, 0x85, 0xa7, 0xda, 0xb3, 0x33, 0x78};
+
+// PicoPass factory default debit key (Kd). Cards still on this key carry no
+// real PACS, so we flag them and skip credential decoding. The standard
+// dictionary carries the same key (that entry does the auth); this copy exists
+// only to recognize the card afterward.
+static const uint8_t poom_picopass_factory_key[POOM_PICOPASS_BLOCK_LEN] = {
+    0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5, 0x96, 0x87};
 
 static PoomPicopassStatus read_block(uint8_t idx,
                                      uint8_t out[POOM_PICOPASS_BLOCK_LEN])
@@ -103,14 +112,9 @@ static void poom_picopass_decode_pacs(PoomPicopassDump* out)
     out->parity_error = (n == 0) && any_len;
 }
 
-PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
-                                      const uint8_t* key,
-                                      bool elite)
+// Select the card and read the blocks that don't need authentication.
+static PoomPicopassStatus pp_select_and_preauth(PoomPicopassDump* out)
 {
-    memset(out, 0, sizeof(*out));
-    if(key == NULL)
-        key = poom_picopass_standard_key;
-
     // Bring up the NFC core (RFAL + ST25R3916) if it isn't already, so the
     // command works standalone without a prior nfc-core-start. Idempotent.
     if(!poom_nfc_controller_start())
@@ -153,8 +157,17 @@ PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
     // config byte 0 is the application limit: the first block of AA1 NOT to
     // read (exclusive bound, so AA1 is blocks 6..app_limit-1).
     out->app_limit = config_ok ? out->config[0] : 0;
+    return PoomPicopassOk;
+}
 
-    // --- Authenticate against AA1 with the (diversified) key ---
+// Try to authenticate to AA1 with `key` (elite-diversified when `elite`).
+// Returns Ok on success, ErrReadCheck on a comms failure, or ErrAuth when the
+// key is simply wrong. out->div_key is left holding this key's diversification
+// either way. Safe to call repeatedly on one selection, so the dict attack
+// retries without re-selecting.
+static PoomPicopassStatus pp_try_key(PoomPicopassDump* out, const uint8_t* key,
+                                     bool elite)
+{
     loclass_iclass_calc_div_key((uint8_t*)out->csn, (uint8_t*)key, out->div_key,
                                 elite);
 
@@ -177,11 +190,18 @@ PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
     rfalPicoPassCheckRes chk;
     if(rfalPicoPassPollerCheck(mac, &chk) != RFAL_ERR_NONE)
     {
-        // Auth failed: still return what we read pre-auth.
-        out->authenticated = false;
         return PoomPicopassErrAuth;
     }
+    return PoomPicopassOk;
+}
+
+// After a successful auth: record the key, capture the Kd/Kc key blocks and the
+// AA1 application blocks, then decode the PACS credential.
+static void pp_read_after_auth(PoomPicopassDump* out, const uint8_t* key)
+{
     out->authenticated = true;
+    out->factory = memcmp(key, poom_picopass_factory_key, POOM_PICOPASS_BLOCK_LEN) == 0;
+    memcpy(out->key, key, POOM_PICOPASS_BLOCK_LEN);
 
     // Capture the key blocks (Kd/Kc) now that we're authenticated, so a saved
     // dump is complete. Cards mask these, but we store whatever they return.
@@ -202,9 +222,126 @@ PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out,
     }
     out->app_block_count = count;
 
-    poom_picopass_decode_pacs(out);
+    // A factory-keyed card carries no real PACS, so don't decode its default
+    // blocks as a credential.
+    if(!out->factory)
+    {
+        poom_picopass_decode_pacs(out);
+    }
+}
 
-    return PoomPicopassOk;
+// Try one key on the current selection: authenticate and, on success, read the
+// card. Returns Ok (found + read), ErrReadCheck (comms failure, abort), or
+// ErrAuth (wrong key, try another).
+static PoomPicopassStatus pp_try_one(PoomPicopassDump* out, const uint8_t* key,
+                                     bool elite)
+{
+    PoomPicopassStatus st = pp_try_key(out, key, elite);
+    if(st == PoomPicopassOk)
+    {
+        pp_read_after_auth(out, key);
+    }
+    return st;
+}
+
+// Try every key in a dictionary. Returns Ok as soon as one authenticates,
+// ErrReadCheck on a comms failure worth aborting for, or ErrAuth if none match.
+static PoomPicopassStatus pp_try_dict(
+    PoomPicopassDump* out, const uint8_t keys[][POOM_PICOPASS_BLOCK_LEN],
+    size_t count, bool elite)
+{
+    for(size_t i = 0; i < count; i++)
+    {
+        PoomPicopassStatus st = pp_try_one(out, keys[i], elite);
+        if(st != PoomPicopassErrAuth)
+        {
+            return st;  // Ok = found, ErrReadCheck = abort
+        }
+    }
+    return PoomPicopassErrAuth;
+}
+
+// Many elite keys come from a VB6 LCG keygen: a sliding 8-byte window over the
+// LCG's byte stream. Generating the first POOM_PICOPASS_ELITE_PRNG_COUNT keys
+// reproduces the LCG-derived entries so they needn't be stored in the elite
+// dictionary.
+#define POOM_PICOPASS_ELITE_PRNG_SEED  0x429080u
+#define POOM_PICOPASS_ELITE_PRNG_COUNT 699
+
+static uint8_t pp_elite_next_byte(uint32_t* seed)
+{
+    // (x mod 2^32) mod 2^24 == x mod 2^24, so the uint32_t overflow is harmless.
+    *seed = (0xFD43FDu * *seed + 0xC39EC3u) % 0x1000000u;
+    return (uint8_t)((*seed >> 16) & 0xFF);
+}
+
+// Try the LCG-generated elite keys (elite diversification). Returns like
+// pp_try_dict.
+static PoomPicopassStatus pp_try_elite_prng(PoomPicopassDump* out)
+{
+    uint32_t seed = POOM_PICOPASS_ELITE_PRNG_SEED;
+    uint8_t key[POOM_PICOPASS_BLOCK_LEN];
+    for(size_t i = 0; i < POOM_PICOPASS_ELITE_PRNG_COUNT; i++)
+    {
+        if(i == 0)
+        {
+            // First key: fill the whole window from the byte stream.
+            for(int b = 0; b < POOM_PICOPASS_BLOCK_LEN; b++)
+            {
+                key[b] = pp_elite_next_byte(&seed);
+            }
+        }
+        else
+        {
+            // Slide the window left and append the next byte.
+            memmove(key, key + 1, POOM_PICOPASS_BLOCK_LEN - 1);
+            key[POOM_PICOPASS_BLOCK_LEN - 1] = pp_elite_next_byte(&seed);
+        }
+        PoomPicopassStatus st = pp_try_one(out, key, /*elite=*/true);
+        if(st != PoomPicopassErrAuth)
+        {
+            return st;  // Ok = found, ErrReadCheck = abort
+        }
+    }
+    return PoomPicopassErrAuth;
+}
+
+PoomPicopassStatus poom_picopass_read(PoomPicopassDump* out)
+{
+    memset(out, 0, sizeof(*out));
+
+    PoomPicopassStatus st = pp_select_and_preauth(out);
+    if(st != PoomPicopassOk)
+    {
+        return st;
+    }
+
+    // Try known keys until one authenticates: the well-known debit key and the
+    // standard dictionary (standard diversification), then the elite dictionary
+    // and the VB6 LCG elite keygen (elite diversification). ErrAuth means "keep
+    // going"; Ok (found) or ErrReadCheck (comms failure) stop early. The card is
+    // selected once and every key retries READCHECK/CHECK without re-selecting.
+    st = pp_try_one(out, poom_picopass_standard_key, /*elite=*/false);
+    if(st != PoomPicopassErrAuth)
+    {
+        return st;
+    }
+
+    st = pp_try_dict(out, poom_picopass_standard_keys,
+                     POOM_PICOPASS_STANDARD_KEY_COUNT, /*elite=*/false);
+    if(st != PoomPicopassErrAuth)
+    {
+        return st;
+    }
+
+    st = pp_try_dict(out, poom_picopass_elite_keys,
+                     POOM_PICOPASS_ELITE_KEY_COUNT, /*elite=*/true);
+    if(st != PoomPicopassErrAuth)
+    {
+        return st;
+    }
+
+    return pp_try_elite_prng(out);
 }
 
 static int hexline(char* p, int n, const char* label, const uint8_t* b)
