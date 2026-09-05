@@ -3,6 +3,7 @@
 
 #include "menu_poom_drone_scan.h"
 
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -100,7 +101,7 @@ static char s_status[18] = "START";
 static menu_drone_scan_screen_t s_screen = MENU_DRONE_SCAN_SCREEN_LIST;
 
 static portMUX_TYPE s_devs_mux = portMUX_INITIALIZER_UNLOCKED;
-static menu_drone_scan_device_t s_devs[MENU_DRONE_SCAN_MAX_DEVICES];
+static menu_drone_scan_device_t *s_devs = NULL;
 static uint32_t s_report_count = 0;
 static uint32_t s_first_seen_seq = 0;
 
@@ -120,22 +121,77 @@ static void menu_exit_(void);
 static void menu_report_cb_(const poom_drone_uav_data_t *report, void *user_ctx);
 
 /**
- * @brief Starts the internal runtime for this menu module.
+ * @brief Resets the tracked device state while the caller holds `s_devs_mux`.
  *
  * @return void
  */
-static void menu_restart_scanner_(void)
+static void menu_reset_devices_locked_(void)
 {
-    (void)poom_drone_stop();
+    if (s_devs != NULL)
+    {
+        memset(s_devs, 0, sizeof(*s_devs) * MENU_DRONE_SCAN_MAX_DEVICES);
+    }
 
-    portENTER_CRITICAL(&s_devs_mux);
-    memset(s_devs, 0, sizeof(s_devs));
     s_report_count = 0;
     s_first_seen_seq = 0;
     s_has_selected = false;
     memset(s_selected_mac, 0, sizeof(s_selected_mac));
     s_has_detail = false;
     memset(s_detail_mac, 0, sizeof(s_detail_mac));
+}
+
+/**
+ * @brief Allocates the runtime device table if needed.
+ *
+ * @return bool
+ */
+static bool menu_alloc_devices_(void)
+{
+    if (s_devs != NULL)
+    {
+        return true;
+    }
+
+    s_devs = calloc(MENU_DRONE_SCAN_MAX_DEVICES, sizeof(*s_devs));
+    return s_devs != NULL;
+}
+
+/**
+ * @brief Frees the runtime device table and clears related state.
+ *
+ * @return void
+ */
+static void menu_free_devices_(void)
+{
+    menu_drone_scan_device_t *devs = NULL;
+
+    portENTER_CRITICAL(&s_devs_mux);
+    devs = s_devs;
+    s_devs = NULL;
+    menu_reset_devices_locked_();
+    portEXIT_CRITICAL(&s_devs_mux);
+
+    free(devs);
+}
+
+/**
+ * @brief Starts the internal runtime for this menu module.
+ *
+ * @return void
+ */
+static void menu_restart_scanner_(void)
+{
+    if (s_devs == NULL)
+    {
+        (void)snprintf(s_status, sizeof(s_status), "NO MEM");
+        return;
+    }
+
+    poom_drone_register_report_cb(NULL, NULL);
+    (void)poom_drone_stop();
+
+    portENTER_CRITICAL(&s_devs_mux);
+    menu_reset_devices_locked_();
     portEXIT_CRITICAL(&s_devs_mux);
 
     poom_drone_register_report_cb(menu_report_cb_, NULL);
@@ -267,6 +323,11 @@ static int snapshot_build_(menu_drone_scan_snapshot_t *out_list, int cap)
 
     int out = 0;
     portENTER_CRITICAL(&s_devs_mux);
+    if (s_devs == NULL)
+    {
+        portEXIT_CRITICAL(&s_devs_mux);
+        return 0;
+    }
     for (uint32_t i = 0; i < MENU_DRONE_SCAN_MAX_DEVICES; i++)
     {
         if (!s_devs[i].used)
@@ -325,7 +386,7 @@ static bool dev_is_pinned_(const uint8_t mac[6])
  */
 static menu_drone_scan_device_t *dev_get_or_alloc_locked_(const uint8_t mac[6])
 {
-    if (mac == NULL)
+    if ((mac == NULL) || (s_devs == NULL))
     {
         return NULL;
     }
@@ -750,13 +811,16 @@ static bool dev_copy_uav_by_mac_(const uint8_t mac[6], poom_drone_uav_data_t *ou
 
     bool ok = false;
     portENTER_CRITICAL(&s_devs_mux);
-    for (uint32_t i = 0; i < MENU_DRONE_SCAN_MAX_DEVICES; i++)
+    if (s_devs != NULL)
     {
-        if (s_devs[i].used && (memcmp(s_devs[i].mac, mac, 6) == 0))
+        for (uint32_t i = 0; i < MENU_DRONE_SCAN_MAX_DEVICES; i++)
         {
-            memcpy(out_uav, &s_devs[i].uav, sizeof(*out_uav));
-            ok = true;
-            break;
+            if (s_devs[i].used && (memcmp(s_devs[i].mac, mac, 6) == 0))
+            {
+                memcpy(out_uav, &s_devs[i].uav, sizeof(*out_uav));
+                ok = true;
+                break;
+            }
         }
     }
     portEXIT_CRITICAL(&s_devs_mux);
@@ -1019,6 +1083,7 @@ static void menu_exit_(void)
     TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
 
     s_menu_active = false;
+    poom_drone_register_report_cb(NULL, NULL);
     (void)poom_drone_stop();
 
     if (s_menu_task != NULL)
@@ -1048,6 +1113,12 @@ static void menu_exit_(void)
         s_buttons_subscribed = false;
     }
 
+    menu_free_devices_();
+    s_selected_index = 0;
+    s_scroll = 0;
+    s_detail_scroll = 0;
+    s_screen = MENU_DRONE_SCAN_SCREEN_LIST;
+
     const uint8_t token = 1;
     (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
 }
@@ -1059,15 +1130,18 @@ void menu_poom_drone_scan_show(void)
         return;
     }
 
+    if (!menu_alloc_devices_())
+    {
+        (void)snprintf(s_status, sizeof(s_status), "NO MEM");
+        menu_exit_();
+        return;
+    }
+
+    poom_drone_register_report_cb(NULL, NULL);
     (void)poom_drone_stop();
 
     portENTER_CRITICAL(&s_devs_mux);
-    memset(s_devs, 0, sizeof(s_devs));
-    s_report_count = 0;
-    s_has_selected = false;
-    memset(s_selected_mac, 0, sizeof(s_selected_mac));
-    s_has_detail = false;
-    memset(s_detail_mac, 0, sizeof(s_detail_mac));
+    menu_reset_devices_locked_();
     portEXIT_CRITICAL(&s_devs_mux);
 
     s_selected_index = 0;
@@ -1080,7 +1154,7 @@ void menu_poom_drone_scan_show(void)
     s_btn_q = xQueueCreate(8, sizeof(menu_drone_scan_btn_msg_t));
     if (s_btn_q == NULL)
     {
-        (void)poom_drone_stop();
+        menu_exit_();
         return;
     }
 
