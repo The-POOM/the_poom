@@ -3914,13 +3914,27 @@ static void menu_nfc_run_scan_(void)
  */
 static void menu_nfc_emv_file_write_hex_(FILE* f, const uint8_t* data, size_t data_len)
 {
+    static const char k_hex[] = "0123456789ABCDEF";
+    char encoded[64];
+    size_t encoded_len = 0U;
+
     if(f == NULL || (data == NULL && data_len > 0U))
     {
         return;
     }
     for(size_t i = 0U; i < data_len; i++)
     {
-        (void)fprintf(f, "%02X", data[i]);
+        encoded[encoded_len++] = k_hex[(data[i] >> 4U) & 0x0FU];
+        encoded[encoded_len++] = k_hex[data[i] & 0x0FU];
+        if(encoded_len == sizeof(encoded))
+        {
+            (void)fwrite(encoded, 1U, encoded_len, f);
+            encoded_len = 0U;
+        }
+    }
+    if(encoded_len > 0U)
+    {
+        (void)fwrite(encoded, 1U, encoded_len, f);
     }
 }
 
@@ -3932,6 +3946,7 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
     char uid_name[21];
     char rel_path[96];
     char abs_path[160];
+    char file_buffer[256];
     FILE* f = NULL;
 
     if(out_io_errno != NULL)
@@ -4040,8 +4055,9 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
         }
         return ESP_FAIL;
     }
-    /* Avoid allocating a large stdio buffer while the EMV capture is retained. */
-    (void)setvbuf(f, NULL, _IONBF, 0);
+    /* A small caller-owned buffer avoids heap use without turning every hex
+     * byte into a separate FATFS write, which can stall long EMV saves. */
+    (void)setvbuf(f, file_buffer, _IOFBF, sizeof(file_buffer));
 
     (void)fprintf(f, "Filetype: POOM NFC device\n");
     (void)fprintf(f, "Version: 2\n");
