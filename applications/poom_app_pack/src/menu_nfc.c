@@ -3,6 +3,7 @@
 
 #include "menu_nfc.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -2115,12 +2116,11 @@ static bool menu_nfc_prepare_emv_scan_view_connected_(
         {
             (void)snprintf(line, sizeof(line), "AIP:%02X %02X", card->aip[0], card->aip[1]);
             menu_nfc_scan_info_add_(line);
-            poom_nfc_emv_format_aip(card, line, sizeof(line));
-            if(line[0] != '\0')
+            (void)snprintf(line, sizeof(line), " AIP:");
+            poom_nfc_emv_format_aip(card, &line[5], sizeof(line) - 5U);
+            if(line[5] != '\0')
             {
-                char decoded_line[22];
-                (void)snprintf(decoded_line, sizeof(decoded_line), " AIP:%.16s", line);
-                menu_nfc_scan_info_add_(decoded_line);
+                menu_nfc_scan_info_add_(line);
             }
         }
         if(card->gpo_succeeded)
@@ -2235,37 +2235,35 @@ static bool menu_nfc_prepare_emv_scan_view_connected_(
             }
             if(details->has_application_usage_control)
             {
-                poom_nfc_emv_format_auc(card, line, sizeof(line));
-                if(line[0] != '\0')
+                (void)snprintf(line, sizeof(line), "AUC:");
+                poom_nfc_emv_format_auc(card, &line[4], sizeof(line) - 4U);
+                if(line[4] != '\0')
                 {
-                    char decoded_line[22];
-                    (void)snprintf(decoded_line, sizeof(decoded_line), "AUC:%.17s", line);
-                    menu_nfc_scan_info_add_(decoded_line);
+                    menu_nfc_scan_info_add_(line);
                 }
             }
             if(details->cvm_list_len > 0U)
             {
-                poom_nfc_emv_format_cvm(card, line, sizeof(line));
-                if(line[0] != '\0')
+                (void)snprintf(line, sizeof(line), "CVM:");
+                poom_nfc_emv_format_cvm(card, &line[4], sizeof(line) - 4U);
+                if(line[4] != '\0')
                 {
-                    char decoded_line[22];
-                    (void)snprintf(decoded_line, sizeof(decoded_line), "CVM:%.17s", line);
-                    menu_nfc_scan_info_add_(decoded_line);
+                    menu_nfc_scan_info_add_(line);
                 }
             }
             if(details->cdol1_len > 0U)
             {
-                poom_nfc_emv_format_dol(details->cdol1, details->cdol1_len, line, sizeof(line));
-                char decoded_line[22];
-                (void)snprintf(decoded_line, sizeof(decoded_line), "CDOL1:%.15s", line);
-                menu_nfc_scan_info_add_(decoded_line);
+                (void)snprintf(line, sizeof(line), "CDOL1:");
+                poom_nfc_emv_format_dol(
+                    details->cdol1, details->cdol1_len, &line[6], sizeof(line) - 6U);
+                menu_nfc_scan_info_add_(line);
             }
             if(details->cdol2_len > 0U)
             {
-                poom_nfc_emv_format_dol(details->cdol2, details->cdol2_len, line, sizeof(line));
-                char decoded_line[22];
-                (void)snprintf(decoded_line, sizeof(decoded_line), "CDOL2:%.15s", line);
-                menu_nfc_scan_info_add_(decoded_line);
+                (void)snprintf(line, sizeof(line), "CDOL2:");
+                poom_nfc_emv_format_dol(
+                    details->cdol2, details->cdol2_len, &line[6], sizeof(line) - 6U);
+                menu_nfc_scan_info_add_(line);
             }
             if(details->has_issuer_action_code_default ||
                details->has_issuer_action_code_denial ||
@@ -2296,31 +2294,26 @@ static bool menu_nfc_prepare_emv_scan_view_connected_(
             }
             if(details->mastercard_application_capabilities_len > 0U)
             {
-                char hex[17];
-                const size_t shown = (details->mastercard_application_capabilities_len < 8U) ?
-                                         details->mastercard_application_capabilities_len : 8U;
-                menu_nfc_format_hex_compact_(
-                    details->mastercard_application_capabilities, shown, hex, sizeof(hex));
-                (void)snprintf(line, sizeof(line), "MC ACI:%.14s", hex);
+                (void)snprintf(line,
+                               sizeof(line),
+                               "MC ACI:%uB",
+                               (unsigned)details->mastercard_application_capabilities_len);
                 menu_nfc_scan_info_add_(line);
             }
             if(details->mastercard_9f6c_len > 0U)
             {
-                char hex[17];
-                const size_t shown = (details->mastercard_9f6c_len < 8U) ?
-                                         details->mastercard_9f6c_len : 8U;
-                menu_nfc_format_hex_compact_(details->mastercard_9f6c, shown, hex, sizeof(hex));
-                (void)snprintf(line, sizeof(line), "MC 9F6C:%.13s", hex);
+                (void)snprintf(line,
+                               sizeof(line),
+                               "MC 9F6C:%uB",
+                               (unsigned)details->mastercard_9f6c_len);
                 menu_nfc_scan_info_add_(line);
             }
             if(details->mastercard_third_party_data_len > 0U)
             {
-                char hex[17];
-                const size_t shown = (details->mastercard_third_party_data_len < 8U) ?
-                                         details->mastercard_third_party_data_len : 8U;
-                menu_nfc_format_hex_compact_(
-                    details->mastercard_third_party_data, shown, hex, sizeof(hex));
-                (void)snprintf(line, sizeof(line), "MC TPD:%.14s", hex);
+                (void)snprintf(line,
+                               sizeof(line),
+                               "MC TPD:%uB",
+                               (unsigned)details->mastercard_third_party_data_len);
                 menu_nfc_scan_info_add_(line);
             }
         }
@@ -3931,13 +3924,20 @@ static void menu_nfc_emv_file_write_hex_(FILE* f, const uint8_t* data, size_t da
     }
 }
 
-static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path, size_t out_rel_path_len)
+static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
+                                                 size_t out_rel_path_len,
+                                                 int* out_io_errno)
 {
     char aid_name[33];
     char uid_name[21];
     char rel_path[96];
     char abs_path[160];
     FILE* f = NULL;
+
+    if(out_io_errno != NULL)
+    {
+        *out_io_errno = 0;
+    }
 
     if(out_rel_path != NULL && out_rel_path_len > 0U)
     {
@@ -3946,13 +3946,21 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path, size_t out_
 
     if(sd_card_is_not_mounted())
     {
-        if(sd_card_mount() != ESP_OK)
+        sd_card_begin();
+        const esp_err_t mount_err = sd_card_mount();
+        if(mount_err != ESP_OK)
         {
-            return ESP_FAIL;
+            return mount_err;
         }
     }
 
-    (void)sd_card_create_dir("/nfc");
+    {
+        const esp_err_t dir_err = sd_card_create_dir("/nfc");
+        if(dir_err != ESP_OK)
+        {
+            return dir_err;
+        }
+    }
     aid_name[0] = '\0';
     if((s_scan_meta != NULL) && s_scan_meta->emv_data_valid &&
        s_scan_meta->emv_data->aid_len > 0U)
@@ -3995,19 +4003,45 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path, size_t out_
     }
     if(uid_name[0] != '\0')
     {
-        (void)snprintf(rel_path, sizeof(rel_path), "/nfc/EMV_%s_%s.nfc", uid_name, aid_name);
+        const char* scheme_id = "UN";
+        if((s_scan_meta != NULL) && s_scan_meta->emv_data_valid)
+        {
+            if(s_scan_meta->emv_data->scheme == POOM_NFC_EMV_SCHEME_VISA)
+            {
+                scheme_id = "VI";
+            }
+            else if(s_scan_meta->emv_data->scheme == POOM_NFC_EMV_SCHEME_MASTERCARD)
+            {
+                scheme_id = "MC";
+            }
+        }
+
+        /*
+         * CONFIG_FATFS_MAX_LFN is 31. A 10-byte UID is 20 hex characters, so
+         * "EMV_<UID>_<scheme>.nfc" is exactly 31 characters at most. The full
+         * AID remains stored inside the file.
+         */
+        (void)snprintf(rel_path, sizeof(rel_path), "/nfc/EMV_%s_%s.nfc", uid_name, scheme_id);
     }
     else
     {
-        (void)snprintf(rel_path, sizeof(rel_path), "/nfc/EMV_%s.nfc", aid_name);
+        /* Keep the basename within the configured FATFS 31-character limit. */
+        (void)snprintf(rel_path, sizeof(rel_path), "/nfc/EMV_%.22s.nfc", aid_name);
     }
     (void)snprintf(abs_path, sizeof(abs_path), "%s%s", SD_CARD_PATH, rel_path);
 
+    errno = 0;
     f = fopen(abs_path, "w");
     if(f == NULL)
     {
+        if(out_io_errno != NULL)
+        {
+            *out_io_errno = (errno != 0) ? errno : EIO;
+        }
         return ESP_FAIL;
     }
+    /* Avoid allocating a large stdio buffer while the EMV capture is retained. */
+    (void)setvbuf(f, NULL, _IONBF, 0);
 
     (void)fprintf(f, "Filetype: POOM NFC device\n");
     (void)fprintf(f, "Version: 2\n");
@@ -4434,7 +4468,26 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path, size_t out_
             }
         }
     }
-    (void)fclose(f);
+    {
+        int io_errno = 0;
+        if(ferror(f) != 0)
+        {
+            io_errno = (errno != 0) ? errno : EIO;
+        }
+        errno = 0;
+        if(fclose(f) != 0 && io_errno == 0)
+        {
+            io_errno = (errno != 0) ? errno : EIO;
+        }
+        if(io_errno != 0)
+        {
+            if(out_io_errno != NULL)
+            {
+                *out_io_errno = io_errno;
+            }
+            return ESP_FAIL;
+        }
+    }
 
     if(out_rel_path != NULL && out_rel_path_len > 0U)
     {
@@ -4452,6 +4505,7 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path, size_t out_
 static void menu_nfc_scan_save_to_sd_(void)
 {
     esp_err_t err = ESP_FAIL;
+    int emv_save_errno = 0;
     char rel_path[160];
 
     if(!s_scan_dump_valid)
@@ -4473,7 +4527,11 @@ static void menu_nfc_scan_save_to_sd_(void)
     }
     else if((s_scan_meta != NULL) && (s_scan_meta->kind == MENU_NFC_SCAN_KIND_EMV))
     {
-        err = menu_nfc_scan_save_emv_summary_(rel_path, sizeof(rel_path));
+        /* The card data and APDU capture are already copied; release RF/driver
+         * memory before FATFS opens and writes the larger EMV report. */
+        poom_nfc_controller_stop();
+        err = menu_nfc_scan_save_emv_summary_(
+            rel_path, sizeof(rel_path), &emv_save_errno);
     }
     else
     {
@@ -4495,7 +4553,14 @@ static void menu_nfc_scan_save_to_sd_(void)
         char line0[22];
         char line1[22];
         (void)snprintf(line0, sizeof(line0), "SD save failed");
-        (void)snprintf(line1, sizeof(line1), "err=%d", (int)err);
+        if(emv_save_errno != 0)
+        {
+            (void)snprintf(line1, sizeof(line1), "I/O errno=%d", emv_save_errno);
+        }
+        else
+        {
+            (void)snprintf(line1, sizeof(line1), "err=%d", (int)err);
+        }
         menu_nfc_set_info_return_(line0, line1, menu_nfc_scan_primary_state_());
     }
 }
