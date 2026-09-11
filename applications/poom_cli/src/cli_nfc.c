@@ -1534,6 +1534,265 @@ static int cmd_nfc_emv_select(int argc, char** argv)
     return poom_iso7816_status_is_ok(view.sw1, view.sw2) ? 0 : 1;
 }
 
+static int cmd_nfc_emv_read(int argc, char** argv)
+{
+    poom_nfc_emv_card_t card = {0};
+
+    (void)argc;
+    (void)argv;
+
+    if(!poom_nfc_emv_read_card(&card))
+    {
+        printf("nfc-emv-read: full EMV read failed. Connect an ISO-DEP payment card first.\r\n");
+        return 1;
+    }
+
+    printf("%s\r\n", card.read_completed ? "EMV application read" :
+                                           "EMV application partially read");
+    printf("  Status          : %s\r\n", poom_nfc_emv_read_status_str(card.read_status));
+    printf("  AID             : ");
+    poom_print_hex_compact_(card.aid, card.aid_len);
+    printf("\r\n");
+    printf("  Scheme          : %s\r\n", poom_nfc_emv_scheme_str(card.scheme));
+    printf("  Kernel hint     : %s\r\n", poom_nfc_emv_kernel_hint_str(card.scheme));
+    if(card.application_label[0] != '\0') printf("  Label           : %s\r\n", card.application_label);
+    if(card.application_name[0] != '\0') printf("  Preferred name  : %s\r\n", card.application_name);
+    if(card.cardholder_name[0] != '\0') printf("  Cardholder      : %s\r\n", card.cardholder_name);
+    if(card.pan_len > 0U) printf("  PAN             : %s\r\n", card.pan);
+    if(card.has_expiration_date)
+    {
+        printf("  Expiration      : %02X/%02X/%02X\r\n",
+               (unsigned)card.expiration_date[0],
+               (unsigned)card.expiration_date[1],
+               (unsigned)card.expiration_date[2]);
+    }
+    if(card.has_effective_date)
+    {
+        printf("  Effective       : %02X/%02X/%02X\r\n",
+               (unsigned)card.effective_date[0],
+               (unsigned)card.effective_date[1],
+               (unsigned)card.effective_date[2]);
+    }
+    if(card.has_aip)
+    {
+        char decoded[128];
+        poom_nfc_emv_format_aip(&card, decoded, sizeof(decoded));
+        printf("  AIP             : %02X%02X (%s)\r\n", card.aip[0], card.aip[1], decoded);
+    }
+    if(card.gpo_succeeded)
+    {
+        printf("  EMV data source : %s\r\n",
+               card.afl_present ? "GPO + AFL records" : "inline GPO (no AFL)");
+    }
+    if(card.has_country_code) printf("  Country code    : %04X\r\n", card.country_code);
+    if(card.has_currency_code) printf("  Currency code   : %04X\r\n", card.currency_code);
+    if(card.has_pan_sequence_number)
+    {
+        printf("  PAN sequence    : %u\r\n", (unsigned)card.pan_sequence_number);
+    }
+    if(card.has_service_code) printf("  Service code    : %03u\r\n", (unsigned)card.service_code);
+    if(card.has_issuer_code_table_index)
+    {
+        printf("  Issuer code tbl : %u\r\n", (unsigned)card.issuer_code_table_index);
+    }
+    if(card.has_cryptogram_information_data)
+    {
+        printf("  CID             : %02X (%s)\r\n",
+               card.cryptogram_information_data,
+               poom_nfc_emv_cryptogram_type_str(card.cryptogram_information_data));
+    }
+    if(card.has_offline_spending_amount)
+    {
+        printf("  Visa AOSA       : %llu\r\n", (unsigned long long)card.offline_spending_amount);
+    }
+    if(card.optional_data_unsupported)
+    {
+        printf("  Optional data   : not supported by card\r\n");
+    }
+    if(card.issuer_application_data_len > 0U)
+    {
+        printf("  IAD (%s raw) : ", poom_nfc_emv_scheme_str(card.scheme));
+        poom_print_hex_compact_(card.issuer_application_data, card.issuer_application_data_len);
+        printf("\r\n");
+    }
+    if(card.application_cryptogram_len > 0U)
+    {
+        printf("  AC (9F26)       : ");
+        poom_print_hex_compact_(card.application_cryptogram, card.application_cryptogram_len);
+        printf("\r\n");
+    }
+    if(card.application_program_identifier_len > 0U)
+    {
+        printf("  Visa APID       : ");
+        poom_print_hex_compact_(card.application_program_identifier,
+                                card.application_program_identifier_len);
+        printf("\r\n");
+    }
+    if(card.card_transaction_qualifiers_len > 0U)
+    {
+        printf("  Visa CTQ (9F6C) : ");
+        poom_print_hex_compact_(card.card_transaction_qualifiers,
+                                card.card_transaction_qualifiers_len);
+        printf("\r\n");
+    }
+    if(card.form_factor_indicator_len > 0U)
+    {
+        printf("  Visa FFI (9F6E) : ");
+        poom_print_hex_compact_(card.form_factor_indicator, card.form_factor_indicator_len);
+        printf("\r\n");
+    }
+    if(card.details != NULL)
+    {
+        const poom_nfc_emv_details_t* details = card.details;
+        char decoded[256];
+        if(details->language_preferences_len > 0U)
+        {
+            printf("  Languages       : ");
+            poom_print_hex_compact_(details->language_preferences,
+                                    details->language_preferences_len);
+            printf("\r\n");
+        }
+        if(details->has_application_version_number)
+        {
+            printf("  App version     : %04X\r\n", details->application_version_number);
+        }
+        if(details->has_application_usage_control)
+        {
+            poom_nfc_emv_format_auc(&card, decoded, sizeof(decoded));
+            printf("  AUC (9F07)      : %02X%02X (%s)\r\n",
+                   details->application_usage_control[0],
+                   details->application_usage_control[1],
+                   decoded);
+        }
+        if(details->cvm_list_len > 0U)
+        {
+            poom_nfc_emv_format_cvm(&card, decoded, sizeof(decoded));
+            printf("  CVM List (8E)   : %s\r\n", decoded);
+        }
+        if(details->cdol1_len > 0U)
+        {
+            poom_nfc_emv_format_dol(details->cdol1, details->cdol1_len, decoded, sizeof(decoded));
+            printf("  CDOL1 (8C)      : %s\r\n", decoded);
+        }
+        if(details->cdol2_len > 0U)
+        {
+            poom_nfc_emv_format_dol(details->cdol2, details->cdol2_len, decoded, sizeof(decoded));
+            printf("  CDOL2 (8D)      : %s\r\n", decoded);
+        }
+        if(details->has_issuer_action_code_default)
+        {
+            printf("  IAC Default     : ");
+            poom_print_hex_compact_(details->issuer_action_code_default, POOM_NFC_EMV_IAC_LEN);
+            printf("\r\n");
+        }
+        if(details->has_issuer_action_code_denial)
+        {
+            printf("  IAC Denial      : ");
+            poom_print_hex_compact_(details->issuer_action_code_denial, POOM_NFC_EMV_IAC_LEN);
+            printf("\r\n");
+        }
+        if(details->has_issuer_action_code_online)
+        {
+            printf("  IAC Online      : ");
+            poom_print_hex_compact_(details->issuer_action_code_online, POOM_NFC_EMV_IAC_LEN);
+            printf("\r\n");
+        }
+        if(details->has_ca_public_key_index)
+        {
+            printf("  CA key index    : %02X\r\n", details->ca_public_key_index);
+        }
+        if(details->issuer_public_key_certificate_len > 0U)
+        {
+            printf("  Issuer cert     : present (%u bytes)\r\n",
+                   (unsigned)details->issuer_public_key_certificate_len);
+        }
+        if(details->icc_public_key_certificate_len > 0U)
+        {
+            printf("  ICC cert        : present (%u bytes)\r\n",
+                   (unsigned)details->icc_public_key_certificate_len);
+        }
+        if(details->ddol_len > 0U)
+        {
+            poom_nfc_emv_format_dol(details->ddol, details->ddol_len, decoded, sizeof(decoded));
+            printf("  DDOL (9F49)     : %s\r\n", decoded);
+        }
+        if(details->customer_exclusive_data_len > 0U)
+        {
+            printf("  CED (9F7C)      : raw, %u bytes\r\n",
+                   (unsigned)details->customer_exclusive_data_len);
+        }
+        if(details->mastercard_application_capabilities_len > 0U)
+        {
+            printf("  MC ACI (9F5D)   : ");
+            poom_print_hex_compact_(details->mastercard_application_capabilities,
+                                    details->mastercard_application_capabilities_len);
+            printf("\r\n");
+        }
+        if(details->mastercard_9f6c_len > 0U)
+        {
+            printf("  MC 9F6C         : profile-specific raw ");
+            poom_print_hex_compact_(details->mastercard_9f6c, details->mastercard_9f6c_len);
+            printf("\r\n");
+        }
+        if(details->mastercard_third_party_data_len > 0U)
+        {
+            printf("  MC Third Party  : ");
+            poom_print_hex_compact_(details->mastercard_third_party_data,
+                                    details->mastercard_third_party_data_len);
+            printf("\r\n");
+        }
+    }
+    if(card.has_pin_try_counter) printf("  PIN tries       : %u\r\n", (unsigned)card.pin_try_counter);
+    if(card.has_application_transaction_counter)
+    {
+        printf("  ATC             : %u\r\n", (unsigned)card.application_transaction_counter);
+    }
+    if(card.has_last_online_atc)
+    {
+        printf("  Last online ATC : %u\r\n", (unsigned)card.last_online_atc);
+    }
+
+    if(card.gpo_succeeded)
+    {
+        printf("  Log entries     : %u\r\n", (unsigned)card.transaction_count);
+    }
+    for(size_t i = 0U; i < card.transaction_count; i++)
+    {
+        const poom_nfc_emv_transaction_t* transaction = &card.transactions[i];
+        printf("    %u", (unsigned)(i + 1U));
+        if(transaction->has_atc) printf(" ATC=%u", (unsigned)transaction->atc);
+        if(transaction->has_amount) printf(" amount=%llu", (unsigned long long)transaction->amount);
+        if(transaction->has_currency_code) printf(" currency=%04X", transaction->currency_code);
+        if(transaction->has_country_code) printf(" country=%04X", transaction->country_code);
+        if(transaction->has_date)
+        {
+            printf(" date=%02X%02X%02X",
+                   transaction->date[0],
+                   transaction->date[1],
+                   transaction->date[2]);
+        }
+        if(transaction->has_time)
+        {
+            printf(" time=%02X%02X%02X",
+                   transaction->time[0],
+                   transaction->time[1],
+                   transaction->time[2]);
+        }
+        printf("\r\n");
+    }
+
+    if(card.capture != NULL)
+    {
+        printf("  APDU exchanges  : %u%s\r\n",
+               (unsigned)card.capture->exchange_count,
+               card.capture->truncated ? " (capture truncated)" : "");
+    }
+
+    const int result = card.read_completed ? 0 : 1;
+    poom_nfc_emv_card_release(&card);
+    return result;
+}
+
 /**
  * @brief Internal helper for `cmd_nfc_send`.
  *
@@ -3876,6 +4135,14 @@ static void register_poom_nfc_cmds(void)
         .argtable = &nfc_emv_select_args,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_emv_select));
+
+    const esp_console_cmd_t nfc_emv_read = {
+        .command  = "nfc-emv-read",
+        .help     = "Read EMV GPO, AFL records, card data, counters, and optional transaction log.",
+        .hint     = NULL,
+        .func     = &cmd_nfc_emv_read,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nfc_emv_read));
 
     nfc_mfc_discover_args.try_b = arg_lit0("b", "try-b", "also try Key B per sector");
     nfc_mfc_discover_args.end   = arg_end(1);
