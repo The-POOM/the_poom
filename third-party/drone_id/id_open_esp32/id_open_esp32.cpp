@@ -232,7 +232,7 @@ void init_w(char* ssid,
   ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(wifi_power));
 
   // Establece el ancho de banda del canal
-  ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20));
+  ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW20));
 
   // Desactiva el modo de ahorro de energía
   ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));

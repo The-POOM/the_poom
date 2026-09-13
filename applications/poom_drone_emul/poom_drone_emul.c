@@ -656,7 +656,7 @@ static esp_err_t ensure_ap_for_raw_tx_(uint8_t channel)
         printf("[W] [%s] esp_wifi_set_protocol failed: %s\n", POOM_DRONE_EMUL_TAG, esp_err_to_name(err));
     }
 
-    err = esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    err = esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW20);
     if ((err != ESP_OK) && (err != ESP_ERR_NOT_SUPPORTED))
     {
         printf("[W] [%s] esp_wifi_set_bandwidth failed: %s\n", POOM_DRONE_EMUL_TAG, esp_err_to_name(err));
