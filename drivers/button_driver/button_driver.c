@@ -7,6 +7,7 @@
  */
 
 #include "button_driver.h"
+#include "button_gpio.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -218,7 +219,7 @@ static void button_register_callbacks_(button_handle_t button, uint8_t mask)
     for (i = 0U; i < (sizeof(s_registered_events) / sizeof(s_registered_events[0])); i++)
     {
         button_event_t payload = (button_event_t)(s_registered_events[i] | mask);
-        err |= iot_button_register_cb(button, s_registered_events[i], button_event_cb, (void *)(uintptr_t)payload);
+        err |= iot_button_register_cb(button, s_registered_events[i], NULL, button_event_cb, (void *)(uintptr_t)payload);
     }
 
     ESP_ERROR_CHECK(err);
@@ -229,19 +230,20 @@ static void button_register_callbacks_(button_handle_t button, uint8_t mask)
  */
 static void button_init_(uint32_t button_num, uint8_t mask)
 {
-    button_config_t btn_cfg = {
-        .type = BUTTON_TYPE_GPIO,
-        .short_press_time = BUTTON_SHORT_PRESS_TIME_MS_OVERRIDE,
-        .gpio_button_config =
-            {
-                .gpio_num = button_num,
-                .active_level = BUTTON_ACTIVE_LEVEL,
-            },
+    const button_config_t btn_cfg = { 
+        .short_press_time = BUTTON_SHORT_PRESS_TIME_MS_OVERRIDE 
     };
-    button_handle_t btn = iot_button_create(&btn_cfg);
 
-    assert(btn != NULL);
-    button_register_callbacks_(btn, mask);
+    const button_gpio_config_t btn_gpio_cfg = {
+        .gpio_num = button_num,
+        .active_level = BUTTON_ACTIVE_LEVEL,
+    };
+
+    button_handle_t gpio_btn = NULL;
+    esp_err_t ret = iot_button_new_gpio_device(&btn_cfg, &btn_gpio_cfg, &gpio_btn);
+
+    assert(gpio_btn != NULL);
+    button_register_callbacks_(gpio_btn, mask);
 }
 
 /**
