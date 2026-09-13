@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "1.0.0",
+  "catalog_version": "1.0.2",
   "target": "esp32c5",
   "platform": "POOM",
   "base_url": "https://poom.stellar-iot.com/esp32-games",
