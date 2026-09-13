@@ -10,6 +10,7 @@
 #define POOM_BOOT_POLICY_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -72,6 +73,33 @@ esp_err_t poom_boot_policy_set_preference(poom_boot_target_t target);
  * @return `false` if no game is installed or the state could not be confirmed.
  */
 bool poom_boot_policy_game_present(void);
+
+/**
+ * @brief Reads the catalog identity associated with the game currently in `ota_1`.
+ *
+ * @param[out] out_id Game catalog ID buffer.
+ * @param[in] out_id_len Size of `out_id`.
+ * @param[out] out_version Catalog version buffer.
+ * @param[in] out_version_len Size of `out_version`.
+ * @return `ESP_OK` when both values are available.
+ * @return `ESP_ERR_NOT_FOUND` for games installed before identity tracking or by another installer.
+ */
+esp_err_t poom_boot_policy_get_game_identity(char* out_id,
+                                             size_t out_id_len,
+                                             char* out_version,
+                                             size_t out_version_len);
+
+/**
+ * @brief Associates a catalog ID and version with the valid game in `ota_1`.
+ *
+ * @param[in] id Stable catalog game ID.
+ * @param[in] version Catalog game version.
+ * @return `ESP_OK` when both values were saved.
+ */
+esp_err_t poom_boot_policy_set_game_identity(const char* id, const char* version);
+
+/** @brief Removes any catalog identity associated with `ota_1`. */
+esp_err_t poom_boot_policy_clear_game_identity(void);
 
 /**
  * @brief Stores the logical game-presence state.

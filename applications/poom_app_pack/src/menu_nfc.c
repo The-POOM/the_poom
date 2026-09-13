@@ -122,6 +122,7 @@ typedef enum
 {
     MENU_NFC_OPT_SCAN = 0,
     MENU_NFC_OPT_EMULATE,
+    MENU_NFC_OPT_RESTORE,
     MENU_NFC_OPT_STORAGE,
     MENU_NFC_OPT_COUNT,
 } menu_nfc_opt_t;
@@ -138,6 +139,8 @@ typedef enum
     MENU_NFC_STATE_EMULATE_SOURCE,
     MENU_NFC_STATE_EMULATE_SD_LIST,
     MENU_NFC_STATE_EMULATE_RUNNING,
+    MENU_NFC_STATE_RESTORE_SD_LIST,
+    MENU_NFC_STATE_RESTORE_MODE,
     MENU_NFC_STATE_STORAGE_LIST,
     MENU_NFC_STATE_STORAGE_CONFIRM_DEL,
     MENU_NFC_STATE_STORAGE_CONFIRM_CLEAR,
@@ -147,6 +150,7 @@ typedef enum
 static const char *const k_opt_labels[MENU_NFC_OPT_COUNT] = {
     "SCAN",
     "EMULATE",
+    "RESTORE MFC",
     "STORAGE",
 };
 
@@ -154,6 +158,7 @@ static bool s_menu_nfc_active = false;
 static bool s_menu_nfc_buttons_subscribed = false;
 static bool s_menu_nfc_exit_requested = false;
 static bool s_menu_nfc_scan_requested = false;
+static bool s_menu_nfc_restore_requested = false;
 static TaskHandle_t s_menu_nfc_ui_task = NULL;
 static char s_menu_nfc_sbus_user[] = "menu_nfc";
 static bool s_menu_nfc_input_dirty = false;
@@ -256,6 +261,7 @@ static menu_nfc_state_t s_emu_running_return_state = MENU_NFC_STATE_EMULATE_LIST
 typedef enum
 {
     MENU_NFC_SD_ITEM_NFC_DUMP = 0,
+    MENU_NFC_SD_ITEM_MFC_DUMP,
 } menu_nfc_sd_item_kind_t;
 
 typedef struct
@@ -269,6 +275,8 @@ static menu_nfc_sd_item_t s_sd_dump_files[MENU_NFC_SD_MAX_FILES];
 static int s_sd_dump_count = 0;
 static int s_sd_dump_selected = 0;
 static int s_sd_dump_scroll = 0;
+static char s_restore_rel_path[96];
+static bool s_restore_write_trailers = false;
 
 static const char *menu_nfc_scan_card_short_(const poom_nfc_dump_t *dump);
 static const char *menu_nfc_mfr_abbr_(const poom_nfc_dump_t *dump);
@@ -287,6 +295,7 @@ static uint8_t menu_nfc_scan_total_info_lines_(void);
 static const char* menu_nfc_scan_info_line_at_(uint8_t idx);
 static void menu_nfc_emu_start_id_(
     const poom_nfc_card_id_t *id, bool from_sd, menu_nfc_state_t fail_return_state);
+static void menu_nfc_run_restore_(void);
 static void menu_nfc_set_info_return_(
     const char *l0, const char *l1, menu_nfc_state_t return_state);
 static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
@@ -1133,7 +1142,7 @@ static void menu_nfc_draw_busy_(const char* line0, const char* line1)
  * @return void
  */
 static void menu_nfc_draw_busy_progress_(
-    const char* line0, const char* line1, uint8_t step, uint8_t total)
+    const char* line0, const char* line1, uint16_t step, uint16_t total)
 {
     uint8_t fill_w = 0U;
 
@@ -3098,6 +3107,29 @@ static bool menu_nfc_sd_file_has_page_dump_(const char *rel_path)
     return has_pages;
 }
 
+static bool menu_nfc_sd_file_is_mfc_dump_(const char* rel_path)
+{
+    char abs_path[128];
+    char line[160];
+    FILE* file;
+    bool is_classic = false;
+
+    if(rel_path == NULL) return false;
+    (void)snprintf(abs_path, sizeof(abs_path), "%s%s", SD_CARD_PATH, rel_path);
+    file = fopen(abs_path, "r");
+    if(file == NULL) return false;
+    while(fgets(line, sizeof(line), file) != NULL)
+    {
+        if(strstr(line, "Device type: Mifare Classic") != NULL)
+        {
+            is_classic = true;
+            break;
+        }
+    }
+    (void)fclose(file);
+    return is_classic;
+}
+
 /**
  * @brief Internal helper for `menu_nfc_sd_add_item`.
  *
@@ -3129,7 +3161,6 @@ static void menu_nfc_sd_add_item_(const char *name, const char *rel_path, menu_n
  */
 static void menu_nfc_sd_load_items_(menu_nfc_sd_item_kind_t kind_filter)
 {
-    (void)kind_filter;
     s_sd_dump_count = 0;
     s_sd_dump_selected = 0;
     s_sd_dump_scroll = 0;
@@ -3143,50 +3174,47 @@ static void menu_nfc_sd_load_items_(menu_nfc_sd_item_kind_t kind_filter)
         }
     }
 
-    char dir_path[96];
-    (void)snprintf(dir_path, sizeof(dir_path), "%s/nfc_dumps", SD_CARD_PATH);
-
-    DIR *dir = opendir(dir_path);
-    if(dir == NULL)
     {
-        return;
+        static const char dump_dir[] = "/nfc";
+        char dir_path[96];
+        DIR *dir;
+        struct dirent *ent;
+
+        (void)snprintf(dir_path, sizeof(dir_path), "%s%s", SD_CARD_PATH, dump_dir);
+        dir = opendir(dir_path);
+        if(dir == NULL)
+        {
+            return;
+        }
+        while((ent = readdir(dir)) != NULL)
+        {
+            const char *name;
+            size_t name_len;
+            char rel_path[96];
+            const size_t prefix_len = sizeof(dump_dir) - 1U;
+
+            if(ent->d_name[0] == '.')
+                continue;
+            name = ent->d_name;
+            name_len = strlen(name);
+            if(name_len < 4U || !menu_nfc_path_has_ext_(name, ".nfc"))
+                continue;
+
+            if((prefix_len + 1U + name_len + 1U) > sizeof(rel_path))
+                continue;
+            (void)memcpy(rel_path, dump_dir, prefix_len);
+            rel_path[prefix_len] = '/';
+            (void)memcpy(&rel_path[prefix_len + 1U], name, name_len);
+            rel_path[prefix_len + 1U + name_len] = '\0';
+            if(kind_filter == MENU_NFC_SD_ITEM_MFC_DUMP &&
+               !menu_nfc_sd_file_is_mfc_dump_(rel_path))
+            {
+                continue;
+            }
+            menu_nfc_sd_add_item_(name, rel_path, kind_filter);
+        }
+        (void)closedir(dir);
     }
-
-    struct dirent *ent;
-    while((ent = readdir(dir)) != NULL)
-    {
-        if(ent->d_name[0] == '.')
-        {
-            continue;
-        }
-
-        const char *name = ent->d_name;
-        const size_t name_len = strlen(name);
-        if(name_len < 4U)
-        {
-            continue;
-        }
-
-        if(!menu_nfc_path_has_ext_(name, ".nfc"))
-        {
-            continue;
-        }
-
-        char rel_path[96];
-        static const char prefix[] = "/nfc_dumps/";
-        const size_t plen = sizeof(prefix) - 1U;
-        if((plen + name_len + 1U) > sizeof(rel_path))
-        {
-            continue;
-        }
-        (void)memcpy(rel_path, prefix, plen);
-        (void)memcpy(&rel_path[plen], name, name_len);
-        rel_path[plen + name_len] = '\0';
-
-        menu_nfc_sd_add_item_(name, rel_path, kind_filter);
-    }
-
-    (void)closedir(dir);
 
     if(s_sd_dump_count > 1)
     {
@@ -3203,12 +3231,13 @@ static void menu_nfc_sd_load_items_(menu_nfc_sd_item_kind_t kind_filter)
 static void menu_nfc_draw_emulate_sd_list_(void)
 {
     const int count = s_sd_dump_count;
+    const bool restore = s_state == MENU_NFC_STATE_RESTORE_SD_LIST;
 
     if(count <= 0)
     {
-        menu_nfc_draw_frame_("NFC");
+        menu_nfc_draw_frame_(restore ? "RESTORE" : "NFC");
         poom_arduboy_set_cursor(6, 30);
-        (void)poom_arduboy_print(F("No SD dumps"));
+        (void)poom_arduboy_print(restore ? F("No Classic dumps") : F("No SD dumps"));
         poom_arduboy_set_cursor(72, 56);
         (void)poom_arduboy_print(F("B:BACK"));
         poom_arduboy_display();
@@ -3226,7 +3255,7 @@ static void menu_nfc_draw_emulate_sd_list_(void)
     if(s_sd_dump_scroll < 0) s_sd_dump_scroll = 0;
     if(s_sd_dump_scroll > max_scroll) s_sd_dump_scroll = max_scroll;
 
-    menu_nfc_draw_frame_("NFC");
+    menu_nfc_draw_frame_(restore ? "RESTORE" : "NFC");
 
     for(int row = 0; row < VISIBLE_ROWS; row++)
     {
@@ -3239,7 +3268,8 @@ static void menu_nfc_draw_emulate_sd_list_(void)
         const int16_t y = (int16_t)(LIST_Y0 + row * ROW_STEP);
         poom_arduboy_set_cursor(2, y);
         char line[22];
-        (void)snprintf(line, sizeof(line), "NFC:%.17s", s_sd_dump_files[idx].name);
+        (void)snprintf(line, sizeof(line), "%s:%.17s",
+                       restore ? "MFC" : "NFC", s_sd_dump_files[idx].name);
         (void)poom_arduboy_print(line);
 
         if(idx == s_sd_dump_selected)
@@ -3250,6 +3280,30 @@ static void menu_nfc_draw_emulate_sd_list_(void)
 
     poom_arduboy_set_cursor(0, 56);
     (void)poom_arduboy_print(F("A:SEL"));
+    poom_arduboy_set_cursor(72, 56);
+    (void)poom_arduboy_print(F("B:BACK"));
+    poom_arduboy_display();
+}
+
+static void menu_nfc_draw_restore_mode_(void)
+{
+    menu_nfc_draw_frame_("RESTORE");
+
+    poom_arduboy_set_cursor(4, 17);
+    (void)poom_arduboy_print(F("DATA ONLY"));
+    if(!s_restore_write_trailers)
+        poom_arduboy_fill_rect(0, 16, ARDUBOY_WIDTH, ROW_HILITE_H, INVERT);
+
+    poom_arduboy_set_cursor(4, 29);
+    (void)poom_arduboy_print(F("FULL + KEYS"));
+    if(s_restore_write_trailers)
+        poom_arduboy_fill_rect(0, 28, ARDUBOY_WIDTH, ROW_HILITE_H, INVERT);
+
+    poom_arduboy_set_cursor(4, 42);
+    (void)poom_arduboy_print(s_restore_write_trailers ? F("Writes access bits")
+                                                       : F("Skips sector keys"));
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(F("A:START"));
     poom_arduboy_set_cursor(72, 56);
     (void)poom_arduboy_print(F("B:BACK"));
     poom_arduboy_display();
@@ -3420,8 +3474,20 @@ static void menu_nfc_draw_emulate_list_(void)
  */
 static void menu_nfc_draw_emulate_running_(void)
 {
+    poom_nfc_emu_cfg_t emu_cfg;
+    const char *mode_label = "NFC-A";
+
     menu_nfc_draw_frame_("NFC");
 
+    poom_nfc_emulator_get_config(&emu_cfg);
+    if(emu_cfg.mode == POOM_NFC_EMU_MODE_T4T)
+    {
+        mode_label = "T4T";
+    }
+    else if(emu_cfg.mode == POOM_NFC_EMU_MODE_MFUL)
+    {
+        mode_label = "MFUL";
+    }
     char uid[POOM_NFC_CARD_UID_MAX * 2U + 1U];
     uid[0] = '\0';
 
@@ -3431,7 +3497,11 @@ static void menu_nfc_draw_emulate_running_(void)
     }
 
     poom_arduboy_set_cursor(4, MENU_NFC_INFO_Y0);
-    (void)poom_arduboy_print(F("Emulating..."));
+    {
+        char mode_line[22];
+        (void)snprintf(mode_line, sizeof(mode_line), "Emulating %s...", mode_label);
+        (void)poom_arduboy_print(mode_line);
+    }
 
     poom_arduboy_set_cursor(2, (int16_t)(MENU_NFC_INFO_Y0 + MENU_NFC_INFO_STEP));
     if (s_emu_active_id_valid)
@@ -3819,6 +3889,117 @@ static void menu_nfc_emu_start_selected_(void)
 
     const poom_nfc_card_id_t *id = &s_store_cache.cards[s_store_selected];
     menu_nfc_emu_start_id_(id, false, MENU_NFC_STATE_EMULATE_LIST);
+}
+
+static void menu_nfc_restore_progress_(uint16_t completed,
+                                        uint16_t total,
+                                        uint8_t block,
+                                        void* user_ctx)
+{
+    char detail[22];
+    (void)user_ctx;
+    (void)snprintf(detail, sizeof(detail), "Block %u", (unsigned)block);
+    menu_nfc_draw_busy_progress_("RESTORE MFC", detail, completed, total);
+}
+
+static void menu_nfc_run_restore_(void)
+{
+    poom_nfc_dump_t* target;
+    poom_mifare_restore_result_t result = {0};
+    poom_mifare_restore_status_t status;
+    nfc_card_type_t card_type;
+    uint16_t target_blocks = 0U;
+    char line0[22];
+    char line1[22];
+
+    target = (poom_nfc_dump_t*)calloc(1U, sizeof(*target));
+    if(target == NULL)
+    {
+        menu_nfc_set_info_return_("No RAM for restore", "", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+
+    menu_nfc_draw_busy_progress_("RESTORE MFC", "Scan target card", 0U, 1U);
+    if(!poom_nfc_controller_capture_dump(MENU_NFC_SCAN_TIMEOUT_MS, target))
+    {
+        poom_nfc_controller_stop();
+        free(target);
+        menu_nfc_set_info_return_("Target not found", "Hold card near", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+    card_type = menu_nfc_scan_type_from_dump_(target);
+    if(!poom_mifare_classic_is_supported_card(card_type))
+    {
+        poom_nfc_controller_stop();
+        free(target);
+        menu_nfc_set_info_return_("Not MIFARE Classic", "Wrong target card", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+
+    menu_nfc_draw_busy_progress_("RESTORE MFC", "Discovering keys", 0U, 1U);
+    if(!poom_nfc_controller_connect() ||
+       !poom_mifare_classic_bind_card(target->id.uid, target->id.uid_len, card_type))
+    {
+        poom_nfc_controller_stop();
+        free(target);
+        menu_nfc_set_info_return_("Connect failed", "Hold card steady", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+    target_blocks = (uint16_t)(poom_mifare_classic_get_max_block() + 1U);
+    status = poom_mifare_classic_restore_file(
+        s_restore_rel_path,
+        s_restore_write_trailers,
+        &result,
+        menu_nfc_restore_progress_,
+        NULL);
+    poom_nfc_controller_stop();
+    free(target);
+
+    printf("  mifare restore: status=%d source=%u compared=%u same=%u written=%u "
+           "verified=%u skipped=%u failed=%u trailers=%u block0_diff=%s\r\n",
+           (int)status,
+           (unsigned)result.source_blocks,
+           (unsigned)result.compared,
+           (unsigned)result.unchanged,
+           (unsigned)result.written,
+           (unsigned)result.verified,
+           (unsigned)result.skipped,
+           (unsigned)result.failed,
+           (unsigned)result.trailers_written,
+           result.block0_different ? "yes" : "no");
+
+    if(status == POOM_MIFARE_RESTORE_INVALID_FILE)
+    {
+        menu_nfc_set_info_return_("Invalid Classic dump", "", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+    if(status == POOM_MIFARE_RESTORE_SIZE_MISMATCH)
+    {
+        (void)snprintf(line1, sizeof(line1), "File:%u Card:%u",
+                       (unsigned)result.source_blocks, (unsigned)target_blocks);
+        menu_nfc_set_info_return_("Size mismatch", line1, MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+    if(status == POOM_MIFARE_RESTORE_NO_MEMORY)
+    {
+        menu_nfc_set_info_return_("No PSRAM for dump", "", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+    if(status == POOM_MIFARE_RESTORE_NO_CARD)
+    {
+        menu_nfc_set_info_return_("Card disconnected", "Try again", MENU_NFC_STATE_RESTORE_SD_LIST);
+        return;
+    }
+
+    (void)snprintf(line0, sizeof(line0), "W%u S%u V%u",
+                   (unsigned)result.written,
+                   (unsigned)result.unchanged,
+                   (unsigned)result.verified);
+    (void)snprintf(line1, sizeof(line1), "F%u K%u%s",
+                   (unsigned)result.failed,
+                   (unsigned)result.skipped,
+                   result.block0_different ? " B0" : "");
+    menu_nfc_set_info_return_(line0, line1, MENU_NFC_STATE_RESTORE_SD_LIST);
 }
 
 /**
@@ -4676,6 +4857,7 @@ static void menu_nfc_exit_(void)
     s_menu_nfc_active = false;
     s_menu_nfc_exit_requested = false;
     s_menu_nfc_scan_requested = false;
+    s_menu_nfc_restore_requested = false;
 
     poom_nfc_emulator_stop();
     poom_nfc_controller_stop();
@@ -4744,6 +4926,14 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         else if ((s_state == MENU_NFC_STATE_EMULATE_LIST) || (s_state == MENU_NFC_STATE_EMULATE_SD_LIST))
         {
             s_state = MENU_NFC_STATE_EMULATE_SOURCE;
+        }
+        else if(s_state == MENU_NFC_STATE_RESTORE_MODE)
+        {
+            s_state = MENU_NFC_STATE_RESTORE_SD_LIST;
+        }
+        else if(s_state == MENU_NFC_STATE_RESTORE_SD_LIST)
+        {
+            s_state = MENU_NFC_STATE_MAIN;
         }
         else if (s_state == MENU_NFC_STATE_SCAN_INFO)
         {
@@ -4823,6 +5013,11 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
             {
                 s_emu_source_sel = MENU_NFC_EMU_SRC_EMBEDDED;
                 s_state = MENU_NFC_STATE_EMULATE_SOURCE;
+            }
+            else if(s_opt == MENU_NFC_OPT_RESTORE)
+            {
+                menu_nfc_sd_load_items_(MENU_NFC_SD_ITEM_MFC_DUMP);
+                s_state = MENU_NFC_STATE_RESTORE_SD_LIST;
             }
             else if (s_opt == MENU_NFC_OPT_STORAGE)
             {
@@ -5091,6 +5286,46 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         return;
     }
 
+    if(s_state == MENU_NFC_STATE_RESTORE_SD_LIST)
+    {
+        if(ev.button == BTN_UP)
+        {
+            s_sd_dump_selected--;
+            menu_nfc_request_redraw_();
+        }
+        else if(ev.button == BTN_DOWN)
+        {
+            s_sd_dump_selected++;
+            menu_nfc_request_redraw_();
+        }
+        else if(ev.button == BTN_A && s_sd_dump_selected >= 0 &&
+                s_sd_dump_selected < s_sd_dump_count)
+        {
+            (void)snprintf(s_restore_rel_path, sizeof(s_restore_rel_path), "%s",
+                           s_sd_dump_files[s_sd_dump_selected].rel_path);
+            s_restore_write_trailers = false;
+            s_state = MENU_NFC_STATE_RESTORE_MODE;
+            menu_nfc_request_redraw_();
+        }
+        return;
+    }
+
+    if(s_state == MENU_NFC_STATE_RESTORE_MODE)
+    {
+        if(ev.button == BTN_UP || ev.button == BTN_DOWN ||
+           ev.button == BTN_LEFT || ev.button == BTN_RIGHT)
+        {
+            s_restore_write_trailers = !s_restore_write_trailers;
+            menu_nfc_request_redraw_();
+        }
+        else if(ev.button == BTN_A)
+        {
+            s_menu_nfc_restore_requested = true;
+            menu_nfc_request_redraw_();
+        }
+        return;
+    }
+
     if ((s_state == MENU_NFC_STATE_STORAGE_CONFIRM_DEL) || (s_state == MENU_NFC_STATE_STORAGE_CONFIRM_CLEAR))
     {
         if ((ev.button == BTN_LEFT) || (ev.button == BTN_RIGHT))
@@ -5161,6 +5396,12 @@ static void menu_nfc_ui_task_(void *arg)
             menu_nfc_run_scan_();
         }
 
+        if(s_menu_nfc_restore_requested)
+        {
+            s_menu_nfc_restore_requested = false;
+            menu_nfc_run_restore_();
+        }
+
         if (s_menu_nfc_input_dirty)
         {
             switch (s_state)
@@ -5175,6 +5416,8 @@ static void menu_nfc_ui_task_(void *arg)
                 case MENU_NFC_STATE_EMULATE_SOURCE:       menu_nfc_draw_emulate_source_(); break;
                 case MENU_NFC_STATE_EMULATE_SD_LIST:      menu_nfc_draw_emulate_sd_list_(); break;
                 case MENU_NFC_STATE_EMULATE_RUNNING:      menu_nfc_draw_emulate_running_(); break;
+                case MENU_NFC_STATE_RESTORE_SD_LIST:      menu_nfc_draw_emulate_sd_list_(); break;
+                case MENU_NFC_STATE_RESTORE_MODE:         menu_nfc_draw_restore_mode_(); break;
                 case MENU_NFC_STATE_STORAGE_LIST:         menu_nfc_draw_storage_list_(); break;
                 case MENU_NFC_STATE_STORAGE_CONFIRM_DEL:  menu_nfc_draw_confirm_("Delete selected?"); break;
                 case MENU_NFC_STATE_STORAGE_CONFIRM_CLEAR: menu_nfc_draw_confirm_("Clear ALL cards?"); break;

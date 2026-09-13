@@ -53,6 +53,7 @@
 #include "menu_nfc.h"
 #include "menu_picopass.h"
 #include "menu_poom_boot_policy.h"
+#include "menu_poom_game_store.h"
 #include "menu_nfc_tuning.h"
 #include "menu_plot.h"
 #include "menu_poom_pcap.h"
@@ -637,6 +638,14 @@ static void action_game_slot_(void)
     menu_poom_boot_policy_show();
 }
 
+/** Opens the HTTPS game catalog and SD downloader. */
+static void action_game_store_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_poom_game_store_show();
+}
+
 /**
  * @brief Internal helper for `action_tiny_control`.
  *
@@ -914,6 +923,7 @@ static const poom_menu_item_t s_apps_zen[] = {
 
 static const poom_menu_item_t s_apps_gamer[] = {
     {"GAME SLOT", action_game_slot_},
+    {"GAME STORE", action_game_store_},
     //{"BREAKOUT", action_breakout_},
     {"TINY CONTROL", action_tiny_control_},
     {"WII", action_wii_},

@@ -24,6 +24,7 @@ set(POOM_APP_PACK_REQUIRES
     poom_cli
     driver
     esp_app_format
+    esp_system
     i2c
     ir
     poom_nfc
@@ -43,6 +44,7 @@ set(POOM_APP_PACK_REQUIRES
     poom_web
     poom_edge_impulse
     poom_fw_update
+    poom_game_store
     poom_http_load_test
 	    poom_imu_stream
 	    poom_lua

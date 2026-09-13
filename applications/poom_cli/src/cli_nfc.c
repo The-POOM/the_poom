@@ -2034,7 +2034,7 @@ static int cmd_nfc_emul_show(int argc, char** argv)
 
     if(cfg.mode == POOM_NFC_EMU_MODE_MFUL)
     {
-        printf("  uri = <ignored in mful mode>\r\n");
+        printf("  uri = <ignored in selected mode>\r\n");
     }
     else
     {
@@ -2243,6 +2243,8 @@ static int cmd_nfc_cards_list(int argc, char** argv)
  */
 static bool poom_apply_profile_to_emulator_(const poom_nfc_profile_t* p, bool reset_first)
 {
+    poom_nfc_emu_mode_t mode;
+
     if(p == NULL || p->uid_len == 0U)
     {
         return false;
@@ -2253,7 +2255,14 @@ static bool poom_apply_profile_to_emulator_(const poom_nfc_profile_t* p, bool re
         poom_nfc_emulator_reset_config();
     }
 
-    if(!poom_nfc_emulator_set_mode(p->mode))
+    /* Profiles written while the removed full Classic emulator existed used
+     * the next enum value. Preserve their NFC-A identity as MODE_3A. */
+    mode = p->mode;
+    if(mode > POOM_NFC_EMU_MODE_MFUL)
+    {
+        mode = POOM_NFC_EMU_MODE_3A;
+    }
+    if(!poom_nfc_emulator_set_mode(mode))
     {
         return false;
     }

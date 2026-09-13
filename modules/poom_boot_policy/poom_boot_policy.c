@@ -25,12 +25,15 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "poom_secrets_store.h"
 #include "sd_card.h"
 
 #define POOM_BOOT_POLICY_TAG "poom_boot_policy"
 
 #define POOM_BOOT_POLICY_KEY_GAME    "game_pres"
+#define POOM_BOOT_POLICY_KEY_GAME_ID "game_id"
+#define POOM_BOOT_POLICY_KEY_GAME_VER "game_ver"
 #define POOM_BOOT_POLICY_APPS_DIR    "/sdcard/apps"
 #define POOM_BOOT_POLICY_BUFFER_SIZE (4096U)
 
@@ -296,6 +299,94 @@ bool poom_boot_policy_game_present(void)
 }
 
 /**
+ * @copydoc poom_boot_policy_get_game_identity
+ */
+esp_err_t poom_boot_policy_get_game_identity(char* out_id,
+                                             size_t out_id_len,
+                                             char* out_version,
+                                             size_t out_version_len)
+{
+    size_t id_len = out_id_len;
+    size_t version_len = out_version_len;
+    esp_err_t err;
+
+    if((out_id == NULL) || (out_id_len == 0U) ||
+       (out_version == NULL) || (out_version_len == 0U))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out_id[0] = '\0';
+    out_version[0] = '\0';
+
+    err = poom_secrets_init();
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    err = poom_secrets_get_str(POOM_BOOT_POLICY_KEY_GAME_ID, out_id, &id_len);
+    if(err != ESP_OK)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+    err = poom_secrets_get_str(POOM_BOOT_POLICY_KEY_GAME_VER, out_version, &version_len);
+    if((err != ESP_OK) || (out_id[0] == '\0') || (out_version[0] == '\0'))
+    {
+        out_id[0] = '\0';
+        out_version[0] = '\0';
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
+}
+
+/**
+ * @copydoc poom_boot_policy_set_game_identity
+ */
+esp_err_t poom_boot_policy_set_game_identity(const char* id, const char* version)
+{
+    esp_err_t err;
+
+    if((id == NULL) || (id[0] == '\0') || (version == NULL) || (version[0] == '\0'))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if(!poom_boot_policy_game_present())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    err = poom_secrets_set_str(POOM_BOOT_POLICY_KEY_GAME_ID, id);
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    err = poom_secrets_set_str(POOM_BOOT_POLICY_KEY_GAME_VER, version);
+    if(err != ESP_OK)
+    {
+        (void)poom_secrets_erase_key(POOM_BOOT_POLICY_KEY_GAME_ID);
+    }
+    return err;
+}
+
+/**
+ * @copydoc poom_boot_policy_clear_game_identity
+ */
+esp_err_t poom_boot_policy_clear_game_identity(void)
+{
+    esp_err_t id_err = poom_secrets_erase_key(POOM_BOOT_POLICY_KEY_GAME_ID);
+    esp_err_t version_err = poom_secrets_erase_key(POOM_BOOT_POLICY_KEY_GAME_VER);
+
+    if(id_err == ESP_ERR_NVS_NOT_FOUND)
+    {
+        id_err = ESP_OK;
+    }
+    if(version_err == ESP_ERR_NVS_NOT_FOUND)
+    {
+        version_err = ESP_OK;
+    }
+    return (id_err != ESP_OK) ? id_err : version_err;
+}
+
+/**
  * @copydoc poom_boot_policy_set_game_present
  */
 esp_err_t poom_boot_policy_set_game_present(bool present)
@@ -475,6 +566,12 @@ esp_err_t poom_boot_policy_install(const char* path)
     }
 
     err = poom_boot_policy_refresh_game_present_();
+
+    if(err == ESP_OK)
+    {
+        /* A generic install must invalidate metadata from the previous game. */
+        (void)poom_boot_policy_clear_game_identity();
+    }
 
 cleanup:
     if(ota_started)
