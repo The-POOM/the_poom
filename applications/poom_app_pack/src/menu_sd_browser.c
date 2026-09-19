@@ -3,15 +3,20 @@
 
 #include "menu_sd_browser.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "Arduboy2.h"
 #include "button_driver.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "input_events.h"
@@ -34,6 +39,10 @@
 #define MENU_SD_ROW_HILITE_H    (9)
 #define MENU_SD_STATUS_LINE_MAX (22U)
 #define MENU_SD_VISIBLE_ROWS    (3U)
+#define MENU_SD_APPS_PATH       "/sdcard/apps"
+#define MENU_SD_APPS_FATFS_PATH "/apps"
+#define MENU_SD_CLEAN_PATH_MAX  (512U)
+#define MENU_SD_CLEAN_MAX_DEPTH (8U)
 
 #ifndef BTN_A
 #define BTN_A (0U)
@@ -75,6 +84,7 @@ typedef enum
     MENU_SD_OPT_BROWSE = 0,
     MENU_SD_OPT_CHECK,
     MENU_SD_OPT_INFO,
+    MENU_SD_OPT_APP_CLEAN,
     MENU_SD_OPT_FORMAT,
     MENU_SD_OPT_COUNT,
 } menu_sd_opt_t;
@@ -95,6 +105,7 @@ typedef struct
     volatile bool browse_requested;
     volatile bool check_requested;
     volatile bool info_requested;
+    volatile bool app_clean_requested;
     volatile bool format_requested;
     TaskHandle_t task;
     menu_sd_state_t state;
@@ -204,6 +215,7 @@ static const char* menu_sd_opt_label_(menu_sd_opt_t opt)
         case MENU_SD_OPT_BROWSE: return "BROWSE FILES";
         case MENU_SD_OPT_CHECK:  return "CHECK CARD";
         case MENU_SD_OPT_INFO:   return "CARD INFO";
+        case MENU_SD_OPT_APP_CLEAN: return "APP CLEAN";
         case MENU_SD_OPT_FORMAT: return "FORMAT CARD";
         default:                 return "";
     }
@@ -275,35 +287,39 @@ static void menu_sd_draw_result_(const menu_sd_ctx_t* ctx)
 static void menu_sd_draw_confirm_(const menu_sd_ctx_t* ctx)
 {
     const int16_t sel_y = 46;
+    const bool app_clean = (ctx != NULL) && (ctx->opt == MENU_SD_OPT_APP_CLEAN);
 
     if(ctx == NULL)
     {
         return;
     }
 
-    menu_sd_draw_frame_("FORMAT SD");
+    menu_sd_draw_frame_(app_clean ? "APP CLEAN" : "FORMAT SD");
 
     poom_arduboy_set_cursor(12, 20);
-    (void)poom_arduboy_print(F("FORMAT SD CARD?"));
+    (void)poom_arduboy_print(app_clean ? F("DELETE SD APPS?") : F("FORMAT SD CARD?"));
     poom_arduboy_set_cursor(12, 32);
-    (void)poom_arduboy_print(F("ERASE ALL DATA"));
+    (void)poom_arduboy_print(app_clean ? F("GAMES + COVERS") : F("ERASE ALL DATA"));
 
-    poom_arduboy_set_cursor(34, sel_y);
-    (void)poom_arduboy_print(F("YES"));
-    poom_arduboy_set_cursor(84, sel_y);
-    (void)poom_arduboy_print(F("NO"));
+    if(!app_clean)
+    {
+        poom_arduboy_set_cursor(34, sel_y);
+        (void)poom_arduboy_print(F("YES"));
+        poom_arduboy_set_cursor(84, sel_y);
+        (void)poom_arduboy_print(F("NO"));
 
-    if(ctx->confirm_yes)
-    {
-        poom_arduboy_fill_rect(32, (int16_t)(sel_y - 1), 24, MENU_SD_ROW_HILITE_H, INVERT);
-    }
-    else
-    {
-        poom_arduboy_fill_rect(82, (int16_t)(sel_y - 1), 18, MENU_SD_ROW_HILITE_H, INVERT);
+        if(ctx->confirm_yes)
+        {
+            poom_arduboy_fill_rect(32, (int16_t)(sel_y - 1), 24, MENU_SD_ROW_HILITE_H, INVERT);
+        }
+        else
+        {
+            poom_arduboy_fill_rect(82, (int16_t)(sel_y - 1), 18, MENU_SD_ROW_HILITE_H, INVERT);
+        }
     }
 
     poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print(F("A:OK"));
+    (void)poom_arduboy_print(app_clean ? F("A:CLEAN") : F("A:OK"));
     poom_arduboy_set_cursor(72, 56);
     (void)poom_arduboy_print(F("B:BACK"));
     poom_arduboy_display();
@@ -400,6 +416,135 @@ static void menu_sd_set_mount_status_(menu_sd_ctx_t* ctx, esp_err_t err, bool fo
 static esp_err_t menu_sd_create_dir_(const char* path)
 {
     return sd_card_create_dir(path);
+}
+
+static esp_err_t menu_sd_remove_dir_contents_(char* path, size_t path_size, uint8_t depth)
+{
+    size_t parent_len;
+
+    if((path == NULL) || (depth > MENU_SD_CLEAN_MAX_DEPTH))
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    parent_len = strlen(path);
+    for(;;)
+    {
+        DIR* dir = opendir(path);
+        struct dirent* entry;
+        struct stat st;
+        bool found = false;
+        int written = 0;
+
+        if(dir == NULL)
+        {
+            return (errno == ENOENT) ? ESP_OK : ESP_FAIL;
+        }
+
+        while((entry = readdir(dir)) != NULL)
+        {
+            if((strcmp(entry->d_name, ".") == 0) || (strcmp(entry->d_name, "..") == 0))
+            {
+                continue;
+            }
+
+            written = snprintf(path + parent_len, path_size - parent_len, "/%s", entry->d_name);
+            found = true;
+            break;
+        }
+        (void)closedir(dir);
+
+        if(!found)
+        {
+            path[parent_len] = '\0';
+            return ESP_OK;
+        }
+        if((written < 0) || ((size_t)written >= (path_size - parent_len)))
+        {
+            path[parent_len] = '\0';
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if(stat(path, &st) != 0)
+        {
+            path[parent_len] = '\0';
+            return ESP_FAIL;
+        }
+
+        if(S_ISDIR(st.st_mode))
+        {
+            esp_err_t err = menu_sd_remove_dir_contents_(path, path_size, (uint8_t)(depth + 1U));
+            if((err != ESP_OK) || (rmdir(path) != 0))
+            {
+                path[parent_len] = '\0';
+                return (err != ESP_OK) ? err : ESP_FAIL;
+            }
+        }
+        else if(unlink(path) != 0)
+        {
+            path[parent_len] = '\0';
+            return ESP_FAIL;
+        }
+
+        path[parent_len] = '\0';
+    }
+}
+
+static esp_err_t menu_sd_clean_apps_(void)
+{
+    struct stat st;
+    esp_err_t err;
+    char* clean_path = NULL;
+
+    sd_card_begin();
+    if(sd_card_is_not_mounted())
+    {
+        err = sd_card_mount();
+        if(err != ESP_OK)
+        {
+            return err;
+        }
+    }
+
+    clean_path = (char*)heap_caps_malloc(MENU_SD_CLEAN_PATH_MAX,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if(clean_path == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    (void)snprintf(clean_path, MENU_SD_CLEAN_PATH_MAX, "%s", MENU_SD_APPS_PATH);
+    if(stat(clean_path, &st) == 0)
+    {
+        if(S_ISDIR(st.st_mode))
+        {
+            err = menu_sd_remove_dir_contents_(clean_path, MENU_SD_CLEAN_PATH_MAX, 0U);
+            if(err != ESP_OK)
+            {
+                goto cleanup;
+            }
+            if(rmdir(MENU_SD_APPS_PATH) != 0)
+            {
+                err = ESP_FAIL;
+                goto cleanup;
+            }
+        }
+        else if(unlink(MENU_SD_APPS_PATH) != 0)
+        {
+            err = ESP_FAIL;
+            goto cleanup;
+        }
+    }
+    else if(errno != ENOENT)
+    {
+        err = ESP_FAIL;
+        goto cleanup;
+    }
+
+    err = menu_sd_create_dir_(MENU_SD_APPS_FATFS_PATH);
+
+cleanup:
+    heap_caps_free(clean_path);
+    return err;
 }
 
 static esp_err_t menu_sd_ensure_default_dirs_(void)
@@ -580,6 +725,19 @@ static void menu_sd_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx)
 
     if(ctx->state == MENU_SD_STATE_CONFIRM)
     {
+        if(ctx->opt == MENU_SD_OPT_APP_CLEAN)
+        {
+            if((ev.button == BTN_B) || (ev.button == BTN_LEFT))
+            {
+                ctx->state = MENU_SD_STATE_MAIN;
+            }
+            else if((ev.button == BTN_A) || (ev.button == BTN_RIGHT))
+            {
+                ctx->app_clean_requested = true;
+            }
+            return;
+        }
+
         if((ev.button == BTN_UP) || (ev.button == BTN_DOWN))
         {
             ctx->confirm_yes = !ctx->confirm_yes;
@@ -595,7 +753,14 @@ static void menu_sd_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx)
         {
             if(ctx->confirm_yes)
             {
-                ctx->format_requested = true;
+                if(ctx->opt == MENU_SD_OPT_APP_CLEAN)
+                {
+                    ctx->app_clean_requested = true;
+                }
+                else
+                {
+                    ctx->format_requested = true;
+                }
             }
             else
             {
@@ -678,6 +843,32 @@ static void menu_sd_task_(void* arg)
             ctx->state = MENU_SD_STATE_RESULT;
         }
 
+        if(ctx->app_clean_requested)
+        {
+            ctx->app_clean_requested = false;
+            ctx->confirm_yes = false;
+            menu_sd_set_status_lines_(ctx, "CLEANING APPS...", "PLEASE WAIT");
+            menu_sd_draw_result_(ctx);
+            err = menu_sd_clean_apps_();
+            if(err == ESP_OK)
+            {
+                menu_sd_set_status_lines_(ctx, "APPS CLEANED", "FOLDER READY");
+            }
+            else if(err == ESP_ERR_NOT_SUPPORTED)
+            {
+                menu_sd_set_status_lines_(ctx, "BAD FILESYSTEM", "USE FORMAT CARD");
+            }
+            else if(err == ESP_ERR_NOT_FOUND)
+            {
+                menu_sd_set_status_lines_(ctx, "CANNOT ACCESS", "CHECK SD CARD");
+            }
+            else
+            {
+                menu_sd_set_status_lines_(ctx, "CLEAN FAILED", "TRY AGAIN");
+            }
+            ctx->state = MENU_SD_STATE_RESULT;
+        }
+
         if(ctx->state == MENU_SD_STATE_INFO)
         {
             menu_sd_draw_info_();
@@ -721,6 +912,7 @@ void app_sd_browser_menu(void)
     s_menu_sd->browse_requested = false;
     s_menu_sd->check_requested = false;
     s_menu_sd->info_requested = false;
+    s_menu_sd->app_clean_requested = false;
     s_menu_sd->format_requested = false;
     s_menu_sd->state = MENU_SD_STATE_MAIN;
     s_menu_sd->opt = MENU_SD_OPT_BROWSE;

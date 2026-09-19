@@ -24,9 +24,11 @@ set(POOM_APP_PACK_REQUIRES
     poom_cli
     driver
     esp_app_format
+    esp_http_client
     esp_system
     i2c
     ir
+    mbedtls
     poom_nfc
     poom_picopass
     poom_motion_midi

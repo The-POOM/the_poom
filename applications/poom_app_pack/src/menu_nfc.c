@@ -4,6 +4,7 @@
 #include "menu_nfc.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,10 +12,15 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "Arduboy2.h"
 #include "button_driver.h"
 #include "esp_err.h"
+#include "esp_crt_bundle.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -31,6 +37,10 @@
 #include "poom_nfc_mifare_classic.h"
 #include "poom_nfc_store.h"
 #include "poom_nfc_tlv.h"
+#include "poom_game_store.h"
+#include "poom_secrets_store.h"
+#include "poom_ui_keyboard.h"
+#include "poom_wifi_ctrl.h"
 #include "sd_card.h"
 
 #define POOM_MENU_RESUME_TOPIC "poom/menu/resume"
@@ -40,13 +50,22 @@
 #define MENU_NFC_STACK (4096U)
 #define MENU_NFC_PRIO (4U)
 
-#define MENU_NFC_SCAN_TIMEOUT_MS (2500U)
+#define MENU_NFC_SCAN_POLL_MS (1000U)
+#define MENU_NFC_SCAN_TIMEOUT_MS (5000U)
+#define MENU_NFC_CARD_OPERATION_TIMEOUT_MS (2500U)
+#define MENU_NFC_T2T_READ_TIMEOUT_MS (5000U)
 #define MENU_NFC_SCAN_MAX_FOUND (12U)
 #define MENU_NFC_INFO_HOLD_MS (1800U)
 #define MENU_NFC_EMV_RETRY_DELAY_MS (80U)
 #define MENU_NFC_EMV_PPSE_TRIES (3U)
 #define MENU_NFC_EMV_DIRECT_AID_TRIES (2U)
 #define MENU_NFC_EMV_APP_MAX (6U)
+#define MENU_NFC_AMIIBO_DIR "/nfc/MyAmiibo"
+#define MENU_NFC_AMIIBO_CATALOG_REL MENU_NFC_AMIIBO_DIR "/amiibo.json"
+#define MENU_NFC_AMIIBO_CATALOG_URL \
+    "https://raw.githubusercontent.com/N3evin/AmiiboAPI/master/database/amiibo.json"
+#define MENU_NFC_NAME_SCROLL_STEP_MS (350U)
+#define MENU_NFC_NAME_SCROLL_GAP (3U)
 
 #define HEADER_H (11)
 #define BOX_Y (12)
@@ -121,6 +140,7 @@ typedef struct
 typedef enum
 {
     MENU_NFC_OPT_SCAN = 0,
+    MENU_NFC_OPT_AMIIBO,
     MENU_NFC_OPT_EMULATE,
     MENU_NFC_OPT_RESTORE,
     MENU_NFC_OPT_STORAGE,
@@ -135,6 +155,13 @@ typedef enum
     MENU_NFC_STATE_SCAN_INFO,
     MENU_NFC_STATE_SCAN_ACTIONS,
     MENU_NFC_STATE_EMV_APP_SELECT,
+    MENU_NFC_STATE_AMIIBO_MENU,
+    MENU_NFC_STATE_AMIIBO_SCANNING,
+    MENU_NFC_STATE_AMIIBO_RESULT,
+    MENU_NFC_STATE_AMIIBO_ACTIONS,
+    MENU_NFC_STATE_AMIIBO_KEYBOARD,
+    MENU_NFC_STATE_AMIIBO_LIST,
+    MENU_NFC_STATE_AMIIBO_SYNCING,
     MENU_NFC_STATE_EMULATE_LIST,
     MENU_NFC_STATE_EMULATE_SOURCE,
     MENU_NFC_STATE_EMULATE_SD_LIST,
@@ -147,17 +174,28 @@ typedef enum
     MENU_NFC_STATE_INFO,
 } menu_nfc_state_t;
 
-static const char *const k_opt_labels[MENU_NFC_OPT_COUNT] = {
-    "SCAN",
-    "EMULATE",
-    "RESTORE MFC",
-    "STORAGE",
-};
+static const char* menu_nfc_main_option_label_(menu_nfc_opt_t option)
+{
+    switch(option)
+    {
+        case MENU_NFC_OPT_SCAN: return "SCAN";
+        case MENU_NFC_OPT_AMIIBO: return "AMIIBO";
+        case MENU_NFC_OPT_EMULATE: return "EMULATE";
+        case MENU_NFC_OPT_RESTORE: return "RESTORE MFC";
+        case MENU_NFC_OPT_STORAGE: return "STORAGE";
+        default: return "";
+    }
+}
 
 static bool s_menu_nfc_active = false;
 static bool s_menu_nfc_buttons_subscribed = false;
 static bool s_menu_nfc_exit_requested = false;
 static bool s_menu_nfc_scan_requested = false;
+static volatile bool s_menu_nfc_scan_cancel_requested = false;
+static volatile bool s_menu_nfc_mifare_read_active = false;
+static bool s_menu_nfc_mifare_read_requested = false;
+static volatile bool s_menu_nfc_t2t_read_active = false;
+static bool s_menu_nfc_t2t_read_requested = false;
 static bool s_menu_nfc_restore_requested = false;
 static TaskHandle_t s_menu_nfc_ui_task = NULL;
 static char s_menu_nfc_sbus_user[] = "menu_nfc";
@@ -201,6 +239,7 @@ typedef enum
     MENU_NFC_SCAN_ACT_DETAILS,
     MENU_NFC_SCAN_ACT_READ_CARD,
     MENU_NFC_SCAN_ACT_READ_AGAIN,
+    MENU_NFC_SCAN_ACT_READ_FULL,
     MENU_NFC_SCAN_ACT_CHECK_PAYMENT,
     MENU_NFC_SCAN_ACT_SAVE_DUMP,
     MENU_NFC_SCAN_ACT_SAVE_SUMMARY,
@@ -241,6 +280,28 @@ typedef struct
 } menu_nfc_scan_meta_t;
 
 static menu_nfc_scan_meta_t* s_scan_meta = NULL;
+
+typedef enum
+{
+    MENU_NFC_AMIIBO_COPY = 0,
+    MENU_NFC_AMIIBO_USE,
+    MENU_NFC_AMIIBO_SYNC,
+    MENU_NFC_AMIIBO_COUNT,
+} menu_nfc_amiibo_option_t;
+
+typedef struct
+{
+    poom_ui_keyboard_t keyboard;
+    char name[65];
+    char id_hex[17];
+    uint8_t menu_sel;
+    uint8_t result_sel;
+    bool catalog_available;
+    uint32_t scroll_started_ms;
+} menu_nfc_amiibo_ctx_t;
+
+/* Amiibo UI memory exists only while this submenu is open. */
+EXT_RAM_BSS_ATTR static menu_nfc_amiibo_ctx_t* s_amiibo = NULL;
 
 typedef enum
 {
@@ -286,6 +347,7 @@ static bool menu_nfc_scan_meta_acquire_(void);
 static void menu_nfc_scan_meta_release_(void);
 static bool menu_nfc_emu_supported_(const poom_nfc_card_id_t *id);
 static void menu_nfc_prepare_generic_scan_view_(void);
+static bool menu_nfc_dump_has_ndef_(const poom_nfc_dump_t *dump);
 static void menu_nfc_scan_save_to_sd_(void);
 static void menu_nfc_scan_save_embedded_(void);
 static menu_nfc_state_t menu_nfc_scan_primary_state_(void);
@@ -298,6 +360,11 @@ static void menu_nfc_emu_start_id_(
 static void menu_nfc_run_restore_(void);
 static void menu_nfc_set_info_return_(
     const char *l0, const char *l1, menu_nfc_state_t return_state);
+static bool menu_nfc_path_has_ext_(const char* name, const char* ext);
+static void menu_nfc_sd_add_item_(const char* name,
+                                  const char* rel_path,
+                                  menu_nfc_sd_item_kind_t kind);
+static int menu_nfc_sd_dump_cmp_(const void* a, const void* b);
 static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_nfc_ui_task_(void *arg);
 
@@ -313,6 +380,40 @@ static void menu_nfc_request_redraw_(void)
     {
         (void)xTaskNotifyGive(s_menu_nfc_ui_task);
     }
+}
+
+/**
+ * @brief Reports whether the active MIFARE key discovery should stop.
+ *
+ * @param[in] user_ctx Unused callback context.
+ * @return true when the user leaves the operation or presses B.
+ */
+static bool menu_nfc_mifare_cancel_requested_(void* user_ctx)
+{
+    (void)user_ctx;
+    return s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+           s_menu_nfc_exit_requested;
+}
+
+typedef struct
+{
+    TickType_t started_tick;
+    TickType_t timeout_ticks;
+} menu_nfc_t2t_read_context_t;
+
+static bool menu_nfc_t2t_cancel_requested_(void* user_ctx)
+{
+    const menu_nfc_t2t_read_context_t* context =
+        (const menu_nfc_t2t_read_context_t*)user_ctx;
+
+    if(s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+       s_menu_nfc_exit_requested)
+    {
+        return true;
+    }
+
+    return (context != NULL) &&
+           ((xTaskGetTickCount() - context->started_tick) >= context->timeout_ticks);
 }
 
 /**
@@ -1190,6 +1291,598 @@ static void menu_nfc_refresh_saved_count_(void)
     }
 }
 
+static bool menu_nfc_amiibo_ctx_acquire_(void)
+{
+    if(s_amiibo != NULL)
+    {
+        return true;
+    }
+    s_amiibo = (menu_nfc_amiibo_ctx_t*)heap_caps_calloc(
+        1U, sizeof(*s_amiibo), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_amiibo != NULL;
+}
+
+static void menu_nfc_amiibo_ctx_release_(void)
+{
+    free(s_amiibo);
+    s_amiibo = NULL;
+}
+
+static uint32_t menu_nfc_now_ms_(void)
+{
+    return (uint32_t)((uint64_t)esp_timer_get_time() / 1000ULL);
+}
+
+static void menu_nfc_format_scrolling_name_(char* out,
+                                            size_t out_len,
+                                            const char* name,
+                                            size_t visible_chars,
+                                            bool scroll)
+{
+    if((out == NULL) || (out_len == 0U))
+    {
+        return;
+    }
+    out[0] = '\0';
+    if(name == NULL)
+    {
+        return;
+    }
+    const size_t name_len = strlen(name);
+    if(!scroll || (name_len <= visible_chars) || (s_amiibo == NULL))
+    {
+        (void)snprintf(out, out_len, "%.*s", (int)visible_chars, name);
+        return;
+    }
+
+    const size_t cycle = name_len + MENU_NFC_NAME_SCROLL_GAP;
+    const size_t phase = (size_t)(((menu_nfc_now_ms_() - s_amiibo->scroll_started_ms) /
+                                   MENU_NFC_NAME_SCROLL_STEP_MS) % cycle);
+    for(size_t index = 0U; (index < visible_chars) && (index + 1U < out_len); index++)
+    {
+        const size_t source = (phase + index) % cycle;
+        out[index] = (source < name_len) ? name[source] : ' ';
+        out[index + 1U] = '\0';
+    }
+}
+
+static bool menu_nfc_amiibo_dump_valid_(const poom_nfc_dump_t* dump)
+{
+    static const uint8_t amiibo_cc[4] = {0xF1U, 0x10U, 0xFFU, 0xEEU};
+    return (dump != NULL) && dump->read_ok &&
+           (dump->read_mode == POOM_NFC_DUMP_READ_FULL) &&
+           (dump->page_size == POOM_NFC_DUMP_PAGE_SIZE) &&
+           (dump->pages_read >= 135U) &&
+           (poom_nfc_dump_guess_t2t_product(dump) == POOM_NFC_T2T_PRODUCT_NTAG215) &&
+           (memcmp(dump->pages[3], amiibo_cc, sizeof(amiibo_cc)) == 0);
+}
+
+static void menu_nfc_amiibo_extract_id_(const poom_nfc_dump_t* dump, char out[17])
+{
+    size_t pos = 0U;
+    out[0] = '\0';
+    if((dump == NULL) || (dump->pages_read <= 22U))
+    {
+        return;
+    }
+    for(uint16_t page = 21U; page <= 22U; page++)
+    {
+        for(uint8_t byte = 0U; byte < 4U; byte++)
+        {
+            pos += (size_t)snprintf(&out[pos], 17U - pos, "%02X", dump->pages[page][byte]);
+        }
+    }
+}
+
+static bool menu_nfc_amiibo_catalog_lookup_(const char* id_hex, char* out_name, size_t out_len)
+{
+    FILE* file = NULL;
+    char* line = NULL;
+    bool id_found = false;
+    bool result = false;
+    char needle[24];
+    char needle_lower[24];
+
+    if((id_hex == NULL) || (out_name == NULL) || (out_len == 0U))
+    {
+        return false;
+    }
+    out_name[0] = '\0';
+    if(s_amiibo != NULL)
+    {
+        s_amiibo->catalog_available = false;
+    }
+    if(sd_card_is_not_mounted())
+    {
+        sd_card_begin();
+        if(sd_card_mount() != ESP_OK)
+        {
+            printf("[W] [amiibo] catalog unavailable: SD mount failed\r\n");
+            return false;
+        }
+    }
+    file = fopen(SD_CARD_PATH MENU_NFC_AMIIBO_CATALOG_REL, "r");
+    if(file == NULL)
+    {
+        printf("[W] [amiibo] catalog missing: %s\r\n",
+               SD_CARD_PATH MENU_NFC_AMIIBO_CATALOG_REL);
+        return false;
+    }
+    if(s_amiibo != NULL)
+    {
+        s_amiibo->catalog_available = true;
+    }
+    line = (char*)heap_caps_malloc(256U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(line == NULL)
+    {
+        (void)fclose(file);
+        return false;
+    }
+    (void)snprintf(needle, sizeof(needle), "\"0x%s\"", id_hex);
+    for(size_t i = 0U; i < sizeof(needle); i++)
+    {
+        needle_lower[i] = (char)tolower((unsigned char)needle[i]);
+        if(needle[i] == '\0')
+        {
+            break;
+        }
+    }
+    while(fgets(line, 256, file) != NULL)
+    {
+        if(!id_found)
+        {
+            id_found = (strstr(line, needle) != NULL) ||
+                       (strstr(line, needle_lower) != NULL);
+            if(!id_found)
+            {
+                continue;
+            }
+        }
+
+        char* key = strstr(line, "\"name\"");
+        if(key != NULL)
+        {
+            char* value = strchr(key + 6, ':');
+            if(value != NULL)
+            {
+                value = strchr(value, '\"');
+            }
+            if(value != NULL)
+            {
+                size_t used = 0U;
+                value++;
+                while((*value != '\0') && (*value != '\"') && (used + 1U < out_len))
+                {
+                    if((*value == '\\') && (value[1] != '\0'))
+                    {
+                        value++;
+                    }
+                    out_name[used++] = *value++;
+                }
+                out_name[used] = '\0';
+                result = used > 0U;
+            }
+            break;
+        }
+        if(strchr(line, '}') != NULL)
+        {
+            break;
+        }
+    }
+    free(line);
+    (void)fclose(file);
+    printf("[I] [amiibo] id=%s catalog=%s%s%s\r\n",
+           id_hex,
+           result ? "match" : "not-found",
+           result ? " name=" : "",
+           result ? out_name : "");
+    return result;
+}
+
+static esp_err_t menu_nfc_amiibo_save_(void)
+{
+    char rel_path[160];
+    if((s_amiibo == NULL) || (s_amiibo->name[0] == '\0') ||
+       !menu_nfc_amiibo_dump_valid_(&s_scan_dump))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return poom_nfc_dump_save_mful_named_to_sd(
+        &s_scan_dump, MENU_NFC_AMIIBO_DIR, s_amiibo->name, rel_path, sizeof(rel_path));
+}
+
+static void menu_nfc_amiibo_load_files_(void)
+{
+    DIR* dir;
+    struct dirent* ent;
+    const char* dir_rel = MENU_NFC_AMIIBO_DIR;
+    const size_t prefix_len = strlen(dir_rel);
+
+    s_sd_dump_count = 0;
+    s_sd_dump_selected = 0;
+    s_sd_dump_scroll = 0;
+    if(sd_card_is_not_mounted())
+    {
+        sd_card_begin();
+        if(sd_card_mount() != ESP_OK)
+        {
+            return;
+        }
+    }
+    dir = opendir(SD_CARD_PATH MENU_NFC_AMIIBO_DIR);
+    if(dir == NULL)
+    {
+        return;
+    }
+    while((ent = readdir(dir)) != NULL)
+    {
+        const size_t name_len = strlen(ent->d_name);
+        char rel_path[96];
+        char display_name[MENU_NFC_SD_NAME_MAX];
+        if((ent->d_name[0] == '.') || (name_len < 5U) ||
+           !menu_nfc_path_has_ext_(ent->d_name, ".nfc") ||
+           ((prefix_len + name_len + 2U) > sizeof(rel_path)))
+        {
+            continue;
+        }
+        (void)memcpy(rel_path, dir_rel, prefix_len);
+        rel_path[prefix_len] = '/';
+        (void)memcpy(&rel_path[prefix_len + 1U], ent->d_name, name_len);
+        rel_path[prefix_len + 1U + name_len] = '\0';
+        const size_t display_len = (name_len - 4U < sizeof(display_name) - 1U) ?
+                                   name_len - 4U : sizeof(display_name) - 1U;
+        (void)memcpy(display_name, ent->d_name, display_len);
+        display_name[display_len] = '\0';
+        for(size_t i = 0U; i < display_len; i++)
+        {
+            if(display_name[i] == '_')
+            {
+                display_name[i] = ' ';
+            }
+        }
+        menu_nfc_sd_add_item_(display_name, rel_path, MENU_NFC_SD_ITEM_NFC_DUMP);
+    }
+    (void)closedir(dir);
+    if(s_sd_dump_count > 1)
+    {
+        qsort(s_sd_dump_files, (size_t)s_sd_dump_count, sizeof(s_sd_dump_files[0]),
+              menu_nfc_sd_dump_cmp_);
+    }
+    if(s_amiibo != NULL)
+    {
+        s_amiibo->scroll_started_ms = menu_nfc_now_ms_();
+    }
+}
+
+typedef struct
+{
+    FILE* file;
+    size_t received;
+    uint8_t marker_pos;
+    bool marker_found;
+    esp_err_t error;
+} menu_nfc_amiibo_download_t;
+
+static esp_err_t menu_nfc_amiibo_http_event_(esp_http_client_event_t* event)
+{
+    static const char marker[] = "\"amiibos\"";
+    menu_nfc_amiibo_download_t* download =
+        (event != NULL) ? (menu_nfc_amiibo_download_t*)event->user_data : NULL;
+    if((download == NULL) || (event->event_id != HTTP_EVENT_ON_DATA) ||
+       (event->data_len <= 0))
+    {
+        return ESP_OK;
+    }
+    if(s_menu_nfc_scan_cancel_requested || (download->received + (size_t)event->data_len > (4U * 1024U * 1024U)))
+    {
+        download->error = ESP_ERR_INVALID_STATE;
+        return download->error;
+    }
+    const char* data = (const char*)event->data;
+    for(int i = 0; i < event->data_len; i++)
+    {
+        if(data[i] == marker[download->marker_pos])
+        {
+            download->marker_pos++;
+            if(download->marker_pos == (sizeof(marker) - 1U))
+            {
+                download->marker_found = true;
+                download->marker_pos = 0U;
+            }
+        }
+        else
+        {
+            download->marker_pos = (data[i] == marker[0]) ? 1U : 0U;
+        }
+    }
+    if(fwrite(event->data, 1U, (size_t)event->data_len, download->file) != (size_t)event->data_len)
+    {
+        download->error = ESP_FAIL;
+        return download->error;
+    }
+    download->received += (size_t)event->data_len;
+    return ESP_OK;
+}
+
+static esp_err_t menu_nfc_amiibo_connect_wifi_(void)
+{
+    typedef struct
+    {
+        char ssid[33];
+        char password[65];
+    } wifi_credentials_t;
+    wifi_credentials_t* credentials = NULL;
+    esp_err_t err;
+
+    if(poom_wifi_ctrl_sta_has_ip())
+    {
+        return ESP_OK;
+    }
+    credentials = (wifi_credentials_t*)heap_caps_calloc(
+        1U, sizeof(*credentials), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(credentials == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    size_t ssid_len = sizeof(credentials->ssid);
+    size_t password_len = sizeof(credentials->password);
+    err = poom_secrets_init();
+    if(err == ESP_OK)
+    {
+        err = poom_secrets_get_wifi_ssid(credentials->ssid, &ssid_len);
+    }
+    if((err != ESP_OK) || (credentials->ssid[0] == '\0'))
+    {
+        free(credentials);
+        return ESP_ERR_NOT_FOUND;
+    }
+    if(poom_secrets_get_wifi_pass(credentials->password, &password_len) != ESP_OK)
+    {
+        credentials->password[0] = '\0';
+    }
+    (void)poom_wifi_ctrl_register_cb(NULL, NULL);
+    err = poom_wifi_ctrl_sta_connect(
+        credentials->ssid, credentials->password[0] != '\0' ? credentials->password : NULL);
+    free(credentials);
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+
+    const TickType_t started = xTaskGetTickCount();
+    while(!poom_wifi_ctrl_sta_has_ip())
+    {
+        if(s_menu_nfc_scan_cancel_requested ||
+           ((xTaskGetTickCount() - started) >= pdMS_TO_TICKS(15000U)))
+        {
+            return s_menu_nfc_scan_cancel_requested ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100U));
+    }
+    return ESP_OK;
+}
+
+static esp_err_t menu_nfc_amiibo_sync_catalog_(void)
+{
+    const char* final_path = SD_CARD_PATH MENU_NFC_AMIIBO_CATALOG_REL;
+    const char* part_path = SD_CARD_PATH MENU_NFC_AMIIBO_DIR "/amiibo.json.part";
+    const char* backup_path = SD_CARD_PATH MENU_NFC_AMIIBO_DIR "/amiibo.json.bak";
+    menu_nfc_amiibo_download_t download = {0};
+    esp_http_client_handle_t client = NULL;
+    esp_err_t err;
+    struct stat st;
+    bool had_catalog = false;
+
+    menu_nfc_draw_busy_progress_("AMIIBO", "Connecting WiFi", 1U, 3U);
+    err = menu_nfc_amiibo_connect_wifi_();
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    menu_nfc_draw_busy_progress_("AMIIBO", "Checking time", 2U, 3U);
+    err = poom_game_store_sync_time();
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    if(sd_card_is_not_mounted())
+    {
+        sd_card_begin();
+        err = sd_card_mount();
+        if(err != ESP_OK)
+        {
+            return err;
+        }
+    }
+    err = sd_card_create_dir("/nfc");
+    if(err == ESP_OK)
+    {
+        err = sd_card_create_dir(MENU_NFC_AMIIBO_DIR);
+    }
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+    download.file = fopen(part_path, "w");
+    if(download.file == NULL)
+    {
+        return ESP_ERR_FILE_OPEN_FAILED;
+    }
+    const esp_http_client_config_t config = {
+        .url = MENU_NFC_AMIIBO_CATALOG_URL,
+        .event_handler = menu_nfc_amiibo_http_event_,
+        .user_data = &download,
+        .timeout_ms = 30000,
+        .buffer_size = 1024,
+        .buffer_size_tx = 512,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    client = esp_http_client_init(&config);
+    if(client == NULL)
+    {
+        err = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+    (void)esp_http_client_set_header(client, "Accept", "application/json");
+    (void)esp_http_client_set_header(client, "Accept-Encoding", "identity");
+    menu_nfc_draw_busy_progress_("AMIIBO", "Downloading", 3U, 3U);
+    err = esp_http_client_perform(client);
+    if(download.error != ESP_OK)
+    {
+        err = download.error;
+    }
+    if((err == ESP_OK) && (esp_http_client_get_status_code(client) != 200))
+    {
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+    if((err == ESP_OK) && (!download.marker_found || (download.received < 32U)))
+    {
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+
+cleanup:
+    if(client != NULL)
+    {
+        (void)esp_http_client_cleanup(client);
+    }
+    if(download.file != NULL)
+    {
+        if(fclose(download.file) != 0 && err == ESP_OK)
+        {
+            err = ESP_FAIL;
+        }
+    }
+    if(err != ESP_OK)
+    {
+        (void)unlink(part_path);
+        return err;
+    }
+
+    had_catalog = stat(final_path, &st) == 0;
+    (void)unlink(backup_path);
+    if(had_catalog && (rename(final_path, backup_path) != 0))
+    {
+        (void)unlink(part_path);
+        return ESP_FAIL;
+    }
+    if(rename(part_path, final_path) != 0)
+    {
+        if(had_catalog)
+        {
+            (void)rename(backup_path, final_path);
+        }
+        (void)unlink(part_path);
+        return ESP_FAIL;
+    }
+    (void)unlink(backup_path);
+    return ESP_OK;
+}
+
+static void menu_nfc_run_amiibo_scan_(void)
+{
+    menu_nfc_t2t_read_context_t context = {
+        .started_tick = xTaskGetTickCount(),
+        .timeout_ticks = pdMS_TO_TICKS(MENU_NFC_T2T_READ_TIMEOUT_MS + MENU_NFC_SCAN_TIMEOUT_MS),
+    };
+    menu_nfc_draw_busy_progress_("COPY AMIIBO", "Hold near POOM", 0U, 1U);
+    (void)memset(&s_scan_dump, 0, sizeof(s_scan_dump));
+    const bool ok = poom_nfc_controller_capture_dump_cancelable(
+        MENU_NFC_SCAN_TIMEOUT_MS, &s_scan_dump, menu_nfc_t2t_cancel_requested_, &context);
+    poom_nfc_controller_stop();
+
+    if(s_menu_nfc_scan_cancel_requested)
+    {
+        s_menu_nfc_scan_cancel_requested = false;
+        s_state = MENU_NFC_STATE_AMIIBO_MENU;
+    }
+    else if(!ok)
+    {
+        menu_nfc_set_info_return_("No Amiibo found", "Try again", MENU_NFC_STATE_AMIIBO_MENU);
+    }
+    else if(!menu_nfc_amiibo_dump_valid_(&s_scan_dump))
+    {
+        menu_nfc_set_info_return_("Not an Amiibo", "NTAG215 required", MENU_NFC_STATE_AMIIBO_MENU);
+    }
+    else
+    {
+        s_scan_dump_valid = true;
+        menu_nfc_amiibo_extract_id_(&s_scan_dump, s_amiibo->id_hex);
+        if(!menu_nfc_amiibo_catalog_lookup_(s_amiibo->id_hex, s_amiibo->name,
+                                            sizeof(s_amiibo->name)))
+        {
+            s_amiibo->name[0] = '\0';
+        }
+        s_amiibo->result_sel = 0U;
+        s_state = MENU_NFC_STATE_AMIIBO_RESULT;
+    }
+    menu_nfc_request_redraw_();
+}
+
+static void menu_nfc_draw_amiibo_menu_(void)
+{
+    menu_nfc_draw_frame_("AMIIBO");
+    for(uint8_t row = 0U; row < MENU_NFC_AMIIBO_COUNT; row++)
+    {
+        const int16_t y = (int16_t)(LIST_Y0 + row * ROW_STEP);
+        const char* label = (row == MENU_NFC_AMIIBO_COPY) ? "COPY AMIIBO" :
+                            ((row == MENU_NFC_AMIIBO_USE) ? "USE AMIIBO" : "SYNC CATALOG");
+        poom_arduboy_set_cursor(4, y);
+        (void)poom_arduboy_print(label);
+        if((s_amiibo != NULL) && (row == s_amiibo->menu_sel))
+        {
+            poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, ROW_HILITE_H, INVERT);
+        }
+    }
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(F("A:SEL"));
+    poom_arduboy_set_cursor(72, 56);
+    (void)poom_arduboy_print(F("B:BACK"));
+    poom_arduboy_display();
+}
+
+static void menu_nfc_draw_amiibo_result_(void)
+{
+    char name_line[22];
+    menu_nfc_draw_frame_("AMIIBO FOUND");
+    (void)snprintf(name_line, sizeof(name_line), "%.20s",
+                   (s_amiibo != NULL && s_amiibo->name[0] != '\0') ?
+                   s_amiibo->name :
+                   ((s_amiibo != NULL && !s_amiibo->catalog_available) ?
+                    "Sync catalog first" : "Unknown Amiibo"));
+    poom_arduboy_set_cursor(3, 14);
+    (void)poom_arduboy_print(name_line);
+    poom_arduboy_set_cursor(3, 24);
+    (void)poom_arduboy_print((s_amiibo != NULL) ? s_amiibo->id_hex : "");
+    poom_arduboy_set_cursor(3, 36);
+    (void)poom_arduboy_print(F("NTAG215 / AMIIBO"));
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(F("A:OPT"));
+    poom_arduboy_set_cursor(72, 56);
+    (void)poom_arduboy_print(F("B:BACK"));
+    poom_arduboy_display();
+}
+
+static void menu_nfc_draw_amiibo_actions_(void)
+{
+    menu_nfc_draw_frame_("AMIIBO");
+    for(uint8_t row = 0U; row < 2U; row++)
+    {
+        const int16_t y = (int16_t)(LIST_Y0 + row * ROW_STEP);
+        poom_arduboy_set_cursor(4, y);
+        (void)poom_arduboy_print(row == 0U ? "Save copy" : "Scan again");
+        if((s_amiibo != NULL) && (row == s_amiibo->result_sel))
+        {
+            poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH,
+                                   ROW_HILITE_H, INVERT);
+        }
+    }
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(F("A:OK"));
+    poom_arduboy_set_cursor(72, 56);
+    (void)poom_arduboy_print(F("B:BACK"));
+    poom_arduboy_display();
+}
+
 /**
  * @brief Draws the current menu state.
  *
@@ -1199,10 +1892,16 @@ static void menu_nfc_draw_main_(void)
 {
     menu_nfc_draw_frame_("NFC");
 
-    for (int row = 0; row < (int)MENU_NFC_OPT_COUNT; row++)
+    const int first = ((int)s_opt >= 4) ? 1 : 0;
+    for (int visible = 0; visible < 4; visible++)
     {
-        const int16_t y = (int16_t)(MAIN_LIST_Y0 + (int16_t)row * MAIN_ROW_STEP);
-        const char *label = k_opt_labels[row];
+        const int row = first + visible;
+        if(row >= (int)MENU_NFC_OPT_COUNT)
+        {
+            break;
+        }
+        const int16_t y = (int16_t)(MAIN_LIST_Y0 + (int16_t)visible * MAIN_ROW_STEP);
+        const char *label = menu_nfc_main_option_label_((menu_nfc_opt_t)row);
 
         poom_arduboy_set_cursor(4, y);
         (void)poom_arduboy_print(label);
@@ -1296,6 +1995,7 @@ static const char* menu_nfc_scan_action_label_(menu_nfc_scan_action_t action)
         case MENU_NFC_SCAN_ACT_DETAILS:       return "Details";
         case MENU_NFC_SCAN_ACT_READ_CARD:     return "Unlock";
         case MENU_NFC_SCAN_ACT_READ_AGAIN:    return "Unlock again";
+        case MENU_NFC_SCAN_ACT_READ_FULL:     return "Read full";
         case MENU_NFC_SCAN_ACT_CHECK_PAYMENT: return "Check payment";
         case MENU_NFC_SCAN_ACT_SAVE_DUMP:     return "Save dump";
         case MENU_NFC_SCAN_ACT_SAVE_SUMMARY:  return "Save summary";
@@ -1381,6 +2081,10 @@ static void menu_nfc_scan_actions_rebuild_(void)
             if(has_dump)
             {
                 menu_nfc_scan_action_add_(MENU_NFC_SCAN_ACT_SAVE_DUMP);
+            }
+            else
+            {
+                menu_nfc_scan_action_add_(MENU_NFC_SCAN_ACT_READ_FULL);
             }
             menu_nfc_scan_action_add_(MENU_NFC_SCAN_ACT_SAVE_ID);
             if(can_emulate)
@@ -1487,6 +2191,47 @@ static void menu_nfc_prepare_t2t_scan_view_(void)
     }
 
     menu_nfc_scan_actions_rebuild_();
+}
+
+static bool menu_nfc_read_t2t_full_(void)
+{
+    poom_nfc_dump_t* captured = (poom_nfc_dump_t*)calloc(1U, sizeof(*captured));
+    const poom_nfc_card_id_t expected_id = s_scan_dump.id;
+    const menu_nfc_t2t_read_context_t context = {
+        .started_tick = xTaskGetTickCount(),
+        .timeout_ticks = pdMS_TO_TICKS(MENU_NFC_T2T_READ_TIMEOUT_MS),
+    };
+    bool ok = false;
+
+    if(captured == NULL)
+    {
+        return false;
+    }
+
+    menu_nfc_draw_busy_progress_("READING TAG", "Hold card near", 1U, 2U);
+    ok = poom_nfc_controller_capture_dump_cancelable(
+        MENU_NFC_CARD_OPERATION_TIMEOUT_MS,
+        captured,
+        menu_nfc_t2t_cancel_requested_,
+        (void*)&context);
+    poom_nfc_controller_stop();
+
+    if(ok && captured->read_ok &&
+       (captured->read_mode == POOM_NFC_DUMP_READ_FULL) &&
+       poom_nfc_card_id_equal(&expected_id, &captured->id))
+    {
+        s_scan_dump = *captured;
+        s_scan_dump_valid = true;
+        s_scan_ndef_known = true;
+        s_scan_has_ndef = menu_nfc_dump_has_ndef_(&s_scan_dump);
+    }
+    else
+    {
+        ok = false;
+    }
+
+    free(captured);
+    return ok;
 }
 
 /**
@@ -1724,12 +2469,25 @@ static bool menu_nfc_prepare_mifare_scan_view_(nfc_card_type_t card_type)
     char uid_hex[POOM_NFC_CARD_UID_MAX * 2U + 1U];
     char line[22];
 
+    if(s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+       s_menu_nfc_exit_requested)
+    {
+        return false;
+    }
+
     menu_nfc_draw_busy_progress_("READING MIFARE", "Linking...", 1U, 2U);
     MENU_NFC_TRACE("mifare start type=%s", nfc_ident_card_type_to_str(card_type));
 
     if(!poom_nfc_controller_connect())
     {
         MENU_NFC_TRACE("mifare connect failed");
+        poom_nfc_controller_stop();
+        return false;
+    }
+
+    if(s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+       s_menu_nfc_exit_requested)
+    {
         poom_nfc_controller_stop();
         return false;
     }
@@ -1742,7 +2500,14 @@ static bool menu_nfc_prepare_mifare_scan_view_(nfc_card_type_t card_type)
     }
 
     menu_nfc_draw_busy_progress_("READING MIFARE", "Unlocking...", 2U, 2U);
-    (void)poom_mifare_classic_discover_default_keys(true);
+    (void)poom_mifare_classic_discover_default_keys_cancelable(
+        true, menu_nfc_mifare_cancel_requested_, NULL);
+    if(s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+       s_menu_nfc_exit_requested)
+    {
+        poom_nfc_controller_stop();
+        return false;
+    }
     sectors = poom_mifare_classic_get_sector_count();
     for(uint8_t s = 0U; s < sectors; s++)
     {
@@ -2587,8 +3352,20 @@ static void menu_nfc_scan_run_action_(menu_nfc_scan_action_t action)
 
         case MENU_NFC_SCAN_ACT_READ_CARD:
         case MENU_NFC_SCAN_ACT_READ_AGAIN:
-            if(!poom_mifare_classic_is_supported_card(card_type) ||
-               !menu_nfc_prepare_mifare_scan_view_(card_type))
+        {
+            const bool supported = poom_mifare_classic_is_supported_card(card_type);
+            const bool read_ok = supported && menu_nfc_prepare_mifare_scan_view_(card_type);
+
+            s_menu_nfc_mifare_read_active = false;
+            if(s_menu_nfc_scan_cancel_requested)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                poom_nfc_controller_stop();
+                s_state = MENU_NFC_STATE_SCAN_ACTIONS;
+                menu_nfc_request_redraw_();
+                return;
+            }
+            if(!read_ok)
             {
                 menu_nfc_set_info_return_("Read failed", "Hold card near", MENU_NFC_STATE_SCAN_ACTIONS);
                 return;
@@ -2597,6 +3374,33 @@ static void menu_nfc_scan_run_action_(menu_nfc_scan_action_t action)
             s_state = menu_nfc_scan_primary_state_();
             menu_nfc_request_redraw_();
             break;
+        }
+
+        case MENU_NFC_SCAN_ACT_READ_FULL:
+        {
+            const bool read_ok = menu_nfc_read_t2t_full_();
+
+            s_menu_nfc_t2t_read_active = false;
+            if(s_menu_nfc_scan_cancel_requested)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                poom_nfc_controller_stop();
+                s_state = MENU_NFC_STATE_SCAN_ACTIONS;
+                menu_nfc_request_redraw_();
+                return;
+            }
+            if(!read_ok)
+            {
+                menu_nfc_set_info_return_("Read failed", "Hold card near", MENU_NFC_STATE_SCAN_ACTIONS);
+                return;
+            }
+
+            menu_nfc_prepare_t2t_scan_view_();
+            s_scan_meta->info_scroll = 0U;
+            s_state = menu_nfc_scan_primary_state_();
+            menu_nfc_request_redraw_();
+            break;
+        }
 
         case MENU_NFC_SCAN_ACT_CHECK_PAYMENT:
             if(!menu_nfc_prepare_emv_scan_view_())
@@ -2629,6 +3433,7 @@ static void menu_nfc_scan_run_action_(menu_nfc_scan_action_t action)
             break;
 
         case MENU_NFC_SCAN_ACT_SCAN_AGAIN:
+            s_menu_nfc_scan_cancel_requested = false;
             s_menu_nfc_scan_requested = true;
             s_state = MENU_NFC_STATE_SCAN_SCANNING;
             menu_nfc_request_redraw_();
@@ -2663,11 +3468,7 @@ static const char *menu_nfc_scan_card_short_(const poom_nfc_dump_t *dump)
             switch(detected)
             {
                 case NFC_CARD_ULTRALIGHT_OR_NTAG:
-                    if(dump->read_mode == POOM_NFC_DUMP_READ_FULL)
-                    {
-                        return poom_nfc_t2t_product_to_str(poom_nfc_dump_guess_t2t_product(dump));
-                    }
-                    return "T2T";
+                    return poom_nfc_t2t_product_to_str(poom_nfc_dump_guess_t2t_product(dump));
                 case NFC_CARD_MIFARE_MINI:        return "MINI";
                 case NFC_CARD_MIFARE_CLASSIC_1K:  return "C1K";
                 case NFC_CARD_MIFARE_CLASSIC_4K:  return "C4K";
@@ -3175,45 +3976,49 @@ static void menu_nfc_sd_load_items_(menu_nfc_sd_item_kind_t kind_filter)
     }
 
     {
-        static const char dump_dir[] = "/nfc";
+        static const char* const dump_dirs[] = {"/nfc", "/nfc_dumps"};
         char dir_path[96];
-        DIR *dir;
-        struct dirent *ent;
-
-        (void)snprintf(dir_path, sizeof(dir_path), "%s%s", SD_CARD_PATH, dump_dir);
-        dir = opendir(dir_path);
-        if(dir == NULL)
+        for(size_t dir_idx = 0U; dir_idx < (sizeof(dump_dirs) / sizeof(dump_dirs[0])); dir_idx++)
         {
-            return;
-        }
-        while((ent = readdir(dir)) != NULL)
-        {
-            const char *name;
-            size_t name_len;
-            char rel_path[96];
-            const size_t prefix_len = sizeof(dump_dir) - 1U;
+            const char* dump_dir = dump_dirs[dir_idx];
+            const size_t prefix_len = strlen(dump_dir);
+            DIR* dir;
+            struct dirent* ent;
 
-            if(ent->d_name[0] == '.')
-                continue;
-            name = ent->d_name;
-            name_len = strlen(name);
-            if(name_len < 4U || !menu_nfc_path_has_ext_(name, ".nfc"))
-                continue;
-
-            if((prefix_len + 1U + name_len + 1U) > sizeof(rel_path))
-                continue;
-            (void)memcpy(rel_path, dump_dir, prefix_len);
-            rel_path[prefix_len] = '/';
-            (void)memcpy(&rel_path[prefix_len + 1U], name, name_len);
-            rel_path[prefix_len + 1U + name_len] = '\0';
-            if(kind_filter == MENU_NFC_SD_ITEM_MFC_DUMP &&
-               !menu_nfc_sd_file_is_mfc_dump_(rel_path))
+            (void)snprintf(dir_path, sizeof(dir_path), "%s%s", SD_CARD_PATH, dump_dir);
+            dir = opendir(dir_path);
+            if(dir == NULL)
             {
                 continue;
             }
-            menu_nfc_sd_add_item_(name, rel_path, kind_filter);
+            while((ent = readdir(dir)) != NULL)
+            {
+                const char* name;
+                size_t name_len;
+                char rel_path[96];
+
+                if(ent->d_name[0] == '.')
+                    continue;
+                name = ent->d_name;
+                name_len = strlen(name);
+                if(name_len < 4U || !menu_nfc_path_has_ext_(name, ".nfc"))
+                    continue;
+
+                if((prefix_len + 1U + name_len + 1U) > sizeof(rel_path))
+                    continue;
+                (void)memcpy(rel_path, dump_dir, prefix_len);
+                rel_path[prefix_len] = '/';
+                (void)memcpy(&rel_path[prefix_len + 1U], name, name_len);
+                rel_path[prefix_len + 1U + name_len] = '\0';
+                if(kind_filter == MENU_NFC_SD_ITEM_MFC_DUMP &&
+                   !menu_nfc_sd_file_is_mfc_dump_(rel_path))
+                {
+                    continue;
+                }
+                menu_nfc_sd_add_item_(name, rel_path, kind_filter);
+            }
+            (void)closedir(dir);
         }
-        (void)closedir(dir);
     }
 
     if(s_sd_dump_count > 1)
@@ -3232,12 +4037,14 @@ static void menu_nfc_draw_emulate_sd_list_(void)
 {
     const int count = s_sd_dump_count;
     const bool restore = s_state == MENU_NFC_STATE_RESTORE_SD_LIST;
+    const bool amiibo = s_state == MENU_NFC_STATE_AMIIBO_LIST;
 
     if(count <= 0)
     {
-        menu_nfc_draw_frame_(restore ? "RESTORE" : "NFC");
+        menu_nfc_draw_frame_(restore ? "RESTORE" : (amiibo ? "USE AMIIBO" : "NFC"));
         poom_arduboy_set_cursor(6, 30);
-        (void)poom_arduboy_print(restore ? F("No Classic dumps") : F("No SD dumps"));
+        (void)poom_arduboy_print(restore ? F("No Classic dumps") :
+                                 (amiibo ? F("No saved Amiibo") : F("No SD dumps")));
         poom_arduboy_set_cursor(72, 56);
         (void)poom_arduboy_print(F("B:BACK"));
         poom_arduboy_display();
@@ -3255,7 +4062,7 @@ static void menu_nfc_draw_emulate_sd_list_(void)
     if(s_sd_dump_scroll < 0) s_sd_dump_scroll = 0;
     if(s_sd_dump_scroll > max_scroll) s_sd_dump_scroll = max_scroll;
 
-    menu_nfc_draw_frame_(restore ? "RESTORE" : "NFC");
+    menu_nfc_draw_frame_(restore ? "RESTORE" : (amiibo ? "USE AMIIBO" : "NFC"));
 
     for(int row = 0; row < VISIBLE_ROWS; row++)
     {
@@ -3268,14 +4075,34 @@ static void menu_nfc_draw_emulate_sd_list_(void)
         const int16_t y = (int16_t)(LIST_Y0 + row * ROW_STEP);
         poom_arduboy_set_cursor(2, y);
         char line[22];
-        (void)snprintf(line, sizeof(line), "%s:%.17s",
-                       restore ? "MFC" : "NFC", s_sd_dump_files[idx].name);
+        if(amiibo)
+        {
+            menu_nfc_format_scrolling_name_(line,
+                                            sizeof(line),
+                                            s_sd_dump_files[idx].name,
+                                            19U,
+                                            idx == s_sd_dump_selected);
+        }
+        else
+        {
+            (void)snprintf(line, sizeof(line), "%s%.17s",
+                           restore ? "MFC:" : "NFC:", s_sd_dump_files[idx].name);
+        }
         (void)poom_arduboy_print(line);
 
         if(idx == s_sd_dump_selected)
         {
             poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, ROW_HILITE_H, INVERT);
         }
+    }
+
+    if(amiibo && (s_sd_dump_scroll > 0))
+    {
+        poom_arduboy_fill_triangle(124, 12, 120, 16, 127, 16, WHITE);
+    }
+    if(amiibo && ((s_sd_dump_scroll + VISIBLE_ROWS) < count))
+    {
+        poom_arduboy_fill_triangle(120, 48, 127, 48, 124, 52, WHITE);
     }
 
     poom_arduboy_set_cursor(0, 56);
@@ -3476,8 +4303,7 @@ static void menu_nfc_draw_emulate_running_(void)
 {
     poom_nfc_emu_cfg_t emu_cfg;
     const char *mode_label = "NFC-A";
-
-    menu_nfc_draw_frame_("NFC");
+    bool is_amiibo = false;
 
     poom_nfc_emulator_get_config(&emu_cfg);
     if(emu_cfg.mode == POOM_NFC_EMU_MODE_T4T)
@@ -3486,8 +4312,30 @@ static void menu_nfc_draw_emulate_running_(void)
     }
     else if(emu_cfg.mode == POOM_NFC_EMU_MODE_MFUL)
     {
-        mode_label = "MFUL";
+        is_amiibo = poom_nfc_emulator_is_amiibo();
+        mode_label = is_amiibo ? "AMIIBO" : "MFUL";
     }
+
+    if(is_amiibo && (s_emu_running_return_state == MENU_NFC_STATE_AMIIBO_LIST) &&
+       (s_amiibo != NULL))
+    {
+        char name_line[22];
+        menu_nfc_draw_frame_("AMIIBO");
+        poom_arduboy_set_cursor(4, 17);
+        (void)poom_arduboy_print(F("Emulating:"));
+        menu_nfc_format_scrolling_name_(
+            name_line, sizeof(name_line), s_amiibo->name, 20U, true);
+        poom_arduboy_set_cursor(4, 29);
+        (void)poom_arduboy_print(name_line);
+        poom_arduboy_set_cursor(4, 42);
+        (void)poom_arduboy_print(F("Ready for reader"));
+        poom_arduboy_set_cursor(72, 56);
+        (void)poom_arduboy_print(F("B:STOP"));
+        poom_arduboy_display();
+        return;
+    }
+
+    menu_nfc_draw_frame_("NFC");
     char uid[POOM_NFC_CARD_UID_MAX * 2U + 1U];
     uid[0] = '\0';
 
@@ -3920,7 +4768,7 @@ static void menu_nfc_run_restore_(void)
     }
 
     menu_nfc_draw_busy_progress_("RESTORE MFC", "Scan target card", 0U, 1U);
-    if(!poom_nfc_controller_capture_dump(MENU_NFC_SCAN_TIMEOUT_MS, target))
+    if(!poom_nfc_controller_capture_dump(MENU_NFC_CARD_OPERATION_TIMEOUT_MS, target))
     {
         poom_nfc_controller_stop();
         free(target);
@@ -4012,6 +4860,8 @@ static void menu_nfc_run_scan_(void)
     nfc_card_type_t card_type;
     poom_nfc_profile_t profile;
     bool profile_ok = false;
+    const TickType_t scan_started_tick = xTaskGetTickCount();
+    const TickType_t scan_timeout_ticks = pdMS_TO_TICKS(MENU_NFC_SCAN_TIMEOUT_MS);
 
     menu_nfc_draw_scanning_();
 
@@ -4057,11 +4907,61 @@ static void menu_nfc_run_scan_(void)
         poom_nfc_controller_stop();
     }
 
+    if(s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+       s_menu_nfc_exit_requested)
+    {
+        s_menu_nfc_scan_cancel_requested = false;
+        poom_nfc_controller_stop();
+        menu_nfc_scan_meta_release_();
+        s_state = MENU_NFC_STATE_MAIN;
+        menu_nfc_request_redraw_();
+        return;
+    }
+
     if(!profile_ok)
     {
-        const bool ok = poom_nfc_controller_capture_dump(MENU_NFC_SCAN_TIMEOUT_MS, &s_scan_dump);
+        bool ok = false;
+
+        menu_nfc_draw_scanning_();
+        while(s_menu_nfc_active && !s_menu_nfc_exit_requested &&
+              !s_menu_nfc_scan_cancel_requested)
+        {
+            const TickType_t elapsed_ticks = xTaskGetTickCount() - scan_started_tick;
+            uint32_t poll_ms;
+
+            if(elapsed_ticks >= scan_timeout_ticks)
+            {
+                break;
+            }
+
+            poll_ms = (uint32_t)((scan_timeout_ticks - elapsed_ticks) * portTICK_PERIOD_MS);
+            if(poll_ms > MENU_NFC_SCAN_POLL_MS)
+            {
+                poll_ms = MENU_NFC_SCAN_POLL_MS;
+            }
+            if(poll_ms == 0U)
+            {
+                poll_ms = 1U;
+            }
+
+            if(poom_nfc_controller_capture_probe(poll_ms, &s_scan_dump))
+            {
+                ok = true;
+                break;
+            }
+        }
         poom_nfc_controller_stop();
         MENU_NFC_TRACE("scan dump capture=%s", ok ? "ok" : "fail");
+
+        if(s_menu_nfc_scan_cancel_requested || !s_menu_nfc_active ||
+           s_menu_nfc_exit_requested)
+        {
+            s_menu_nfc_scan_cancel_requested = false;
+            menu_nfc_scan_meta_release_();
+            s_state = MENU_NFC_STATE_MAIN;
+            menu_nfc_request_redraw_();
+            return;
+        }
 
         if(!ok)
         {
@@ -4730,6 +5630,12 @@ static void menu_nfc_scan_save_to_sd_(void)
         err = menu_nfc_scan_save_emv_summary_(
             rel_path, sizeof(rel_path), &emv_save_errno);
     }
+    else if((s_scan_meta != NULL) && (s_scan_meta->kind == MENU_NFC_SCAN_KIND_T2T) &&
+            (s_scan_dump.read_mode == POOM_NFC_DUMP_READ_FULL) && s_scan_dump.read_ok)
+    {
+        err = poom_nfc_dump_save_mful_bin_to_sd(
+            &s_scan_dump, rel_path, sizeof(rel_path));
+    }
     else
     {
         err = poom_nfc_dump_save_to_sd(&s_scan_dump, rel_path, sizeof(rel_path));
@@ -4857,6 +5763,11 @@ static void menu_nfc_exit_(void)
     s_menu_nfc_active = false;
     s_menu_nfc_exit_requested = false;
     s_menu_nfc_scan_requested = false;
+    s_menu_nfc_scan_cancel_requested = true;
+    s_menu_nfc_mifare_read_requested = false;
+    s_menu_nfc_mifare_read_active = false;
+    s_menu_nfc_t2t_read_requested = false;
+    s_menu_nfc_t2t_read_active = false;
     s_menu_nfc_restore_requested = false;
 
     poom_nfc_emulator_stop();
@@ -4883,6 +5794,7 @@ static void menu_nfc_exit_(void)
     }
 
     menu_nfc_scan_meta_release_();
+    menu_nfc_amiibo_ctx_release_();
 
     const uint8_t token = 1U;
     (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
@@ -4912,6 +5824,18 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         return;
     }
 
+    if(s_menu_nfc_mifare_read_active || s_menu_nfc_t2t_read_active ||
+       s_state == MENU_NFC_STATE_AMIIBO_SCANNING ||
+       s_state == MENU_NFC_STATE_AMIIBO_SYNCING)
+    {
+        if(ev.button == BTN_B)
+        {
+            s_menu_nfc_scan_cancel_requested = true;
+            menu_nfc_request_redraw_();
+        }
+        return;
+    }
+
     if (ev.button == BTN_B)
     {
         if (s_state == MENU_NFC_STATE_MAIN)
@@ -4922,6 +5846,27 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         {
             menu_nfc_emu_stop_();
             s_state = s_emu_running_return_state;
+        }
+        else if(s_state == MENU_NFC_STATE_AMIIBO_KEYBOARD)
+        {
+            s_state = MENU_NFC_STATE_AMIIBO_ACTIONS;
+        }
+        else if(s_state == MENU_NFC_STATE_AMIIBO_ACTIONS)
+        {
+            s_state = MENU_NFC_STATE_AMIIBO_RESULT;
+        }
+        else if(s_state == MENU_NFC_STATE_AMIIBO_LIST ||
+                s_state == MENU_NFC_STATE_AMIIBO_RESULT ||
+                s_state == MENU_NFC_STATE_AMIIBO_SCANNING ||
+                s_state == MENU_NFC_STATE_AMIIBO_SYNCING)
+        {
+            s_menu_nfc_scan_cancel_requested = true;
+            s_state = MENU_NFC_STATE_AMIIBO_MENU;
+        }
+        else if(s_state == MENU_NFC_STATE_AMIIBO_MENU)
+        {
+            menu_nfc_amiibo_ctx_release_();
+            s_state = MENU_NFC_STATE_MAIN;
         }
         else if ((s_state == MENU_NFC_STATE_EMULATE_LIST) || (s_state == MENU_NFC_STATE_EMULATE_SD_LIST))
         {
@@ -4951,7 +5896,11 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         {
             s_state = s_info_return_state;
         }
-        else if ((s_state == MENU_NFC_STATE_SCAN_SCANNING) || (s_state == MENU_NFC_STATE_SCAN_RESULT))
+        else if(s_state == MENU_NFC_STATE_SCAN_SCANNING)
+        {
+            s_menu_nfc_scan_cancel_requested = true;
+        }
+        else if(s_state == MENU_NFC_STATE_SCAN_RESULT)
         {
             menu_nfc_scan_meta_release_();
             s_state = MENU_NFC_STATE_MAIN;
@@ -5007,7 +5956,18 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
                     menu_nfc_set_info_return_("No RAM for read", "", MENU_NFC_STATE_MAIN);
                     return;
                 }
+                s_menu_nfc_scan_cancel_requested = false;
                 s_menu_nfc_scan_requested = true;
+            }
+            else if(s_opt == MENU_NFC_OPT_AMIIBO)
+            {
+                if(!menu_nfc_amiibo_ctx_acquire_())
+                {
+                    menu_nfc_set_info_return_("No RAM for Amiibo", "", MENU_NFC_STATE_MAIN);
+                    return;
+                }
+                s_amiibo->menu_sel = 0U;
+                s_state = MENU_NFC_STATE_AMIIBO_MENU;
             }
             else if (s_opt == MENU_NFC_OPT_EMULATE)
             {
@@ -5024,6 +5984,133 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
                 menu_nfc_load_store_cache_();
                 s_state = MENU_NFC_STATE_STORAGE_LIST;
             }
+        }
+        menu_nfc_request_redraw_();
+        return;
+    }
+
+    if(s_state == MENU_NFC_STATE_AMIIBO_MENU)
+    {
+        if((ev.button == BTN_UP) && (s_amiibo->menu_sel > 0U))
+        {
+            s_amiibo->menu_sel--;
+        }
+        else if((ev.button == BTN_DOWN) && ((s_amiibo->menu_sel + 1U) < MENU_NFC_AMIIBO_COUNT))
+        {
+            s_amiibo->menu_sel++;
+        }
+        else if(ev.button == BTN_A)
+        {
+            if(s_amiibo->menu_sel == MENU_NFC_AMIIBO_COPY)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                s_state = MENU_NFC_STATE_AMIIBO_SCANNING;
+            }
+            else if(s_amiibo->menu_sel == MENU_NFC_AMIIBO_USE)
+            {
+                menu_nfc_amiibo_load_files_();
+                s_state = MENU_NFC_STATE_AMIIBO_LIST;
+            }
+            else
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                s_state = MENU_NFC_STATE_AMIIBO_SYNCING;
+            }
+        }
+        menu_nfc_request_redraw_();
+        return;
+    }
+
+    if(s_state == MENU_NFC_STATE_AMIIBO_RESULT)
+    {
+        if(ev.button == BTN_A)
+        {
+            s_amiibo->result_sel = 0U;
+            s_state = MENU_NFC_STATE_AMIIBO_ACTIONS;
+        }
+        menu_nfc_request_redraw_();
+        return;
+    }
+
+    if(s_state == MENU_NFC_STATE_AMIIBO_ACTIONS)
+    {
+        if(ev.button == BTN_UP)
+        {
+            s_amiibo->result_sel = 0U;
+        }
+        else if(ev.button == BTN_DOWN)
+        {
+            s_amiibo->result_sel = 1U;
+        }
+        else if(ev.button == BTN_A)
+        {
+            if(s_amiibo->result_sel == 1U)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                s_state = MENU_NFC_STATE_AMIIBO_SCANNING;
+            }
+            else if(s_amiibo->name[0] == '\0')
+            {
+                poom_ui_keyboard_init(&s_amiibo->keyboard, s_amiibo->name,
+                                      sizeof(s_amiibo->name), "AMIIBO NAME");
+                s_state = MENU_NFC_STATE_AMIIBO_KEYBOARD;
+            }
+            else
+            {
+                const esp_err_t err = menu_nfc_amiibo_save_();
+                menu_nfc_set_info_return_(err == ESP_OK ? "Amiibo saved" : "Save failed",
+                                          err == ESP_OK ? s_amiibo->name : "Check SD",
+                                          MENU_NFC_STATE_AMIIBO_MENU);
+            }
+        }
+        menu_nfc_request_redraw_();
+        return;
+    }
+
+    if(s_state == MENU_NFC_STATE_AMIIBO_KEYBOARD)
+    {
+        if(poom_ui_keyboard_handle_button(&s_amiibo->keyboard, ev.button) ==
+           POOM_UI_KEYBOARD_ACTION_ACCEPT)
+        {
+            if(s_amiibo->name[0] == '\0')
+            {
+                (void)snprintf(s_amiibo->name, sizeof(s_amiibo->name),
+                               "Amiibo_%s", s_amiibo->id_hex);
+            }
+            const esp_err_t err = menu_nfc_amiibo_save_();
+            menu_nfc_set_info_return_(err == ESP_OK ? "Amiibo saved" : "Save failed",
+                                      err == ESP_OK ? s_amiibo->name : "Check SD",
+                                      MENU_NFC_STATE_AMIIBO_MENU);
+        }
+        else
+        {
+            poom_ui_keyboard_draw(&s_amiibo->keyboard);
+        }
+        return;
+    }
+
+    if(s_state == MENU_NFC_STATE_AMIIBO_LIST)
+    {
+        if(ev.button == BTN_UP)
+        {
+            s_sd_dump_selected--;
+            s_amiibo->scroll_started_ms = menu_nfc_now_ms_();
+        }
+        else if(ev.button == BTN_DOWN)
+        {
+            s_sd_dump_selected++;
+            s_amiibo->scroll_started_ms = menu_nfc_now_ms_();
+        }
+        else if(ev.button == BTN_A && s_sd_dump_selected >= 0 &&
+                s_sd_dump_selected < s_sd_dump_count)
+        {
+            (void)snprintf(s_amiibo->name,
+                           sizeof(s_amiibo->name),
+                           "%s",
+                           s_sd_dump_files[s_sd_dump_selected].name);
+            s_amiibo->scroll_started_ms = menu_nfc_now_ms_();
+            menu_nfc_emu_start_mful_image_(
+                s_sd_dump_files[s_sd_dump_selected].rel_path, MENU_NFC_STATE_AMIIBO_LIST);
         }
         menu_nfc_request_redraw_();
         return;
@@ -5112,7 +6199,26 @@ static void menu_nfc_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         {
             if((s_scan_meta != NULL) && (s_scan_meta->action_count > 0U))
             {
-                menu_nfc_scan_run_action_(menu_nfc_scan_action_selected_());
+                const menu_nfc_scan_action_t action = menu_nfc_scan_action_selected_();
+                if(action == MENU_NFC_SCAN_ACT_READ_CARD ||
+                   action == MENU_NFC_SCAN_ACT_READ_AGAIN)
+                {
+                    s_menu_nfc_scan_cancel_requested = false;
+                    s_menu_nfc_mifare_read_active = true;
+                    s_menu_nfc_mifare_read_requested = true;
+                    menu_nfc_request_redraw_();
+                }
+                else if(action == MENU_NFC_SCAN_ACT_READ_FULL)
+                {
+                    s_menu_nfc_scan_cancel_requested = false;
+                    s_menu_nfc_t2t_read_active = true;
+                    s_menu_nfc_t2t_read_requested = true;
+                    menu_nfc_request_redraw_();
+                }
+                else
+                {
+                    menu_nfc_scan_run_action_(action);
+                }
             }
         }
         return;
@@ -5396,6 +6502,64 @@ static void menu_nfc_ui_task_(void *arg)
             menu_nfc_run_scan_();
         }
 
+        if(s_state == MENU_NFC_STATE_AMIIBO_SCANNING)
+        {
+            if(s_amiibo != NULL)
+            {
+                menu_nfc_run_amiibo_scan_();
+            }
+        }
+
+        if(s_state == MENU_NFC_STATE_AMIIBO_SYNCING)
+        {
+            const esp_err_t err = menu_nfc_amiibo_sync_catalog_();
+            if(s_menu_nfc_scan_cancel_requested)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                s_state = MENU_NFC_STATE_AMIIBO_MENU;
+                menu_nfc_request_redraw_();
+            }
+            else
+            {
+                menu_nfc_set_info_return_(err == ESP_OK ? "Catalog updated" : "Sync failed",
+                                          err == ESP_OK ? "Saved on SD" :
+                                          (err == ESP_ERR_NOT_FOUND ? "Set WiFi first" : "Check connection"),
+                                          MENU_NFC_STATE_AMIIBO_MENU);
+            }
+        }
+
+        if(s_menu_nfc_mifare_read_requested)
+        {
+            s_menu_nfc_mifare_read_requested = false;
+            if(s_menu_nfc_scan_cancel_requested)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                s_menu_nfc_mifare_read_active = false;
+                s_state = MENU_NFC_STATE_SCAN_ACTIONS;
+                menu_nfc_request_redraw_();
+            }
+            else
+            {
+                menu_nfc_scan_run_action_(MENU_NFC_SCAN_ACT_READ_CARD);
+            }
+        }
+
+        if(s_menu_nfc_t2t_read_requested)
+        {
+            s_menu_nfc_t2t_read_requested = false;
+            if(s_menu_nfc_scan_cancel_requested)
+            {
+                s_menu_nfc_scan_cancel_requested = false;
+                s_menu_nfc_t2t_read_active = false;
+                s_state = MENU_NFC_STATE_SCAN_ACTIONS;
+                menu_nfc_request_redraw_();
+            }
+            else
+            {
+                menu_nfc_scan_run_action_(MENU_NFC_SCAN_ACT_READ_FULL);
+            }
+        }
+
         if(s_menu_nfc_restore_requested)
         {
             s_menu_nfc_restore_requested = false;
@@ -5412,6 +6576,13 @@ static void menu_nfc_ui_task_(void *arg)
                 case MENU_NFC_STATE_SCAN_INFO:            menu_nfc_draw_scan_info_(); break;
                 case MENU_NFC_STATE_SCAN_ACTIONS:         menu_nfc_draw_scan_actions_(); break;
                 case MENU_NFC_STATE_EMV_APP_SELECT:       menu_nfc_draw_emv_app_select_(); break;
+                case MENU_NFC_STATE_AMIIBO_MENU:          menu_nfc_draw_amiibo_menu_(); break;
+                case MENU_NFC_STATE_AMIIBO_SCANNING:      menu_nfc_draw_busy_progress_("COPY AMIIBO", "Hold near POOM", 0U, 1U); break;
+                case MENU_NFC_STATE_AMIIBO_RESULT:        menu_nfc_draw_amiibo_result_(); break;
+                case MENU_NFC_STATE_AMIIBO_ACTIONS:       menu_nfc_draw_amiibo_actions_(); break;
+                case MENU_NFC_STATE_AMIIBO_KEYBOARD:      poom_ui_keyboard_draw(&s_amiibo->keyboard); break;
+                case MENU_NFC_STATE_AMIIBO_LIST:          menu_nfc_draw_emulate_sd_list_(); break;
+                case MENU_NFC_STATE_AMIIBO_SYNCING:       menu_nfc_draw_busy_progress_("AMIIBO", "Starting sync", 0U, 3U); break;
                 case MENU_NFC_STATE_EMULATE_LIST:         menu_nfc_draw_emulate_list_(); break;
                 case MENU_NFC_STATE_EMULATE_SOURCE:       menu_nfc_draw_emulate_source_(); break;
                 case MENU_NFC_STATE_EMULATE_SD_LIST:      menu_nfc_draw_emulate_sd_list_(); break;
@@ -5429,6 +6600,17 @@ static void menu_nfc_ui_task_(void *arg)
                     break;
             }
             s_menu_nfc_input_dirty = false;
+        }
+
+        if((s_amiibo != NULL) &&
+           (((s_state == MENU_NFC_STATE_AMIIBO_LIST) &&
+             (s_sd_dump_selected >= 0) && (s_sd_dump_selected < s_sd_dump_count) &&
+             (strlen(s_sd_dump_files[s_sd_dump_selected].name) > 19U)) ||
+            ((s_state == MENU_NFC_STATE_EMULATE_RUNNING) &&
+             (s_emu_running_return_state == MENU_NFC_STATE_AMIIBO_LIST) &&
+             (strlen(s_amiibo->name) > 20U))))
+        {
+            s_menu_nfc_input_dirty = true;
         }
 
         TickType_t wait_ticks = pdMS_TO_TICKS(MENU_NFC_UI_POLL_MS);
@@ -5458,10 +6640,16 @@ void menu_nfc_show(void)
     s_menu_nfc_active = true;
     s_menu_nfc_exit_requested = false;
     s_menu_nfc_scan_requested = false;
+    s_menu_nfc_scan_cancel_requested = false;
+    s_menu_nfc_mifare_read_requested = false;
+    s_menu_nfc_mifare_read_active = false;
+    s_menu_nfc_t2t_read_requested = false;
+    s_menu_nfc_t2t_read_active = false;
     s_menu_nfc_input_dirty = true;
     s_scan_dump_valid = false;
     s_scan_ndef_known = false;
     menu_nfc_scan_meta_release_();
+    menu_nfc_amiibo_ctx_release_();
     menu_nfc_scan_actions_reset_();
     s_emu_active_id_valid = false;
     s_emu_source_sd = false;
