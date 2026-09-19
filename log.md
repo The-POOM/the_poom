@@ -1,3 +1,56 @@
+## POOM 1.0.9
+
+This release expands POOM's NFC capabilities with improved NTAG and MIFARE Classic support, adds a dedicated Amiibo workflow, and introduces the new GAME STORE for managing and installing games directly from POOM.
+
+### NFC / NTAG
+
+- Improved full reading support for **NTAG213, NTAG215 and NTAG216**, including tag detection, correct page count, version information and signature reading.
+
+- Improved NTAG identification to correctly distinguish between supported tag variants.
+
+### AMIIBO
+
+- Added a dedicated **Amiibo** menu inside NFC with options to copy, save, select and use Amiibos.
+
+- Amiibos can now be stored on the SD card as `.nfc` files under `/nfc/MyAmiibo`.
+
+- Implemented and improved **Amiibo emulation**, including NTAG215 authentication compatibility.
+
+- Improved handling of Amiibo data during loading and emulation.
+
+### MIFARE CLASSIC
+
+- Fixed **MIFARE Classic** reading, with important improvements for **4K cards**.
+
+- Improved key searching and authentication handling.
+
+- Improved cancellation during long MIFARE Classic operations to avoid unnecessary waits or blocked operations.
+
+### GAME STORE
+
+- Added **GAME STORE** to the `GAMER` menu.
+
+- POOM can now browse the available game catalog directly from the device.
+
+- Added support for downloading game covers and game files.
+
+- Added an offline game library using previously downloaded catalog information and assets.
+
+- Games can now be installed directly from the SD card.
+
+### SETTINGS / SD
+
+- Added **APP CLEAN** under `Settings > SD`.
+
+- `APP CLEAN` removes games, covers and cached data stored under `/sdcard/apps`.
+
+- After cleanup, POOM automatically recreates the empty `/sdcard/apps` directory.
+
+### Community Contribution
+Special thanks to THNRGLABS for reporting issues and helping improve POOM.
+
+
+
 ## POOM 1.0.8
 
 Documented period: September 8–11, 2026.
