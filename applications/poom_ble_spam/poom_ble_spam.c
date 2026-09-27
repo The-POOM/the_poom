@@ -118,28 +118,39 @@ static const char *s_device_names[] = {
 /**
  * Google Fast Pair - "Model ID Data".
  *
- * Layout: 06 16 2C FE <model id (24-bit)>
+ * Layout: 06 16 2C FE <model id (24-bit, big endian)>
  *   0x16     Service Data AD type
- *   0xFE2C   Fast Pair Service UUID (little endian on air)
+ *   0xFE2C   Fast Pair Service UUID
  *   model id 24-bit identifier of a Fast Pair capable product
  *
  * Trailing bytes are zero padding, which terminates AD parsing cleanly.
  *
- * A prompt only appears when the model ID matches a product in the Seeker's
- * Fast Pair database, and Google has patched Fast Pair prompts on current
- * Android releases - so expect this to be effective mainly on older, unpatched
- * builds. The model IDs below are PLACEHOLDERS and are not confirmed working.
+ * These are Google's own test/development registrations, which exist so that
+ * implementers can exercise Fast Pair without impersonating a shipping product:
+ *   0x00000D  "Test"          0x000048 / 0x000049  "Fast Pair Headphones"
+ *   0x00000A  anti-spoofing test
+ *
+ * Deliberately NOT included: model IDs belonging to real commercial products.
+ * Advertising those makes a victim's phone present a spoofed brand popup, and
+ * the public dataset they come from was itself withdrawn by its author for
+ * legal reasons. Operators who need those IDs for an authorised engagement
+ * should supply them themselves rather than have them baked into the firmware.
+ *
+ * Expect this to work only on older Android builds: Google has patched Fast
+ * Pair prompts on current releases.
  */
 static const uint8_t s_google_adv_raw[][POOM_BLE_SPAM_ADV_DATA_LEN] = {
-    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x01},
-    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x02},
-    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x03},
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x0D},   /* 0x00000D - Test          */
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x48},   /* 0x000048 - FP Headphones */
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x49},   /* 0x000049 - FP Headphones */
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x0A},   /* 0x00000A - anti-spoofing */
 };
 
 static const char *s_google_names[] = {
-    "FASTPAIR 1",
-    "FASTPAIR 2",
-    "FASTPAIR 3",
+    "FP TEST 0D",
+    "FP HEADPHONES",
+    "FP HEADPHONES2",
+    "FP ANTISPOOF",
 };
 
 /**
