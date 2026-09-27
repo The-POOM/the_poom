@@ -1,3 +1,70 @@
+## POOM 1.0.10
+
+This release introduces the new **Motion MIDI** application, allowing POOM to use IMU motion as a BLE MIDI controller for drums and melodic gestures.
+
+### MOTION MIDI
+
+- Added the new **Motion MIDI** application using the onboard IMU and BLE MIDI.
+
+- Added **DRUM mode** with motion-triggered percussion using MIDI channel 10.
+
+- Added support for Kick, Snare, Closed Hi-Hat, Open Hi-Hat, Tom and Crash sounds.
+
+- Added downward strike detection with hit-strength-based MIDI velocity.
+
+- Improved gesture filtering to reduce false triggers and prevent the upward return motion from generating duplicate hits.
+
+### MELODY MODE
+
+- Added **MELODY mode** using device tilt to select musical notes over MIDI channel 1.
+
+- For the best experience in **GarageBand**, use a **Piano** instrument when playing in MELODY mode.
+
+- Added **FIXED mode**, which keeps the selected note while the A button is held.
+
+- Added **MOVING mode**, allowing the selected note to follow device tilt while playing.
+
+- Added Major Pentatonic, Minor Pentatonic, Major and Minor scales.
+
+- Added configurable tonic, octave and velocity intensity.
+
+- Added tilt smoothing and hysteresis to prevent unwanted note changes near note boundaries.
+
+### CALIBRATION / IMU
+
+- Added motion calibration for gyro bias, gravity direction and player reference posture.
+
+- Added startup calibration and manual recalibration from the Motion MIDI menu.
+
+- Improved IMU processing for short drum strikes and orientation tracking.
+
+- Added stale sensor detection with automatic recovery when valid IMU data returns.
+
+- Temporary sensor read interruptions no longer reset the calibrated playing position.
+
+### BLE MIDI
+
+- Improved BLE MIDI note handling for pause, disconnect and application exit.
+
+- Active notes are now automatically released when leaving Motion MIDI or when the BLE connection is lost.
+
+- BLE reconnection does not automatically resume previously held notes.
+
+- Improved MIDI worker handling so UI commands, calibration and note generation are processed safely without concurrent state changes.
+
+### DISPLAY / CONTROLS
+
+- Added Motion MIDI controls using the existing POOM menu layout.
+
+- Added selectable parameters using UP / DOWN and LEFT / RIGHT.
+
+- The A button controls actions such as arm, play and calibration.
+
+- The B button always exits Motion MIDI and safely releases active MIDI notes.
+
+- Added status information for BLE connection, armed state, pause state, current note and strike velocity.
+
+
 ## POOM 1.0.9
 
 This release expands POOM's NFC capabilities with improved NTAG and MIFARE Classic support, adds a dedicated Amiibo workflow, and introduces the new GAME STORE for managing and installing games directly from POOM.

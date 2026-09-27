@@ -1,742 +1,277 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 THE POOM
-
-/* poom_motion_midi.c
- *
- * Motion MIDI application over BLE MIDI
- * - Reads IMU motion and triggers drum notes on MIDI channel 10
- * - Exposes configurable note/threshold globals for menu-driven control
- *
- * Notes:
- * - BLE MIDI transport stays in ble_midi component
- * - This component owns the gesture-to-note logic
- */
-
 #include "poom_motion_midi.h"
-
-#include <math.h>
-#include <stdbool.h>
-#include <stdio.h>
+#include "ble_midi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "motion_engine.h"
+#include "poom_imu_stream.h"
+#include "poom_sbus.h"
 #include <string.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "ble_midi.h"
-#include "poom_imu_stream.h"
-
-/**
- * @file poom_motion_midi.c
- * @brief Motion MIDI application logic over BLE MIDI.
- */
-
-/* =========================
- * Local log macros (printf)
- * ========================= */
-
-#if POOM_MOTION_MIDI_LOG_ENABLED
-    static const char *POOM_MOTION_MIDI_TAG = "poom_motion_midi";
-
-    #define POOM_MOTION_MIDI_PRINTF_E(fmt, ...) \
-        printf("[E] [%s] %s:%d: " fmt "\\n", POOM_MOTION_MIDI_TAG, __func__, __LINE__, ##__VA_ARGS__)
-
-    #define POOM_MOTION_MIDI_PRINTF_W(fmt, ...) \
-        printf("[W] [%s] %s:%d: " fmt "\\n", POOM_MOTION_MIDI_TAG, __func__, __LINE__, ##__VA_ARGS__)
-
-    #define POOM_MOTION_MIDI_PRINTF_I(fmt, ...) \
-        printf("[I] [%s] %s:%d: " fmt "\\n", POOM_MOTION_MIDI_TAG, __func__, __LINE__, ##__VA_ARGS__)
-
-    #if POOM_MOTION_MIDI_DEBUG_LOG_ENABLED
-        #define POOM_MOTION_MIDI_PRINTF_D(fmt, ...) \
-            printf("[D] [%s] %s:%d: " fmt "\\n", POOM_MOTION_MIDI_TAG, __func__, __LINE__, ##__VA_ARGS__)
-    #else
-        #define POOM_MOTION_MIDI_PRINTF_D(...) do { } while (0)
-    #endif
-#else
-    #define POOM_MOTION_MIDI_PRINTF_E(...) do { } while (0)
-    #define POOM_MOTION_MIDI_PRINTF_W(...) do { } while (0)
-    #define POOM_MOTION_MIDI_PRINTF_I(...) do { } while (0)
-    #define POOM_MOTION_MIDI_PRINTF_D(...) do { } while (0)
-#endif
-
-/* =========================
- * Local constants
- * ========================= */
-#define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
-
-/* BLE MIDI */
-#define MIDI_PORT_INDEX                     0U
-#define MIDI_NOTE_ON_CH10_STATUS            0x99U
-#define MIDI_NOTE_OFF_CH10_STATUS           0x89U
-#define MIDI_NOTE_ON_CH1_STATUS             0x90U
-#define MIDI_NOTE_OFF_CH1_STATUS            0x80U
-#define MIDI_NOTE_OFF_VALUE                 0x00U
-#define MIDI_MESSAGE_SIZE                   3U
-#define MIDI_VELOCITY_MIN                   25U
-#define MIDI_VELOCITY_MAX                   127U
-
-/* Buttons */
-/* Drum notes (defaults only; actual note is controlled by g_midi_note) */
-#define NOTE_KICK                           36U
-#define NOTE_SNARE                          38U
-#define NOTE_HH_CLOSED                      42U
-#define NOTE_HH_OPEN                        46U
-#define NOTE_CRASH                          49U
-#define NOTE_LOW_TOM                        45U
-
-/* Hit detector */
-#define G_BASELINE                          1.0f
-#define ACC_MG_TO_G                         1000.0f
-#define GYRO_MDPS_TO_DPS                    1000.0f
-#define GYRO_DYNAMIC_SCALE_DPS              700.0f
-#define MOTION_NORM_MIN                     0.06f
-#define MOTION_NORM_MAX                     2.2f
-#define NORMALIZED_MIN                      0.0f
-#define NORMALIZED_MAX                      1.0f
-#define MIDI_HIT_THRESHOLD_ON_DEFAULT       12U
-#define MIDI_HIT_MIN_INTERVAL_MS            80U
-#define MIDI_HIT_NOTE_LEN_MS                35U
-#define MIDI_HIT_ARM_SAMPLES               3U
-#define MIDI_CALIB_SAMPLES                 50U
-#define MOTION_BASELINE_ALPHA              0.01f
-#define MOTION_BASELINE_QUIET_MARGIN       0.04f
-#define MOTION_RISE_MIN                    0.015f
-
-/* Melody mode */
-#define MELODY_GYRO_ON_DPS                  140.0f
-#define MELODY_GYRO_OFF_DPS                 70.0f
-#define MELODY_GYRO_VELOCITY_DPS_MAX        550.0f
-#define MELODY_OCTAVE_STEP_DPS              220.0f
-#define MELODY_OCTAVE_REARM_DPS             80.0f
-#define MELODY_OCTAVE_COOLDOWN_MS           250U
-#define MELODY_OCTAVE_MIN                   (-4)
-#define MELODY_OCTAVE_MAX                   (4)
-#define MELODY_DEGREE_STEP_DPS              180.0f
-#define MELODY_DEGREE_REARM_DPS             70.0f
-#define MELODY_DEGREE_COOLDOWN_MS           180U
-#define MELODY_DEGREE_MIN                   (0)
-#define MELODY_DEGREE_MAX                   (4)
-
-/* Task */
-#define POOM_MOTION_MIDI_TASK_DELAY_MS      10U
-#define POOM_MOTION_MIDI_START_DELAY_MS     500U
-#define POOM_MOTION_MIDI_TASK_STACK_SIZE    2048U
-#define POOM_MOTION_MIDI_TASK_PRIORITY      (tskIDLE_PRIORITY + 2)
-#define POOM_MOTION_MIDI_TASK_NAME          "poom_motion_m"
-
-/* =========================
- * Local state
- * ========================= */
-uint8_t g_midi_note = NOTE_CRASH;
-uint8_t g_hit_threshold = MIDI_HIT_THRESHOLD_ON_DEFAULT;
-uint8_t g_midi_mode = POOM_MIDI_MODE_DRUM;
-uint8_t g_midi_scale = POOM_MIDI_SCALE_PENTATONIC_MAJOR;
-
-static uint8_t s_active_note = NOTE_KICK;
-static bool s_hit_active = false;
-static bool s_started = false;
-static volatile bool s_stop_requested = false;
-static TickType_t s_last_hit_tick = 0;
-static TickType_t s_note_on_tick = 0;
-static TaskHandle_t s_poom_motion_midi_task = NULL;
-static uint8_t s_arm_count = 0U;
-static float s_motion_baseline = 0.0f;
-static float s_calib_motion_sum = 0.0f;
-static uint16_t s_calib_count = 0U;
-static bool s_calibrated = false;
-static float s_prev_motion_hp = 0.0f;
-static bool s_melody_note_active = false;
-static uint8_t s_melody_active_note = 60U;
-static int8_t s_melody_octave = 0;
-static bool s_melody_octave_armed = true;
-static TickType_t s_melody_last_octave_step_tick = 0;
-static int8_t s_melody_degree = 0;
-static bool s_melody_degree_armed = true;
-static TickType_t s_melody_last_degree_step_tick = 0;
-static uint8_t s_prev_mode = POOM_MIDI_MODE_DRUM;
-
-static const int8_t k_pentatonic_major_intervals_[5] = {0, 2, 4, 7, 9};
-static const int8_t k_pentatonic_minor_intervals_[5] = {0, 3, 5, 7, 10};
-
-/* =========================
- * Local helpers
- * ========================= */
-/**
- * @brief Clamps a floating-point value to the provided range.
- *
- * @param value Input value.
- * @param min_value Lower bound.
- * @param max_value Upper bound.
- * @return Clamped value.
- */
-static inline float poom_motion_midi_clampf_(float value, float min_value, float max_value)
+typedef enum
 {
-    if (value < min_value)
-    {
-        return min_value;
-    }
+    CMD_CONFIG,
+    CMD_PAUSE,
+    CMD_GATE_ON,
+    CMD_GATE_OFF,
+    CMD_TOGGLE,
+    CMD_CALIBRATE
+} command_kind_t;
+typedef struct
+{
+    command_kind_t kind;
+    poom_midi_config_t config;
+} command_t;
+static QueueHandle_t s_commands;
+static SemaphoreHandle_t s_done;
+static bool s_started, s_stop, s_emergency_pause, s_config_set;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static poom_midi_config_t s_config;
+static poom_midi_status_t s_status;
 
-    if (value > max_value)
-    {
-        return max_value;
-    }
-
-    return value;
+static uint32_t now_ms_(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
-/**
- * @brief Sends MIDI NOTE ON on channel 10.
- *
- * @param note MIDI note.
- * @param velocity MIDI velocity.
- */
-static inline void poom_motion_midi_midi_note_on_ch10_(uint8_t note, uint8_t velocity)
+static void send_(void* user, uint8_t status, uint8_t note, uint8_t velocity)
 {
-    uint8_t msg[MIDI_MESSAGE_SIZE] = {MIDI_NOTE_ON_CH10_STATUS, note, velocity};
-    (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
+    (void)user;
+    uint8_t message[] = {status, note, velocity};
+    (void)blemidi_send_message(0, message, sizeof(message));
 }
 
-/**
- * @brief Sends MIDI NOTE OFF on channel 10.
- *
- * @param note MIDI note.
- */
-static inline void poom_motion_midi_midi_note_off_ch10_(uint8_t note)
+void poom_motion_midi_get_config(poom_midi_config_t* out)
 {
-    uint8_t msg[MIDI_MESSAGE_SIZE] = {MIDI_NOTE_OFF_CH10_STATUS, note, MIDI_NOTE_OFF_VALUE};
-    (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_midi_note_on_ch1`.
- *
- * @param[in] note Parameter passed to the function.
- * @param[in] velocity Parameter passed to the function.
- * @return inline void
- */
-static inline void poom_motion_midi_midi_note_on_ch1_(uint8_t note, uint8_t velocity)
-{
-    uint8_t msg[MIDI_MESSAGE_SIZE] = {MIDI_NOTE_ON_CH1_STATUS, note, velocity};
-    (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_midi_note_off_ch1`.
- *
- * @param[in] note Parameter passed to the function.
- * @return inline void
- */
-static inline void poom_motion_midi_midi_note_off_ch1_(uint8_t note)
-{
-    uint8_t msg[MIDI_MESSAGE_SIZE] = {MIDI_NOTE_OFF_CH1_STATUS, note, MIDI_NOTE_OFF_VALUE};
-    (void)blemidi_send_message(MIDI_PORT_INDEX, msg, sizeof(msg));
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_clamp_u8`.
- *
- * @param[in] value Parameter passed to the function.
- * @param[in] min_value Parameter passed to the function.
- * @param[in] max_value Parameter passed to the function.
- * @return inline uint8_t
- */
-static inline uint8_t poom_motion_midi_clamp_u8_(int value, int min_value, int max_value)
-{
-    if (value < min_value)
-    {
-        return (uint8_t)min_value;
-    }
-    if (value > max_value)
-    {
-        return (uint8_t)max_value;
-    }
-    return (uint8_t)value;
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_melody_reset`.
- *
- * @return void
- */
-static void poom_motion_midi_melody_reset_(void)
-{
-    s_melody_note_active = false;
-    s_melody_active_note = 60U;
-    s_melody_octave = 0;
-    s_melody_octave_armed = true;
-    s_melody_last_octave_step_tick = 0;
-    s_melody_degree = 0;
-    s_melody_degree_armed = true;
-    s_melody_last_degree_step_tick = 0;
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_scale_interval`.
- *
- * @param[in] scale Parameter passed to the function.
- * @param[in] degree Parameter passed to the function.
- * @return inline uint8_t
- */
-static inline uint8_t poom_motion_midi_scale_interval_(uint8_t scale, uint8_t degree)
-{
-    const uint8_t idx = (degree > 4U) ? 4U : degree;
-    if (scale == POOM_MIDI_SCALE_PENTATONIC_MINOR)
-    {
-        return (uint8_t)k_pentatonic_minor_intervals_[idx];
-    }
-    return (uint8_t)k_pentatonic_major_intervals_[idx];
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_melody_note`.
- *
- * @return uint8_t
- */
-static uint8_t poom_motion_midi_melody_note_(void)
-{
-    const int tonic = (int)g_midi_note;
-    const int interval = (int)poom_motion_midi_scale_interval_(g_midi_scale, (uint8_t)s_melody_degree);
-    const int note = tonic + interval + ((int)s_melody_octave * 12);
-    return poom_motion_midi_clamp_u8_(note, 0, 127);
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_melody_velocity`.
- *
- * @param[in] gyro_dps_norm Parameter passed to the function.
- * @return uint8_t
- */
-static uint8_t poom_motion_midi_melody_velocity_(float gyro_dps_norm)
-{
-    float v = gyro_dps_norm / MELODY_GYRO_VELOCITY_DPS_MAX;
-    v = poom_motion_midi_clampf_(v, 0.0f, 1.0f);
-    uint8_t vel = (uint8_t)(v * (float)MIDI_VELOCITY_MAX);
-    if (vel < MIDI_VELOCITY_MIN)
-    {
-        vel = MIDI_VELOCITY_MIN;
-    }
-    if (vel > MIDI_VELOCITY_MAX)
-    {
-        vel = MIDI_VELOCITY_MAX;
-    }
-    return vel;
-}
-
-/**
- * @brief Internal helper for `poom_motion_midi_melody_step`.
- *
- * @param[in] gx_dps Parameter passed to the function.
- * @param[in] gy_dps Parameter passed to the function.
- * @param[in] gz_dps Parameter passed to the function.
- * @return void
- */
-static void poom_motion_midi_melody_step_(float gx_dps, float gy_dps, float gz_dps)
-{
-    TickType_t now = xTaskGetTickCount();
-
-    const float gyro_norm = sqrtf(gx_dps * gx_dps + gy_dps * gy_dps + gz_dps * gz_dps);
-
-    if (!s_melody_octave_armed)
-    {
-        if (fabsf(gy_dps) <= MELODY_OCTAVE_REARM_DPS)
-        {
-            s_melody_octave_armed = true;
-        }
-    }
-    else
-    {
-        if ((now - s_melody_last_octave_step_tick) >= pdMS_TO_TICKS(MELODY_OCTAVE_COOLDOWN_MS))
-        {
-            if (gy_dps >= MELODY_OCTAVE_STEP_DPS)
-            {
-                if (s_melody_octave < MELODY_OCTAVE_MAX)
-                {
-                    s_melody_octave++;
-                }
-                s_melody_octave_armed = false;
-                s_melody_last_octave_step_tick = now;
-            }
-            else if (gy_dps <= -MELODY_OCTAVE_STEP_DPS)
-            {
-                if (s_melody_octave > MELODY_OCTAVE_MIN)
-                {
-                    s_melody_octave--;
-                }
-                s_melody_octave_armed = false;
-                s_melody_last_octave_step_tick = now;
-            }
-        }
-    }
-
-    if (!s_melody_degree_armed)
-    {
-        if (fabsf(gx_dps) <= MELODY_DEGREE_REARM_DPS)
-        {
-            s_melody_degree_armed = true;
-        }
-    }
-    else
-    {
-        if ((now - s_melody_last_degree_step_tick) >= pdMS_TO_TICKS(MELODY_DEGREE_COOLDOWN_MS))
-        {
-            if (gx_dps >= MELODY_DEGREE_STEP_DPS)
-            {
-                if (s_melody_degree < MELODY_DEGREE_MAX)
-                {
-                    s_melody_degree++;
-                }
-                s_melody_degree_armed = false;
-                s_melody_last_degree_step_tick = now;
-            }
-            else if (gx_dps <= -MELODY_DEGREE_STEP_DPS)
-            {
-                if (s_melody_degree > MELODY_DEGREE_MIN)
-                {
-                    s_melody_degree--;
-                }
-                s_melody_degree_armed = false;
-                s_melody_last_degree_step_tick = now;
-            }
-        }
-    }
-
-    const bool want_note_on = (gyro_norm >= MELODY_GYRO_ON_DPS) && blemidi_is_connected();
-    const bool want_note_off = (gyro_norm <= MELODY_GYRO_OFF_DPS) || !blemidi_is_connected();
-    const uint8_t note = poom_motion_midi_melody_note_();
-
-    if (s_melody_note_active)
-    {
-        if (want_note_off)
-        {
-            poom_motion_midi_midi_note_off_ch1_(s_melody_active_note);
-            s_melody_note_active = false;
-        }
-        else if (note != s_melody_active_note)
-        {
-            poom_motion_midi_midi_note_off_ch1_(s_melody_active_note);
-            s_melody_active_note = note;
-            poom_motion_midi_midi_note_on_ch1_(note, MIDI_VELOCITY_MIN);
-        }
-    }
-    else
-    {
-        if (want_note_on)
-        {
-            s_melody_active_note = note;
-            const uint8_t vel = poom_motion_midi_melody_velocity_(gyro_norm);
-            poom_motion_midi_midi_note_on_ch1_(note, vel);
-            s_melody_note_active = true;
-        }
-    }
-}
-
-/**
- * @brief BLE MIDI RX callback for diagnostics.
- *
- * @param blemidi_port BLE MIDI logical port.
- * @param timestamp BLE MIDI timestamp.
- * @param midi_status MIDI status byte.
- * @param remaining_message Remaining MIDI payload bytes.
- * @param len Remaining payload length.
- * @param continued_sysex_pos Continued sysex position.
- */
-static void poom_motion_midi_midi_rx_cb_(uint8_t blemidi_port,
-                                       uint16_t timestamp,
-                                       uint8_t midi_status,
-                                       uint8_t *remaining_message,
-                                       size_t len,
-                                       size_t continued_sysex_pos)
-{
-    (void)continued_sysex_pos;
-    POOM_MOTION_MIDI_PRINTF_I("RX MIDI port=%u ts=%u status=0x%02X",
-                            (unsigned)blemidi_port,
-                            (unsigned)timestamp,
-                            (unsigned)midi_status);
-
-    for (size_t i = 0; i < len; i++)
-    {
-        POOM_MOTION_MIDI_PRINTF_D("RX data[%u]=0x%02X", (unsigned)i, (unsigned)remaining_message[i]);
-    }
-}
-
-/**
- * @brief Executes one Motion MIDI processing step.
- *
- * Reads IMU data, computes motion intensity, and emits NOTE ON/OFF events
- * according to configured thresholds and timings.
- *
- * @param trigger_pressed Hit detection enable flag.
- */
-static void poom_motion_midi_midi_step_(bool trigger_pressed)
-{
-    poom_imu_data_t d = {0};
-    if (!poom_imu_stream_read_data(&d))
-    {
+    if(!out)
         return;
-    }
-
-    if (g_midi_mode > POOM_MIDI_MODE_MELODY)
-    {
-        g_midi_mode = POOM_MIDI_MODE_DRUM;
-    }
-    if (g_midi_scale > POOM_MIDI_SCALE_PENTATONIC_MINOR)
-    {
-        g_midi_scale = POOM_MIDI_SCALE_PENTATONIC_MAJOR;
-    }
-
-    float ax = d.acceleration_mg[0] / ACC_MG_TO_G;
-    float ay = d.acceleration_mg[1] / ACC_MG_TO_G;
-    float az = d.acceleration_mg[2] / ACC_MG_TO_G;
-    float gx = d.angular_rate_mdps[0] / GYRO_MDPS_TO_DPS;
-    float gy = d.angular_rate_mdps[1] / GYRO_MDPS_TO_DPS;
-    float gz = d.angular_rate_mdps[2] / GYRO_MDPS_TO_DPS;
-
-    if (g_midi_mode != s_prev_mode)
-    {
-        if (s_hit_active)
-        {
-            poom_motion_midi_midi_note_off_ch10_(s_active_note);
-            s_hit_active = false;
-        }
-        if (s_melody_note_active)
-        {
-            poom_motion_midi_midi_note_off_ch1_(s_melody_active_note);
-            s_melody_note_active = false;
-        }
-        s_prev_mode = g_midi_mode;
-    }
-
-    if (g_midi_mode == POOM_MIDI_MODE_MELODY)
-    {
-        poom_motion_midi_melody_step_(gx, gy, gz);
-        return;
-    }
-
-    float a_total = sqrtf(ax * ax + ay * ay + az * az);
-    float a_dynamic = fabsf(a_total - G_BASELINE);
-    float gyro_dynamic = sqrtf(gx * gx + gy * gy + gz * gz) / GYRO_DYNAMIC_SCALE_DPS;
-    float motion_raw = a_dynamic + gyro_dynamic;
-
-    if (!s_calibrated)
-    {
-        s_calib_motion_sum += motion_raw;
-        s_calib_count++;
-        if (s_calib_count >= MIDI_CALIB_SAMPLES)
-        {
-            s_motion_baseline = s_calib_motion_sum / (float)s_calib_count;
-            s_calibrated = true;
-            s_prev_motion_hp = 0.0f;
-            POOM_MOTION_MIDI_PRINTF_I("calibrated baseline=%.3f (%u samples)",
-                                    (double)s_motion_baseline,
-                                    (unsigned)s_calib_count);
-        }
-        return;
-    }
-
-    if (!s_hit_active)
-    {
-        if (motion_raw <= (s_motion_baseline + MOTION_BASELINE_QUIET_MARGIN))
-        {
-            s_motion_baseline = ((1.0f - MOTION_BASELINE_ALPHA) * s_motion_baseline) +
-                                (MOTION_BASELINE_ALPHA * motion_raw);
-        }
-    }
-
-    float motion = motion_raw - s_motion_baseline;
-    if (motion < 0.0f)
-    {
-        motion = 0.0f;
-    }
-    float motion_rise = motion - s_prev_motion_hp;
-    s_prev_motion_hp = motion;
-
-    float norm = (motion - MOTION_NORM_MIN) / (MOTION_NORM_MAX - MOTION_NORM_MIN);
-    uint8_t velocity = (uint8_t)(poom_motion_midi_clampf_(norm, NORMALIZED_MIN, NORMALIZED_MAX) *
-                                 (float)MIDI_VELOCITY_MAX);
-    TickType_t now = xTaskGetTickCount();
-
-    if (s_hit_active &&
-        (((now - s_note_on_tick) >= pdMS_TO_TICKS(MIDI_HIT_NOTE_LEN_MS)) || !trigger_pressed))
-    {
-        poom_motion_midi_midi_note_off_ch10_(s_active_note);
-        s_hit_active = false;
-    }
-
-    if (!trigger_pressed)
-    {
-        return;
-    }
-
-    if (velocity >= g_hit_threshold)
-    {
-        if (motion_rise >= MOTION_RISE_MIN)
-        {
-            if (s_arm_count < MIDI_HIT_ARM_SAMPLES)
-            {
-                s_arm_count++;
-            }
-        }
-        else
-        {
-            s_arm_count = 0U;
-        }
-    }
-    else
-    {
-        s_arm_count = 0U;
-    }
-
-    if (!s_hit_active &&
-        (s_arm_count >= MIDI_HIT_ARM_SAMPLES) &&
-        ((now - s_last_hit_tick) >= pdMS_TO_TICKS(MIDI_HIT_MIN_INTERVAL_MS)))
-    {
-        uint8_t midi_vel = velocity;
-        if (midi_vel < MIDI_VELOCITY_MIN)
-        {
-            midi_vel = MIDI_VELOCITY_MIN;
-        }
-        if (midi_vel > MIDI_VELOCITY_MAX)
-        {
-            midi_vel = MIDI_VELOCITY_MAX;
-        }
-
-        const uint8_t note = g_midi_note;
-        s_active_note = note;
-        poom_motion_midi_midi_note_on_ch10_(note, midi_vel);
-        s_hit_active = true;
-        s_note_on_tick = now;
-        s_last_hit_tick = now;
-        s_arm_count = 0U;
-
-        POOM_MOTION_MIDI_PRINTF_I("HIT: motion=%.2f vel=%u note=%u",
-                                motion,
-                                (unsigned)midi_vel,
-                                (unsigned)note);
-    }
+    portENTER_CRITICAL(&s_lock);
+    *out = s_config_set ? s_config : motion_default_config();
+    portEXIT_CRITICAL(&s_lock);
 }
 
-/**
- * @brief Main Motion MIDI FreeRTOS task loop.
- *
- * @param arg Task argument (unused).
- */
-static void poom_motion_midi_task_(void *arg)
+void poom_motion_midi_get_status(poom_midi_status_t* out)
+{
+    if(!out)
+        return;
+    portENTER_CRITICAL(&s_lock);
+    *out = s_status;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void publish_status_(motion_engine_t* engine)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_status     = engine->status;
+    s_config     = engine->config;
+    s_config_set = true;
+    portEXIT_CRITICAL(&s_lock);
+    const uint8_t token = 1;
+    (void)poom_sbus_publish(POOM_MIDI_STATUS_TOPIC, &token, sizeof(token), 0);
+}
+
+static void worker_(void* arg)
 {
     (void)arg;
-    for (;;)
+    motion_engine_t engine;
+    poom_midi_config_t config;
+    poom_motion_midi_get_config(&config);
+    motion_engine_init(&engine, &config, send_, NULL);
+    bool ble_ok      = blemidi_init(NULL) >= 0;
+    bool imu_ok      = poom_imu_stream_init_gestures();
+    bool acc_pending = false, gyro_pending = false;
+    uint32_t last_publish   = 0;
+    uint32_t initialized_ms = now_ms_();
+    for(;;)
     {
-        if (s_stop_requested)
-        {
+        bool stop, pause;
+        portENTER_CRITICAL(&s_lock);
+        stop              = s_stop;
+        pause             = s_emergency_pause;
+        s_emergency_pause = false;
+        portEXIT_CRITICAL(&s_lock);
+        if(stop)
             break;
+        if(pause)
+        {
+            xQueueReset(s_commands);
+            motion_engine_pause(&engine);
         }
-        bool trigger = true; /* TODO: bind to enable button/gesture */
-        poom_motion_midi_midi_step_(trigger);
-        vTaskDelay(pdMS_TO_TICKS(POOM_MOTION_MIDI_TASK_DELAY_MS));
+        command_t command;
+        while(xQueueReceive(s_commands, &command, 0) == pdTRUE)
+        {
+            switch(command.kind)
+            {
+                case CMD_CONFIG:
+                    motion_engine_configure(&engine, &command.config);
+                    break;
+                case CMD_PAUSE:
+                    motion_engine_pause(&engine);
+                    break;
+                case CMD_GATE_ON:
+                    motion_engine_gate(&engine, true);
+                    break;
+                case CMD_GATE_OFF:
+                    motion_engine_gate(&engine, false);
+                    break;
+                case CMD_TOGGLE:
+                    motion_engine_toggle_drums(&engine);
+                    break;
+                case CMD_CALIBRATE:
+                    motion_engine_calibrate(&engine);
+                    if(!imu_ok || engine.status.error)
+                        imu_ok = poom_imu_stream_init_gestures();
+                    if(!ble_ok)
+                        ble_ok = blemidi_init(NULL) >= 0;
+                    acc_pending = gyro_pending = false;
+                    initialized_ms             = now_ms_();
+                    break;
+            }
+        }
+        poom_imu_data_t raw = {0};
+        motion_sample_t sample;
+        const motion_sample_t* fresh = NULL;
+        if(imu_ok && poom_imu_stream_read_data(&raw))
+        {
+            acc_pending |= raw.acceleration_fresh;
+            gyro_pending |= raw.angular_rate_fresh;
+            if(acc_pending && gyro_pending)
+            {
+                for(int i = 0; i < 3; ++i)
+                {
+                    sample.acc[i]  = raw.acceleration_mg[i] / 1000.0f;
+                    sample.gyro[i] = raw.angular_rate_mdps[i] / 1000.0f;
+                }
+                fresh       = &sample;
+                acc_pending = gyro_pending = false;
+            }
+        }
+        const uint32_t now = now_ms_();
+        motion_engine_step(&engine, fresh, now,
+                           ble_ok && blemidi_is_connected());
+        if(!ble_ok || !imu_ok ||
+           (!engine.have_sample && now - initialized_ms > 1000U))
+        {
+            motion_engine_pause(&engine);
+            engine.status.error = true;
+        }
+        /* Only the SBUS dispatcher draws; sensor processing never touches OLED.
+         */
+        if(now - last_publish >= 100U)
+        {
+            publish_status_(&engine);
+            last_publish = now;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10U));
     }
-
-    s_poom_motion_midi_task = NULL;
+    motion_engine_pause(&engine);
+    if(ble_ok && blemidi_is_connected())
+    {
+        send_(NULL, 0xB0, 123, 0);
+        send_(NULL, 0xB9, 123, 0);
+        /* Allow the existing transport's periodic flush to send final
+         * note-offs. */
+        vTaskDelay(pdMS_TO_TICKS(BLEMIDI_OUTBUFFER_FLUSH_MS + 10U));
+    }
+    if(ble_ok)
+        blemidi_deinit();
+    engine.status.connected = false;
+    publish_status_(&engine);
+    xSemaphoreGive(s_done);
     vTaskDelete(NULL);
 }
 
-/**
- * @brief Creates the Motion MIDI task if it is not running.
- */
-static void poom_motion_midi_task_start_(void)
+bool poom_motion_midi_start(void)
 {
-    if (s_poom_motion_midi_task != NULL)
+    if(s_started)
+        return true;
+    s_commands = xQueueCreate(16, sizeof(command_t));
+    s_done     = xSemaphoreCreateBinary();
+    if(!s_commands || !s_done)
     {
-        return;
+        if(s_commands)
+            vQueueDelete(s_commands);
+        if(s_done)
+            vSemaphoreDelete(s_done);
+        s_commands = NULL;
+        s_done     = NULL;
+        return false;
     }
-
-    vTaskDelay(pdMS_TO_TICKS(POOM_MOTION_MIDI_START_DELAY_MS));
-    if (xTaskCreate(poom_motion_midi_task_,
-                    POOM_MOTION_MIDI_TASK_NAME,
-                    POOM_MOTION_MIDI_TASK_STACK_SIZE,
-                    NULL,
-                    POOM_MOTION_MIDI_TASK_PRIORITY,
-                    &s_poom_motion_midi_task) == pdPASS)
+    portENTER_CRITICAL(&s_lock);
+    memset(&s_status, 0, sizeof(s_status));
+    s_stop = s_emergency_pause = false;
+    portEXIT_CRITICAL(&s_lock);
+    if(xTaskCreate(worker_, "motion_midi", 4096, NULL, tskIDLE_PRIORITY + 2,
+                   NULL) != pdPASS)
     {
-        POOM_MOTION_MIDI_PRINTF_I("poom_motion_midi task created");
-    }
-    else
-    {
-        POOM_MOTION_MIDI_PRINTF_E("failed to create poom_motion_midi task");
-    }
-}
-
-/* =========================
- * Public API
- * ========================= */
-/**
- * @brief Starts the Motion MIDI application.
- *
- * Initializes BLE MIDI and IMU, subscribes to button events, and starts
- * the periodic processing task.
- */
-void poom_motion_midi_start(void)
-{
-    if (s_started)
-    {
-        POOM_MOTION_MIDI_PRINTF_W("poom_motion_midi already started");
-        return;
+        vQueueDelete(s_commands);
+        vSemaphoreDelete(s_done);
+        s_commands = NULL;
+        s_done     = NULL;
+        return false;
     }
     s_started = true;
-    s_stop_requested = false;
-
-    int status = blemidi_init((void *)poom_motion_midi_midi_rx_cb_);
-    poom_imu_stream_init();
-
-    if (status < 0)
-    {
-        POOM_MOTION_MIDI_PRINTF_E("BLE MIDI init failed: %d", status);
-    }
-    else
-    {
-        POOM_MOTION_MIDI_PRINTF_I("BLE MIDI initialized");
-    }
-
-    s_arm_count = 0U;
-    s_motion_baseline = 0.0f;
-    s_calib_motion_sum = 0.0f;
-    s_calib_count = 0U;
-    s_calibrated = false;
-    poom_motion_midi_melody_reset_();
-    s_prev_mode = g_midi_mode;
-
-    poom_motion_midi_task_start_();
+    return true;
 }
 
-/**
- * @brief Stops the Motion MIDI application.
- *
- * Deletes task, sends NOTE OFF if needed, and unsubscribes from button events.
- */
 void poom_motion_midi_stop(void)
 {
-    if (!s_started)
-    {
+    if(!s_started)
         return;
-    }
+    portENTER_CRITICAL(&s_lock);
+    s_stop = true;
+    portEXIT_CRITICAL(&s_lock);
+    /* Join before deleting commands or stopping BLE; no task can emit a late
+     * note. */
+    xSemaphoreTake(s_done, portMAX_DELAY);
+    vQueueDelete(s_commands);
+    vSemaphoreDelete(s_done);
+    s_commands = NULL;
+    s_done     = NULL;
+    s_started  = false;
+}
 
-    s_stop_requested = true;
-
-    if (s_hit_active)
+static void command_(command_kind_t kind, const poom_midi_config_t* config)
+{
+    if(!s_started)
+        return;
+    command_t command = {.kind = kind};
+    if(config)
+        command.config = *config;
+    if(xQueueSend(s_commands, &command, pdMS_TO_TICKS(20U)) != pdTRUE)
     {
-        poom_motion_midi_midi_note_off_ch10_(s_active_note);
-        s_hit_active = false;
+        /* A lost release must never leave a note held. */
+        portENTER_CRITICAL(&s_lock);
+        s_emergency_pause = true;
+        portEXIT_CRITICAL(&s_lock);
     }
+}
 
-    if (s_melody_note_active)
-    {
-        poom_motion_midi_midi_note_off_ch1_(s_melody_active_note);
-        s_melody_note_active = false;
-    }
+void poom_motion_midi_set_config(const poom_midi_config_t* config)
+{
+    if(config)
+        command_(CMD_CONFIG, config);
+}
 
-    s_arm_count = 0U;
-    s_calibrated = false;
-    s_calib_motion_sum = 0.0f;
-    s_calib_count = 0U;
-    s_started = false;
+void poom_motion_midi_pause(void)
+{
+    command_(CMD_PAUSE, NULL);
+}
 
-    blemidi_deinit();
+void poom_motion_midi_gate(bool pressed)
+{
+    command_(pressed ? CMD_GATE_ON : CMD_GATE_OFF, NULL);
+}
+
+void poom_motion_midi_toggle_drums(void)
+{
+    command_(CMD_TOGGLE, NULL);
+}
+
+void poom_motion_midi_calibrate(void)
+{
+    command_(CMD_CALIBRATE, NULL);
 }
