@@ -803,15 +803,58 @@ esp_err_t poom_wifi_ctrl_get_sta_mac(uint8_t *sta_mac)
     return esp_wifi_get_mac(WIFI_IF_STA, sta_mac);
 }
 
+/**
+ * @brief 5 GHz channels this platform can monitor.
+ *
+ * Mirrors the curated set the scanner hops. Kept as an explicit list because
+ * the band is not contiguous: 14..35, 49..99 and 145..148 are not usable.
+ */
+static const uint8_t s_channels_5g[] = {
+    36U,  40U,  44U,  48U,  100U, 104U, 108U, 112U, 116U, 120U, 124U,
+    128U, 132U, 136U, 140U, 144U, 149U, 153U, 157U, 161U, 165U,
+};
+
+bool poom_wifi_ctrl_wifi_channel_is_valid(uint8_t channel)
+{
+    size_t i;
+
+    if ((channel >= POOM_WIFI_CTRL_WIFI_CHANNEL_MIN) &&
+        (channel <= POOM_WIFI_CTRL_WIFI_CHANNEL_MAX))
+    {
+        return true;
+    }
+
+    for (i = 0U; i < (sizeof(s_channels_5g) / sizeof(s_channels_5g[0])); i++)
+    {
+        if (channel == s_channels_5g[i])
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 esp_err_t poom_wifi_ctrl_set_channel(uint8_t channel)
 {
-    if ((channel < POOM_WIFI_CTRL_WIFI_CHANNEL_MIN) || (channel > POOM_WIFI_CTRL_WIFI_CHANNEL_MAX))
+    if (!poom_wifi_ctrl_wifi_channel_is_valid(channel))
     {
-        POOM_PRINTF_E("Channel out of range. Expected <%u..%u> got %u",
+        POOM_PRINTF_E("Unsupported channel %u (2.4 GHz %u..%u, or a 5 GHz channel %u..%u)",
+                      (unsigned)channel,
                       (unsigned)POOM_WIFI_CTRL_WIFI_CHANNEL_MIN,
                       (unsigned)POOM_WIFI_CTRL_WIFI_CHANNEL_MAX,
-                      (unsigned)channel);
+                      (unsigned)POOM_WIFI_CTRL_WIFI_CHANNEL_5G_MIN,
+                      (unsigned)POOM_WIFI_CTRL_WIFI_CHANNEL_5G_MAX);
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (channel > POOM_WIFI_CTRL_WIFI_CHANNEL_MAX)
+    {
+        /*
+         * Leaving the 2.4 GHz band: let the radio pick the band, otherwise
+         * esp_wifi_set_channel rejects a 5 GHz channel as out of range.
+         */
+        (void)esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
     }
 
     return esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
