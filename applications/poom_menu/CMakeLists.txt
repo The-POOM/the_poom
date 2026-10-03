@@ -16,4 +16,5 @@ idf_component_register(
         poom_ble_keyboard
         poom_led_rainbow
         poom_sbus
+        poom_i2c_as5600
 )
