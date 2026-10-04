@@ -61,10 +61,22 @@ typedef enum
     POOM_PCAP_WIFI_CAPTURE_DEAUTH,
     /** Capture only EAPOL-Key frames (WPA/WPA2 handshakes, rekey, PMKID). */
     POOM_PCAP_WIFI_CAPTURE_EAPOL,
+    /** Capture Beacon/Probe Response + EAPOL-Key frames and export Hashcat 22000 metadata. */
+    POOM_PCAP_WIFI_CAPTURE_HANDSHAKE,
     /** Capture only WPS EAP (EAP-Expanded / WFA) frames over EAPOL. */
     POOM_PCAP_WIFI_CAPTURE_WPS,
     POOM_PCAP_WIFI_CAPTURE_COUNT,
 } poom_pcap_wifi_capture_t;
+
+typedef struct
+{
+    uint8_t eapol_message_mask; /* aggregate bit0..bit3 = M1..M4 seen */
+    uint8_t pmkid_count;
+    uint8_t valid_pair_count;
+    bool complete;
+    bool hash22000_saved;
+    bool has_beacon;
+} poom_pcap_wifi_handshake_status_t;
 
 /** IEEE 802.15.4/Zigbee channel range. */
 #define POOM_PCAP_IEEE802154_CHANNEL_MIN (11U)
@@ -321,6 +333,13 @@ uint8_t poom_pcap_manager_sniffer_zigbee_get_channel(void);
  * @return RSSI in dBm, or -127 when unavailable.
  */
 int8_t poom_pcap_manager_sniffer_zigbee_get_rssi(void);
+
+/**
+ * @brief Get current/last WiFi handshake capture status.
+ *
+ * The status is updated only when `POOM_PCAP_WIFI_CAPTURE_HANDSHAKE` is active.
+ */
+bool poom_pcap_manager_wifi_handshake_get_status(poom_pcap_wifi_handshake_status_t *out_status);
 
 #ifdef __cplusplus
 }

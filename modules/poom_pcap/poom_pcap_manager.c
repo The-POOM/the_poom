@@ -264,8 +264,49 @@ static esp_err_t poom_pcap_make_sd_dir_(const char *sd_dir)
         (void)snprintf(dirbuf, sizeof(dirbuf), "/%s", sd_dir);
     }
 
-    ret = sd_card_create_dir(dirbuf);
-    return ret;
+    char partial[sizeof(dirbuf)] = {0};
+    size_t partial_len = 0U;
+    const size_t dir_len = strnlen(dirbuf, sizeof(dirbuf));
+
+    for (size_t i = 0U; i < dir_len; i++)
+    {
+        if (partial_len + 1U >= sizeof(partial))
+        {
+            return ESP_ERR_NO_MEM;
+        }
+
+        partial[partial_len++] = dirbuf[i];
+        partial[partial_len] = '\0';
+
+        if ((dirbuf[i] == '/') && (partial_len <= 1U))
+        {
+            continue;
+        }
+
+        if ((dirbuf[i] == '/') || (i + 1U == dir_len))
+        {
+            if ((partial_len > 1U) && (partial[partial_len - 1U] == '/'))
+            {
+                partial[partial_len - 1U] = '\0';
+            }
+
+            if (partial[0] != '\0')
+            {
+                ret = sd_card_create_dir(partial);
+                if (ret != ESP_OK)
+                {
+                    return ret;
+                }
+            }
+
+            if ((partial_len > 0U) && (partial[partial_len - 1U] == '\0'))
+            {
+                partial[partial_len - 1U] = '/';
+            }
+        }
+    }
+
+    return ESP_OK;
 }
 
 /**

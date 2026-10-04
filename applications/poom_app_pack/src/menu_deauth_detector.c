@@ -12,6 +12,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "Arduboy2.h"
+#include "bsp_pong.h"
+#include "buzzer.h"
+#include "poom_led_rainbow.h"
+#include "poom_secrets_store.h"
+#include "ws2812.h"
 #include "poom_sbus.h"
 #include "poom_wifi_deauth_detector.h"
 #define POOM_MENU_RESUME_TOPIC "poom/menu/resume"
@@ -23,6 +28,20 @@
 #define MENU_DEAUTH_DET_STACK               (3072U)
 #define MENU_DEAUTH_DET_PRIO                (4U)
 #define MENU_DEAUTH_DET_TEXT_MAX_CHARS      (15U)
+
+#define MENU_DEAUTH_DET_ALERT_HOLD_MS       (2000U)
+#define MENU_DEAUTH_DET_BEEP_INTERVAL_MS    (5000U)
+#define MENU_DEAUTH_DET_BEEP_COUNT          (3U)
+#define MENU_DEAUTH_DET_BEEP_DURATION_MS    (100U)
+#define MENU_DEAUTH_DET_BEEP_GAP_MS         (100U)
+#define MENU_DEAUTH_DET_LED_BRIGHTNESS      (21U) /* Previous 32 reduced by one third. */
+#define MENU_DEAUTH_DET_INPUT_UP            (1UL << 0)
+#define MENU_DEAUTH_DET_INPUT_DOWN          (1UL << 1)
+#define MENU_DEAUTH_DET_INPUT_LEFT          (1UL << 2)
+#define MENU_DEAUTH_DET_INPUT_RIGHT         (1UL << 3)
+#define MENU_DEAUTH_DET_INPUT_ACCEPT        (1UL << 4)
+#define MENU_DEAUTH_DET_INPUT_BACK          (1UL << 5)
+#define MENU_DEAUTH_DET_INPUT_RESET         (1UL << 6)
 
 #define MENU_DEAUTH_DET_HEADER_H            (11)
 #define MENU_DEAUTH_DET_TEXT_X              (4)
@@ -77,9 +96,18 @@ typedef enum
     MENU_DEAUTH_DET_VIEW_COUNT,
 } menu_deauth_det_view_t;
 
+typedef enum
+{
+    MENU_DEAUTH_DET_SCREEN_HOME = 0,
+    MENU_DEAUTH_DET_SCREEN_CONFIG,
+    MENU_DEAUTH_DET_SCREEN_MONITOR,
+} menu_deauth_det_screen_t;
+
+static menu_deauth_det_screen_t s_menu_deauth_detector_screen = MENU_DEAUTH_DET_SCREEN_HOME;
+static uint8_t s_menu_deauth_detector_selection = 0U;
+static bool s_alerts_initialized = false;
 static bool s_menu_deauth_detector_active = false;
 static bool s_menu_deauth_detector_buttons_subscribed = false;
-static bool s_menu_deauth_detector_exit_requested = false;
 static TaskHandle_t s_menu_deauth_detector_task = NULL;
 static char s_menu_deauth_detector_sbus_user[] = "menu_deauth_detector";
 static char s_menu_deauth_detector_status_override[22] = {0};
@@ -88,10 +116,132 @@ static poom_wifi_deauth_detector_stats_t s_menu_deauth_detector_stats;
 static poom_wifi_deauth_detector_report_t s_menu_deauth_detector_report;
 static menu_deauth_det_view_t s_menu_deauth_detector_view = MENU_DEAUTH_DET_VIEW_OVERVIEW;
 
+static bool s_alert_sound = false;
+static bool s_alert_led = true;
+static bool s_alert_strip_ready = false;
+static bool s_alert_rainbow_was_running = false;
+static ws2812_strip_t s_alert_strip;
+static bool s_alert_activity = false;
+static uint32_t s_alert_last_deauth_total;
+static uint32_t s_alert_last_disassoc_total;
+static TickType_t s_alert_last_detection;
+static TickType_t s_alert_last_beep;
+static bool s_alert_has_beeped = false;
+
 static esp_err_t menu_deauth_detector_exit_(void);
 static void menu_deauth_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_deauth_detector_status_hold_(const char *text, uint8_t hold_cycles);
 static bool menu_deauth_detector_channel_attacked_(uint8_t channel);
+
+/* Start/reset baselines match the detector's cleared counters. No packet history. */
+static void menu_deauth_detector_alerts_reset_(void)
+{
+    s_alert_activity = false;
+    s_alert_last_deauth_total = 0U;
+    s_alert_last_disassoc_total = 0U;
+    s_alert_last_detection = xTaskGetTickCount();
+    s_alert_has_beeped = false;
+}
+
+/* Use the same counters as the channel overview, including isolated frames and
+ * traffic arriving between report windows. Historical counts never retrigger. */
+static void menu_deauth_detector_alerts_update_(void)
+{
+    const TickType_t now = xTaskGetTickCount();
+    const bool running = poom_wifi_deauth_detector_is_running();
+    const bool detected = running &&
+        ((s_menu_deauth_detector_stats.deauth_total != s_alert_last_deauth_total) ||
+         (s_menu_deauth_detector_stats.disassoc_total != s_alert_last_disassoc_total));
+    s_alert_last_deauth_total = s_menu_deauth_detector_stats.deauth_total;
+    s_alert_last_disassoc_total = s_menu_deauth_detector_stats.disassoc_total;
+
+    if(detected)
+    {
+        s_alert_activity = true;
+        s_alert_last_detection = now;
+    }
+    else if(!running ||
+            ((TickType_t)(now - s_alert_last_detection) >= pdMS_TO_TICKS(MENU_DEAUTH_DET_ALERT_HOLD_MS)))
+    {
+        s_alert_activity = false;
+    }
+
+    if(s_alert_strip_ready)
+    {
+        const uint8_t yellow = (s_alert_led && s_alert_activity) ? 255U : 0U;
+        ws2812_fill(&s_alert_strip, yellow, yellow, 0U, 0U);
+        if(ws2812_show(&s_alert_strip) != ESP_OK)
+        {
+            menu_deauth_detector_status_hold_("LED error", 8U);
+        }
+    }
+
+    if(s_alert_sound && detected &&
+       (!s_alert_has_beeped ||
+        ((TickType_t)(now - s_alert_last_beep) >= pdMS_TO_TICKS(MENU_DEAUTH_DET_BEEP_INTERVAL_MS))))
+    {
+        s_alert_last_beep = now;
+        s_alert_has_beeped = true;
+        for(uint8_t beep = 0U; beep < MENU_DEAUTH_DET_BEEP_COUNT; ++beep)
+        {
+            buzzer_tone(2200U, MENU_DEAUTH_DET_BEEP_DURATION_MS);
+            if((beep + 1U) < MENU_DEAUTH_DET_BEEP_COUNT)
+            {
+                vTaskDelay(pdMS_TO_TICKS(MENU_DEAUTH_DET_BEEP_GAP_MS));
+            }
+        }
+    }
+}
+
+static void menu_deauth_detector_load_settings_(void)
+{
+    uint32_t settings = 2U; /* LED enabled, sound disabled by default. */
+    if(poom_secrets_init() == ESP_OK)
+    {
+        (void)poom_secrets_get_u32("deauth_alerts", &settings);
+    }
+    s_alert_sound = (settings & 1U) != 0U;
+    s_alert_led = (settings & 2U) != 0U;
+}
+
+static void menu_deauth_detector_alerts_init_(void)
+{
+    s_alerts_initialized = true;
+    menu_deauth_detector_alerts_reset_();
+    buzzer_init(PIN_NUM_BUZZER);
+    s_alert_rainbow_was_running = poom_led_rainbow_deinit();
+    s_alert_strip_ready = (ws2812_init(&s_alert_strip, PIN_NUM_WS2812, PIN_NUM_LEDS,
+                                     false, 10000000) == ESP_OK);
+    if(s_alert_strip_ready)
+    {
+        ws2812_set_brightness(&s_alert_strip, MENU_DEAUTH_DET_LED_BRIGHTNESS);
+        ws2812_clear(&s_alert_strip);
+        (void)ws2812_show(&s_alert_strip);
+    }
+}
+
+static void menu_deauth_detector_alerts_release_(void)
+{
+    if(!s_alerts_initialized)
+    {
+        return;
+    }
+    s_alerts_initialized = false;
+    buzzer_tone(0U, 0U);
+    if(s_alert_strip_ready)
+    {
+        ws2812_clear(&s_alert_strip);
+        (void)ws2812_show(&s_alert_strip);
+        ws2812_deinit(&s_alert_strip);
+        s_alert_strip_ready = false;
+    }
+    poom_led_rainbow_init();
+    if(s_alert_rainbow_was_running)
+    {
+        (void)poom_led_rainbow_start();
+    }
+    s_alert_rainbow_was_running = false;
+}
 
 /**
  * @brief Formats internal text for display.
@@ -390,6 +540,102 @@ static void menu_deauth_detector_enable_scan_all_(void)
     }
 }
 
+/* All navigation and peripheral changes run in the existing menu task. */
+static void menu_deauth_detector_handle_input_(uint32_t input)
+{
+    if((input & MENU_DEAUTH_DET_INPUT_BACK) != 0U)
+    {
+        if(s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_HOME)
+        {
+            (void)menu_deauth_detector_exit_();
+        }
+        else
+        {
+            if(s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_MONITOR)
+            {
+                (void)poom_wifi_deauth_detector_stop();
+                menu_deauth_detector_alerts_release_();
+            }
+            s_menu_deauth_detector_screen = MENU_DEAUTH_DET_SCREEN_HOME;
+            s_menu_deauth_detector_selection = 0U;
+            s_menu_deauth_detector_status_hold_cycles = 0U;
+        }
+        return;
+    }
+
+    if(s_menu_deauth_detector_screen != MENU_DEAUTH_DET_SCREEN_MONITOR)
+    {
+        if((input & (MENU_DEAUTH_DET_INPUT_UP | MENU_DEAUTH_DET_INPUT_DOWN)) != 0U)
+        {
+            s_menu_deauth_detector_selection ^= 1U;
+        }
+        if(s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_HOME)
+        {
+            if((input & MENU_DEAUTH_DET_INPUT_ACCEPT) != 0U)
+            {
+                if(s_menu_deauth_detector_selection == 1U)
+                {
+                    s_menu_deauth_detector_screen = MENU_DEAUTH_DET_SCREEN_CONFIG;
+                    s_menu_deauth_detector_selection = 0U;
+                    s_menu_deauth_detector_status_hold_cycles = 0U;
+                }
+                else if(poom_wifi_deauth_detector_start() == ESP_OK)
+                {
+                    menu_deauth_detector_alerts_init_();
+                    s_menu_deauth_detector_screen = MENU_DEAUTH_DET_SCREEN_MONITOR;
+                    s_menu_deauth_detector_view = MENU_DEAUTH_DET_VIEW_OVERVIEW;
+                    menu_deauth_detector_status_hold_(s_alert_led && !s_alert_strip_ready ?
+                                                      "LED unavailable" : "Running", 8U);
+                }
+                else
+                {
+                    menu_deauth_detector_status_hold_("Start failed", 8U);
+                }
+            }
+        }
+        else if((input & (MENU_DEAUTH_DET_INPUT_ACCEPT | MENU_DEAUTH_DET_INPUT_LEFT |
+                          MENU_DEAUTH_DET_INPUT_RIGHT)) != 0U)
+        {
+            if(s_menu_deauth_detector_selection == 0U)
+            {
+                s_alert_sound = !s_alert_sound;
+            }
+            else
+            {
+                s_alert_led = !s_alert_led;
+            }
+            const uint32_t settings = (s_alert_sound ? 1U : 0U) | (s_alert_led ? 2U : 0U);
+            const bool saved = (poom_secrets_init() == ESP_OK) &&
+                               (poom_secrets_set_u32("deauth_alerts", settings) == ESP_OK);
+            menu_deauth_detector_status_hold_(saved ? "Saved" : "Save failed", 8U);
+        }
+        return;
+    }
+
+    if((input & MENU_DEAUTH_DET_INPUT_RESET) != 0U)
+    {
+        (void)poom_wifi_deauth_detector_reset_stats();
+        menu_deauth_detector_alerts_reset_();
+        menu_deauth_detector_status_hold_("Reset", 4U);
+    }
+    if((input & MENU_DEAUTH_DET_INPUT_LEFT) != 0U)
+    {
+        menu_deauth_detector_enable_scan_all_();
+    }
+    if((input & MENU_DEAUTH_DET_INPUT_RIGHT) != 0U)
+    {
+        menu_deauth_detector_lock_attacked_channel_(1);
+    }
+    if((input & MENU_DEAUTH_DET_INPUT_UP) != 0U)
+    {
+        menu_deauth_detector_next_view_(-1);
+    }
+    if((input & MENU_DEAUTH_DET_INPUT_DOWN) != 0U)
+    {
+        menu_deauth_detector_next_view_(1);
+    }
+}
+
 /**
  * @brief Draws the menu header.
  *
@@ -400,6 +646,54 @@ static void menu_deauth_detector_draw_header_(void)
     poom_arduboy_set_cursor(37, 2);
     (void)poom_arduboy_print(F("DEAUTH DET"));
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, MENU_DEAUTH_DET_HEADER_H, INVERT);
+}
+
+/* Match the highlighted list rows and A/B navigation of the other app menus. */
+static void menu_deauth_detector_draw_options_(void)
+{
+    const bool configuring = (s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_CONFIG);
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+    if(configuring)
+    {
+        poom_arduboy_set_cursor(40, 2);
+        (void)poom_arduboy_print(F("SETTINGS"));
+        poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, MENU_DEAUTH_DET_HEADER_H, INVERT);
+    }
+    else
+    {
+        menu_deauth_detector_draw_header_();
+    }
+    for(uint8_t row = 0U; row < 2U; ++row)
+    {
+        const int16_t y = (int16_t)(MENU_DEAUTH_DET_ROW0_Y + row * 10);
+        poom_arduboy_set_cursor(MENU_DEAUTH_DET_TEXT_X, y);
+        if(configuring)
+        {
+            (void)poom_arduboy_print(row == 0U ? "Sound" : "LED");
+            poom_arduboy_set_cursor(96, y);
+            const bool enabled = (row == 0U) ? s_alert_sound : s_alert_led;
+            (void)poom_arduboy_print(enabled ? "ON" : "OFF");
+        }
+        else
+        {
+            (void)poom_arduboy_print(row == 0U ? "Start" : "Settings");
+        }
+        if(row == s_menu_deauth_detector_selection)
+        {
+            poom_arduboy_fill_rect(1, (int16_t)(y - 1), ARDUBOY_WIDTH - 2, 9, INVERT);
+        }
+    }
+    if(s_menu_deauth_detector_status_hold_cycles != 0U)
+    {
+        poom_arduboy_set_cursor(4, 42);
+        (void)poom_arduboy_print(s_menu_deauth_detector_status_override);
+    }
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(configuring ? "A:CHANGE" : "A:SELECT");
+    poom_arduboy_set_cursor(72, 56);
+    (void)poom_arduboy_print(configuring ? "B:BACK" : "B:EXIT");
+    poom_arduboy_display();
 }
 
 /**
@@ -415,6 +709,12 @@ static esp_err_t menu_deauth_detector_draw_(void)
     uint8_t ch;
     uint8_t index;
     uint32_t ch_deauth;
+
+    if(s_menu_deauth_detector_screen != MENU_DEAUTH_DET_SCREEN_MONITOR)
+    {
+        menu_deauth_detector_draw_options_();
+        return ESP_OK;
+    }
 
     ch = s_menu_deauth_detector_stats.current_channel;
     if((ch < 1U) || (ch > POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT))
@@ -485,6 +785,10 @@ static esp_err_t menu_deauth_detector_draw_(void)
         {
             (void)snprintf(line4, sizeof(line4), "%.18s", s_menu_deauth_detector_status_override);
         }
+        else if(s_alert_activity)
+        {
+            (void)snprintf(line4, sizeof(line4), "ACTIVITY DETECTED");
+        }
         else if(attacked_count > 4U)
         {
             (void)snprintf(line4, sizeof(line4), "+%u MORE", (unsigned)(attacked_count - 4U));
@@ -552,11 +856,15 @@ static esp_err_t menu_deauth_detector_draw_(void)
         (void)snprintf(line3, sizeof(line3), "WDS:%04u CH:%02u", weird, (unsigned)ch);
         (void)snprintf(line4, sizeof(line4), "TD:%06u CHD:%06u", total_deauth, ch_deauth_cap);
     }
-    else
+    else if(s_menu_deauth_detector_view == MENU_DEAUTH_DET_VIEW_SETTINGS)
     {
-        (void)snprintf(line1, sizeof(line1), "WIN:%us", 1U);
-        (void)snprintf(line2, sizeof(line2), "TH:%u/%u pps", (unsigned)10U, (unsigned)25U);
-        (void)snprintf(line3, sizeof(line3), "BC:%02u/%02u dps", (unsigned)5U, (unsigned)12U);
+        (void)snprintf(line1, sizeof(line1), "WIN:%us", (unsigned)(POOM_WIFI_DEAUTH_DETECTOR_PPS_WINDOW_MS / 1000U));
+        (void)snprintf(line2, sizeof(line2), "TH:%u/%u pps",
+                       (unsigned)POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS,
+                       (unsigned)POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS);
+        (void)snprintf(line3, sizeof(line3), "BC:%02u/%02u dps",
+                       (unsigned)POOM_WIFI_DEAUTH_DETECTOR_TH_MED_BCAST_PPS,
+                       (unsigned)POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_BCAST_PPS);
         (void)snprintf(line4, sizeof(line4), "LongA:Reset");
     }
 
@@ -607,14 +915,19 @@ static void menu_deauth_detector_task_(void *task_arg)
 
     while(s_menu_deauth_detector_active)
     {
-        if(s_menu_deauth_detector_exit_requested)
+        uint32_t input = 0U;
+        (void)xTaskNotifyWait(0U, UINT32_MAX, &input, 0U);
+        menu_deauth_detector_handle_input_(input);
+        if(!s_menu_deauth_detector_active)
         {
-            (void)menu_deauth_detector_exit_();
             break;
         }
-
-        (void)poom_wifi_deauth_detector_get_stats(&s_menu_deauth_detector_stats);
-        (void)poom_wifi_deauth_detector_get_report(&s_menu_deauth_detector_report);
+        if(s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_MONITOR)
+        {
+            (void)poom_wifi_deauth_detector_get_stats(&s_menu_deauth_detector_stats);
+            (void)poom_wifi_deauth_detector_get_report(&s_menu_deauth_detector_report);
+            menu_deauth_detector_alerts_update_();
+        }
         (void)menu_deauth_detector_draw_();
         if(s_menu_deauth_detector_status_hold_cycles != 0U)
         {
@@ -636,7 +949,6 @@ static esp_err_t menu_deauth_detector_exit_(void)
     TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
 
     s_menu_deauth_detector_active = false;
-    s_menu_deauth_detector_exit_requested = false;
 
     if(s_menu_deauth_detector_task != NULL)
     {
@@ -658,7 +970,11 @@ static esp_err_t menu_deauth_detector_exit_(void)
         s_menu_deauth_detector_buttons_subscribed = false;
     }
 
-    (void)poom_wifi_deauth_detector_stop();
+    if(s_alerts_initialized)
+    {
+        (void)poom_wifi_deauth_detector_stop();
+        menu_deauth_detector_alerts_release_();
+    }
     {
         const uint8_t token = 1;
         (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
@@ -684,54 +1000,32 @@ static void menu_deauth_detector_button_cb_(const poom_sbus_msg_t *msg, void *us
         return;
     }
 
+    if(!s_menu_deauth_detector_active || (s_menu_deauth_detector_task == NULL))
+    {
+        return;
+    }
     (void)memcpy(&button_msg, msg->data, sizeof(button_msg));
+    uint32_t input = 0U;
     if((button_msg.button == BTN_A) && (button_msg.event == BUTTON_LONG_PRESS_START))
     {
-        (void)poom_wifi_deauth_detector_reset_stats();
-        menu_deauth_detector_status_hold_("Reset", 4U);
-        return;
+        input = MENU_DEAUTH_DET_INPUT_RESET;
     }
-
-    if((button_msg.button == BTN_LEFT) && (button_msg.event == BUTTON_SINGLE_CLICK))
+    else if(button_msg.event == BUTTON_SINGLE_CLICK)
     {
-        menu_deauth_detector_enable_scan_all_();
-        return;
-    }
-
-    if((button_msg.button == BTN_RIGHT) && (button_msg.event == BUTTON_SINGLE_CLICK))
-    {
-        menu_deauth_detector_lock_attacked_channel_(1);
-        return;
-    }
-
-    if((button_msg.button == BTN_UP) && (button_msg.event == BUTTON_SINGLE_CLICK))
-    {
-        menu_deauth_detector_next_view_(-1);
-        return;
-    }
-
-    if((button_msg.button == BTN_DOWN) && (button_msg.event == BUTTON_SINGLE_CLICK))
-    {
-        menu_deauth_detector_next_view_(1);
-        return;
-    }
-
-    if(button_msg.event != BUTTON_SINGLE_CLICK)
-    {
-        return;
-    }
-
-    if(button_msg.button == BTN_B)
-    {
-        if(s_menu_deauth_detector_task == NULL)
+        switch(button_msg.button)
         {
-            (void)menu_deauth_detector_exit_();
+            case BTN_A: input = MENU_DEAUTH_DET_INPUT_ACCEPT; break;
+            case BTN_B: input = MENU_DEAUTH_DET_INPUT_BACK; break;
+            case BTN_UP: input = MENU_DEAUTH_DET_INPUT_UP; break;
+            case BTN_DOWN: input = MENU_DEAUTH_DET_INPUT_DOWN; break;
+            case BTN_LEFT: input = MENU_DEAUTH_DET_INPUT_LEFT; break;
+            case BTN_RIGHT: input = MENU_DEAUTH_DET_INPUT_RIGHT; break;
+            default: break;
         }
-        else
-        {
-            s_menu_deauth_detector_exit_requested = true;
-        }
-        return;
+    }
+    if(input != 0U)
+    {
+        (void)xTaskNotify(s_menu_deauth_detector_task, input, eSetBits);
     }
 
 }
@@ -742,28 +1036,19 @@ static void menu_deauth_detector_button_cb_(const poom_sbus_msg_t *msg, void *us
  */
 void app_deauth_detector(void)
 {
-    esp_err_t status;
-
+    if(s_menu_deauth_detector_active)
+    {
+        return;
+    }
+    menu_deauth_detector_load_settings_();
+    s_menu_deauth_detector_screen = MENU_DEAUTH_DET_SCREEN_HOME;
+    s_menu_deauth_detector_selection = 0U;
     s_menu_deauth_detector_active = true;
-    s_menu_deauth_detector_exit_requested = false;
     (void)memset(&s_menu_deauth_detector_stats, 0, sizeof(s_menu_deauth_detector_stats));
     (void)memset(&s_menu_deauth_detector_report, 0, sizeof(s_menu_deauth_detector_report));
     s_menu_deauth_detector_view = MENU_DEAUTH_DET_VIEW_OVERVIEW;
     s_menu_deauth_detector_status_hold_cycles = 0;
     (void)memset(s_menu_deauth_detector_status_override, 0, sizeof(s_menu_deauth_detector_status_override));
-    menu_deauth_detector_status_hold_("U/D:VIEW", 6U);
-
-    status = poom_wifi_deauth_detector_start();
-    if(status == ESP_OK)
-    {
-        menu_deauth_detector_status_hold_("Running", 4U);
-    }
-    else
-    {
-        menu_deauth_detector_status_hold_("Start failed", 6U);
-    }
-    (void)status;
-
     if(!s_menu_deauth_detector_buttons_subscribed)
     {
         if(poom_sbus_subscribe_cb("input/button", menu_deauth_detector_button_cb_, s_menu_deauth_detector_sbus_user))
@@ -772,12 +1057,7 @@ void app_deauth_detector(void)
         }
         else
         {
-            s_menu_deauth_detector_active = false;
-            (void)menu_deauth_detector_draw_();
-            {
-                const uint8_t token = 1;
-                (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
-            }
+            (void)menu_deauth_detector_exit_();
             return;
         }
     }
@@ -786,11 +1066,14 @@ void app_deauth_detector(void)
 
     if(s_menu_deauth_detector_task == NULL)
     {
-        (void)xTaskCreate(menu_deauth_detector_task_,
-                          "menu_deauth_det",
-                          MENU_DEAUTH_DET_STACK,
-                          NULL,
-                          MENU_DEAUTH_DET_PRIO,
-                          &s_menu_deauth_detector_task);
+        if(xTaskCreate(menu_deauth_detector_task_,
+                        "menu_deauth_det",
+                        MENU_DEAUTH_DET_STACK,
+                        NULL,
+                        MENU_DEAUTH_DET_PRIO,
+                        &s_menu_deauth_detector_task) != pdPASS)
+        {
+            (void)menu_deauth_detector_exit_();
+        }
     }
 }

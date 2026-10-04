@@ -968,25 +968,9 @@ static void menu_nfc_emv_format_langs_(const uint8_t* src, size_t src_len, char*
  */
 static const char* menu_nfc_emv_brand_from_aid_(const uint8_t* aid, size_t aid_len)
 {
-    if((aid == NULL) || (aid_len < 5U))
-    {
-        return NULL;
-    }
-
-    if((aid[0] == 0xA0U) && (aid[1] == 0x00U) && (aid[2] == 0x00U) && (aid[3] == 0x00U))
-    {
-        switch(aid[4])
-        {
-            case 0x03U: return "VISA";
-            case 0x04U: return "MASTERCARD";
-            case 0x25U: return "AMEX";
-            case 0x65U: return "JCB";
-            case 0x24U: return "DINERS";
-            default:    break;
-        }
-    }
-
-    return NULL;
+    const poom_nfc_emv_scheme_t scheme = poom_nfc_emv_scheme_from_aid(aid, aid_len);
+    return (scheme == POOM_NFC_EMV_SCHEME_UNKNOWN) ? NULL :
+                                                      poom_nfc_emv_scheme_str(scheme);
 }
 
 typedef menu_nfc_emv_candidate_t menu_nfc_emv_first_app_t;
@@ -1012,7 +996,7 @@ typedef struct
 
 typedef struct
 {
-    const uint8_t* aid;
+    uint8_t aid[9];
     size_t aid_len;
 } menu_nfc_emv_probe_aid_t;
 
@@ -1024,23 +1008,19 @@ enum
     MENU_NFC_EMV_TAG_LANGUAGE_PREF = 0x5F2DU,
 };
 
-/* Common EMV application AIDs used as a fast fallback when PPSE is absent or flaky. */
-static const uint8_t k_menu_nfc_emv_aid_visa_credit_debit[] = {
-    0xA0U, 0x00U, 0x00U, 0x00U, 0x03U, 0x10U, 0x10U,
-};
-
-static const uint8_t k_menu_nfc_emv_aid_mastercard_credit_debit[] = {
-    0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x10U, 0x10U,
-};
-
-static const uint8_t k_menu_nfc_emv_aid_maestro[] = {
-    0xA0U, 0x00U, 0x00U, 0x00U, 0x04U, 0x30U, 0x60U,
-};
-
+/* Common payment AIDs used only when PPSE discovery is unavailable. */
 static const menu_nfc_emv_probe_aid_t k_menu_nfc_emv_probe_aids[] = {
-    {k_menu_nfc_emv_aid_visa_credit_debit, sizeof(k_menu_nfc_emv_aid_visa_credit_debit)},
-    {k_menu_nfc_emv_aid_mastercard_credit_debit, sizeof(k_menu_nfc_emv_aid_mastercard_credit_debit)},
-    {k_menu_nfc_emv_aid_maestro, sizeof(k_menu_nfc_emv_aid_maestro)},
+    {{0xA0U,0x00U,0x00U,0x00U,0x03U,0x10U,0x10U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x00U,0x04U,0x10U,0x10U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x00U,0x04U,0x30U,0x60U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x00U,0x25U,0x01U,0x07U,0x01U}, 8U},
+    {{0xA0U,0x00U,0x00U,0x00U,0x65U,0x10U,0x10U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x01U,0x52U,0x30U,0x10U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x03U,0x33U,0x01U,0x01U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x02U,0x77U,0x10U,0x10U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x00U,0x42U,0x90U,0x10U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x06U,0x20U,0x06U,0x20U}, 7U},
+    {{0xA0U,0x00U,0x00U,0x05U,0x24U,0x10U,0x10U}, 7U},
 };
 
 /**
@@ -2882,6 +2862,22 @@ static bool menu_nfc_prepare_emv_scan_view_connected_(
         {
             menu_nfc_scan_info_add_("Kernel:K2 expected");
         }
+        else if(card->scheme == POOM_NFC_EMV_SCHEME_AMEX)
+        {
+            menu_nfc_scan_info_add_("Kernel:K4 expected");
+        }
+        else if(card->scheme == POOM_NFC_EMV_SCHEME_JCB)
+        {
+            menu_nfc_scan_info_add_("Kernel:K5 expected");
+        }
+        else if(card->scheme == POOM_NFC_EMV_SCHEME_DISCOVER)
+        {
+            menu_nfc_scan_info_add_("Kernel:K6 expected");
+        }
+        else if(card->scheme == POOM_NFC_EMV_SCHEME_UNIONPAY)
+        {
+            menu_nfc_scan_info_add_("Kernel:K7 expected");
+        }
         else
         {
             menu_nfc_scan_info_add_("Kernel:not inferred");
@@ -3066,6 +3062,16 @@ static bool menu_nfc_prepare_emv_scan_view_connected_(
                                (unsigned)details->icc_public_key_certificate_len);
                 menu_nfc_scan_info_add_(line);
             }
+            if(details->signed_static_application_data_len > 0U ||
+               details->signed_dynamic_application_data_len > 0U)
+            {
+                (void)snprintf(line,
+                               sizeof(line),
+                               "ODA:S%u D%u",
+                               (unsigned)details->signed_static_application_data_len,
+                               (unsigned)details->signed_dynamic_application_data_len);
+                menu_nfc_scan_info_add_(line);
+            }
             if(details->mastercard_application_capabilities_len > 0U)
             {
                 (void)snprintf(line,
@@ -3105,6 +3111,16 @@ static bool menu_nfc_prepare_emv_scan_view_connected_(
         if(card->transaction_count > 0U)
         {
             (void)snprintf(line, sizeof(line), "Tx log:%u", (unsigned)card->transaction_count);
+            menu_nfc_scan_info_add_(line);
+        }
+        if(card->fallback_record_sweep_used)
+        {
+            menu_nfc_scan_info_add_("Records:fallback");
+        }
+        if(card->details != NULL && card->details->optional_object_count > 0U)
+        {
+            (void)snprintf(
+                line, sizeof(line), "GET DATA:%u", (unsigned)card->details->optional_object_count);
             menu_nfc_scan_info_add_(line);
         }
         if(card->capture != NULL)
@@ -5019,6 +5035,77 @@ static void menu_nfc_emv_file_write_hex_(FILE* f, const uint8_t* data, size_t da
     }
 }
 
+static const char* menu_nfc_emv_cvm_method_name_(uint8_t code)
+{
+    switch(code & 0x3FU)
+    {
+        case 0x00U: return "Fail CVM";
+        case 0x01U: return "Plaintext offline PIN";
+        case 0x02U: return "Online encrypted PIN";
+        case 0x03U: return "Plaintext PIN and signature";
+        case 0x04U: return "Encrypted offline PIN";
+        case 0x05U: return "Encrypted PIN and signature";
+        case 0x1EU: return "Signature";
+        case 0x1FU: return "No CVM";
+        default: return "Unknown/proprietary";
+    }
+}
+
+static const char* menu_nfc_emv_cvm_condition_name_(uint8_t condition)
+{
+    switch(condition)
+    {
+        case 0x00U: return "Always";
+        case 0x01U: return "Unattended cash";
+        case 0x02U: return "Not cash/manual/cashback";
+        case 0x03U: return "Terminal supports method";
+        case 0x04U: return "Manual cash";
+        case 0x05U: return "Purchase with cashback";
+        case 0x06U: return "App currency and under X";
+        case 0x07U: return "App currency and over X";
+        case 0x08U: return "App currency and under Y";
+        case 0x09U: return "App currency and over Y";
+        default: return "Unknown/proprietary";
+    }
+}
+
+static void menu_nfc_emv_file_write_tlv_tree_(FILE* f,
+                                               const uint8_t* data,
+                                               size_t data_len,
+                                               unsigned depth)
+{
+    size_t offset = 0U;
+    poom_tlv_view_t item;
+
+    if(f == NULL || data == NULL || depth > 8U)
+    {
+        return;
+    }
+    while(poom_tlv_next(data, data_len, &offset, &item))
+    {
+        char tag_text[12];
+        const char* name = poom_nfc_emv_tag_name(item.tag);
+        (void)poom_tlv_format_tag(item.tag, tag_text, sizeof(tag_text));
+        (void)fprintf(f,
+                      "TLV %*s%s: %s, len=%u",
+                      (int)(depth * 2U),
+                      "",
+                      tag_text,
+                      (name != NULL) ? name : "Unknown/proprietary",
+                      (unsigned)item.value_len);
+        if(!item.constructed)
+        {
+            (void)fprintf(f, ", value=");
+            menu_nfc_emv_file_write_hex_(f, item.value, item.value_len);
+        }
+        (void)fprintf(f, "\n");
+        if(item.constructed)
+        {
+            menu_nfc_emv_file_write_tlv_tree_(f, item.value, item.value_len, depth + 1U);
+        }
+    }
+}
+
 static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
                                                  size_t out_rel_path_len,
                                                  int* out_io_errno)
@@ -5342,6 +5429,22 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
                     (void)fprintf(f, "CVM amount X: %lu\n", (unsigned long)amount_x);
                     (void)fprintf(f, "CVM amount Y: %lu\n", (unsigned long)amount_y);
                 }
+                    for(size_t rule = 8U, index = 1U;
+                        rule + 1U < details->cvm_list_len;
+                        rule += 2U, index++)
+                    {
+                        const uint8_t cvm = details->cvm_list[rule];
+                        const uint8_t condition = details->cvm_list[rule + 1U];
+                        (void)fprintf(
+                            f,
+                            "CVM rule %u: method=%s, condition=%s, continue-if-fail=%s, raw=%02X%02X\n",
+                            (unsigned)index,
+                            menu_nfc_emv_cvm_method_name_(cvm),
+                            menu_nfc_emv_cvm_condition_name_(condition),
+                            (cvm & 0x40U) ? "yes" : "no",
+                            cvm,
+                            condition);
+                    }
             }
             if(details->cdol1_len > 0U)
             {
@@ -5424,6 +5527,40 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
                               "ICC public key certificate (9F46): present, %u bytes; full value in R-APDU capture\n",
                               (unsigned)details->icc_public_key_certificate_len);
             }
+            if(details->signed_static_application_data_len > 0U)
+            {
+                (void)fprintf(f,
+                              "Signed static application data (93): present, %u bytes\n",
+                              (unsigned)details->signed_static_application_data_len);
+            }
+            if(details->signed_dynamic_application_data_len > 0U)
+            {
+                (void)fprintf(f,
+                              "Signed dynamic application data (9F4B): present, %u bytes\n",
+                              (unsigned)details->signed_dynamic_application_data_len);
+            }
+            if(card->has_aip)
+            {
+                (void)fprintf(f, "ODA advertised:");
+                if((card->aip[0] & 0x40U) != 0U) (void)fprintf(f, " SDA");
+                if((card->aip[0] & 0x20U) != 0U) (void)fprintf(f, " DDA");
+                if((card->aip[0] & 0x01U) != 0U) (void)fprintf(f, " CDA");
+                (void)fprintf(f, "\n");
+                const bool issuer_chain =
+                    details->has_ca_public_key_index &&
+                    details->issuer_public_key_certificate_len > 0U &&
+                    details->issuer_public_key_exponent_len > 0U;
+                const bool icc_chain =
+                    issuer_chain &&
+                    details->icc_public_key_certificate_len > 0U &&
+                    details->icc_public_key_exponent_len > 0U;
+                (void)fprintf(f,
+                              "ODA issuer objects: %s\n",
+                              issuer_chain ? "complete" : "incomplete");
+                (void)fprintf(f,
+                              "ODA ICC objects: %s\n",
+                              icc_chain ? "complete" : "incomplete");
+            }
             if(details->icc_public_key_remainder_len > 0U)
             {
                 (void)fprintf(f,
@@ -5477,6 +5614,26 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
                 menu_nfc_emv_file_write_hex_(f,
                                              details->mastercard_third_party_data,
                                              details->mastercard_third_party_data_len);
+                (void)fprintf(f, "\n");
+            }
+        }
+        (void)fprintf(f,
+                      "Fallback record sweep: %s\n",
+                      card->fallback_record_sweep_used ? "used" : "not used");
+        if(card->details != NULL)
+        {
+            const poom_nfc_emv_details_t* details = card->details;
+            for(size_t i = 0U; i < details->optional_object_count; i++)
+            {
+                const poom_nfc_emv_data_object_t* object = &details->optional_objects[i];
+                const char* name = poom_nfc_emv_tag_name(object->tag);
+                char tag_text[12];
+                (void)poom_tlv_format_tag(object->tag, tag_text, sizeof(tag_text));
+                (void)fprintf(f,
+                              "GET DATA %s (%s): ",
+                              tag_text,
+                              (name != NULL) ? name : "Unknown/proprietary");
+                menu_nfc_emv_file_write_hex_(f, object->value, object->value_len);
                 (void)fprintf(f, "\n");
             }
         }
@@ -5562,6 +5719,19 @@ static esp_err_t menu_nfc_scan_save_emv_summary_(char* out_rel_path,
                                                  exchange->response_len);
                 }
                 (void)fprintf(f, "\n");
+                if(response_valid)
+                {
+                    poom_iso7816_rapdu_view_t rapdu_view;
+                    if(poom_iso7816_parse_rapdu(
+                           &capture->data[exchange->response_offset],
+                           exchange->response_len,
+                           &rapdu_view) &&
+                       rapdu_view.data_len > 0U)
+                    {
+                        menu_nfc_emv_file_write_tlv_tree_(
+                            f, rapdu_view.data, rapdu_view.data_len, 0U);
+                    }
+                }
             }
         }
     }

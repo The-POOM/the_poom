@@ -68,6 +68,7 @@
 #include "menu_sniffer_device.h"
 #include "menu_ssid_spam.h"
 #include "menu_tone.h"
+#include "menu_tv_off.h"
 #include "menu_wifi_detector.h"
 #include "poom_breakout.h"
 
@@ -721,6 +722,18 @@ static void action_ir_universal_(void)
 }
 
 /**
+ * @brief Internal helper for `action_tv_off`.
+ *
+ * @return void
+ */
+static void action_tv_off_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_tv_off_show();
+}
+
+/**
  * @brief Internal helper for `action_dfu`.
  *
  * @return void
@@ -896,6 +909,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SPAM WIFI", action_spam_wifi_},
     {"SPAM BLE", action_ble_spam_},
     {"CAPTIVE PORTAL", action_captive_},
+    {"TV OFF", action_tv_off_},
     {"BLE DETECT", action_ble_detector_},
     {"WIFI DETECT", action_wifi_detector_},
     {"SNIFFER", action_pcap_snf_},

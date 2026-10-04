@@ -12,6 +12,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "sdkconfig.h"
@@ -20,7 +22,6 @@
 
 #include "poom_ble_scan.h"
 #include "poom_wifi_ctrl.h"
-
 
 #include "esp_attr.h"
 #include "esp_ieee802154.h"
@@ -47,6 +48,893 @@ static poom_pcap_sniffer_mode_t s_mode = POOM_PCAP_SNIFFER_MODE_NONE;
 // =========================
 
 static poom_pcap_wifi_capture_t s_wifi_capture = POOM_PCAP_WIFI_CAPTURE_RAW;
+
+static bool poom_pcap_wifi_get_frame_control_(const uint8_t *frame, size_t len, uint16_t *out_fc);
+static bool poom_pcap_wifi_get_llc_ethertype_(const uint8_t *frame,
+                                              size_t len,
+                                              uint16_t *out_ethertype,
+                                              size_t *out_payload_off);
+
+#define POOM_PCAP_HANDSHAKE_DIR "/pcaps/handshakes"
+#define POOM_PCAP_HANDSHAKE_BASE "handshake"
+#define POOM_PCAP_HANDSHAKE_AP_MAX (8U)
+#define POOM_PCAP_HANDSHAKE_SESSION_MAX (4U)
+#define POOM_PCAP_HANDSHAKE_PMKID_MAX (4U)
+#define POOM_PCAP_HANDSHAKE_EAPOL_MAX (256U)
+#define POOM_PCAP_ETHERTYPE_EAPOL (0x888EU)
+#define POOM_PCAP_EAPOL_TYPE_KEY (0x03U)
+#define POOM_PCAP_KEY_INFO_KEY_ACK (0x0080U)
+#define POOM_PCAP_KEY_INFO_INSTALL (0x0040U)
+#define POOM_PCAP_KEY_INFO_KEY_MIC (0x0100U)
+#define POOM_PCAP_KEY_INFO_ENCRYPTED_KEY_DATA (0x1000U)
+
+typedef struct
+{
+    bool used;
+    uint8_t bssid[6];
+    uint8_t ssid_len;
+    uint8_t ssid[32];
+} poom_pcap_handshake_ap_t;
+
+typedef struct
+{
+    bool used;
+    uint8_t keymic[16];
+    uint16_t eapol_len;
+    uint8_t eapol[POOM_PCAP_HANDSHAKE_EAPOL_MAX];
+} poom_pcap_handshake_eapol_t;
+
+typedef struct
+{
+    bool used;
+    uint8_t mac_ap[6];
+    uint8_t mac_sta[6];
+    uint8_t essid_len;
+    uint8_t essid[32];
+    uint8_t message_mask;
+    uint8_t message_pair;
+    uint8_t keyver;
+    uint8_t nonce_ap[32];
+    uint8_t nonce_sta[32];
+    poom_pcap_handshake_eapol_t msg2;
+    poom_pcap_handshake_eapol_t msg4;
+    uint64_t replay_counter[4];
+} poom_pcap_handshake_session_t;
+
+typedef struct
+{
+    bool used;
+    uint8_t pmkid[16];
+    uint8_t mac_ap[6];
+    uint8_t mac_sta[6];
+    uint8_t essid_len;
+    uint8_t essid[32];
+} poom_pcap_handshake_pmkid_t;
+
+typedef struct
+{
+    poom_pcap_handshake_ap_t aps[POOM_PCAP_HANDSHAKE_AP_MAX];
+    poom_pcap_handshake_session_t sessions[POOM_PCAP_HANDSHAKE_SESSION_MAX];
+    poom_pcap_handshake_pmkid_t pmkids[POOM_PCAP_HANDSHAKE_PMKID_MAX];
+    uint8_t pmkid_count;
+    uint8_t valid_pair_count;
+    bool has_beacon;
+    bool hash22000_saved;
+} poom_pcap_handshake_state_t;
+
+static poom_pcap_handshake_state_t *s_hs = NULL;
+static poom_pcap_wifi_handshake_status_t s_hs_status = {0};
+
+static bool poom_pcap_mem_nonzero_(const uint8_t *data, size_t len)
+{
+    if (data == NULL)
+    {
+        return false;
+    }
+    for (size_t i = 0U; i < len; i++)
+    {
+        if (data[i] != 0U)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint64_t poom_pcap_read_be64_(const uint8_t *data)
+{
+    uint64_t value = 0U;
+    if (data == NULL)
+    {
+        return 0U;
+    }
+    for (size_t i = 0U; i < 8U; i++)
+    {
+        value = (value << 8U) | (uint64_t)data[i];
+    }
+    return value;
+}
+
+static const poom_pcap_handshake_eapol_t *poom_pcap_handshake_export_eapol_(const poom_pcap_handshake_session_t *session)
+{
+    if (session == NULL)
+    {
+        return NULL;
+    }
+
+    if ((session->message_pair == 0U) || (session->message_pair == 2U))
+    {
+        return &session->msg2;
+    }
+    if ((session->message_pair == 1U) || (session->message_pair == 5U))
+    {
+        return &session->msg4;
+    }
+
+    return NULL;
+}
+
+static bool poom_pcap_handshake_eapol_valid_(const poom_pcap_handshake_eapol_t *saved)
+{
+    return (saved != NULL) && saved->used && (saved->eapol_len > 0U) &&
+           (saved->eapol_len <= POOM_PCAP_HANDSHAKE_EAPOL_MAX) &&
+           poom_pcap_mem_nonzero_(saved->keymic, 16U);
+}
+
+static bool poom_pcap_handshake_session_valid_(const poom_pcap_handshake_session_t *session)
+{
+    if ((session == NULL) || !session->used || (session->message_pair == 255U) || (session->essid_len == 0U))
+    {
+        return false;
+    }
+
+    return poom_pcap_mem_nonzero_(session->mac_ap, 6U) &&
+           poom_pcap_mem_nonzero_(session->mac_sta, 6U) &&
+           poom_pcap_mem_nonzero_(session->nonce_ap, 32U) &&
+           poom_pcap_mem_nonzero_(session->nonce_sta, 32U) &&
+           poom_pcap_handshake_eapol_valid_(poom_pcap_handshake_export_eapol_(session));
+}
+
+static void poom_pcap_handshake_status_update_(void)
+{
+    memset(&s_hs_status, 0, sizeof(s_hs_status));
+    if (s_hs == NULL)
+    {
+        return;
+    }
+
+    s_hs_status.pmkid_count = s_hs->pmkid_count;
+    s_hs_status.has_beacon = s_hs->has_beacon;
+    s_hs_status.hash22000_saved = s_hs->hash22000_saved;
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_SESSION_MAX; i++)
+    {
+        const poom_pcap_handshake_session_t *session = &s_hs->sessions[i];
+        if (!session->used)
+        {
+            continue;
+        }
+        s_hs_status.eapol_message_mask |= session->message_mask;
+        if (poom_pcap_handshake_session_valid_(session))
+        {
+            s_hs_status.valid_pair_count++;
+        }
+    }
+
+    s_hs_status.complete = (s_hs_status.valid_pair_count > 0U) || (s_hs_status.pmkid_count > 0U);
+}
+
+static void poom_pcap_handshake_free_(void)
+{
+    if (s_hs != NULL)
+    {
+        free(s_hs);
+        s_hs = NULL;
+    }
+}
+
+static esp_err_t poom_pcap_handshake_reset_(void)
+{
+    poom_pcap_handshake_free_();
+    memset(&s_hs_status, 0, sizeof(s_hs_status));
+
+    s_hs = calloc(1U, sizeof(*s_hs));
+    if (s_hs == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_SESSION_MAX; i++)
+    {
+        s_hs->sessions[i].message_pair = 255U;
+        s_hs->sessions[i].keyver = 2U;
+    }
+    poom_pcap_handshake_status_update_();
+    return ESP_OK;
+}
+
+static bool poom_pcap_wifi_get_header_len_(const uint8_t *frame, size_t len, uint16_t fc, size_t *out_hdr_len)
+{
+    if ((frame == NULL) || (out_hdr_len == NULL) || (len < 24U))
+    {
+        return false;
+    }
+
+    const uint8_t type = (uint8_t)((fc >> 2) & 0x03U);
+    const uint8_t subtype = (uint8_t)((fc >> 4) & 0x0FU);
+    const bool to_ds = ((fc >> 8) & 0x01U) != 0U;
+    const bool from_ds = ((fc >> 9) & 0x01U) != 0U;
+    const bool qos = (subtype & 0x08U) != 0U;
+
+    if (type != 2U)
+    {
+        return false;
+    }
+
+    size_t hdr_len = (to_ds && from_ds) ? 30U : 24U;
+    if (qos)
+    {
+        hdr_len += 2U;
+    }
+    if (len < hdr_len)
+    {
+        return false;
+    }
+
+    *out_hdr_len = hdr_len;
+    return true;
+}
+
+static bool poom_pcap_handshake_lookup_ssid_(const uint8_t *bssid, uint8_t *out_ssid, uint8_t *out_len)
+{
+    if ((s_hs == NULL) || (bssid == NULL) || (out_ssid == NULL) || (out_len == NULL))
+    {
+        return false;
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_AP_MAX; i++)
+    {
+        if (s_hs->aps[i].used && memcmp(s_hs->aps[i].bssid, bssid, 6U) == 0)
+        {
+            *out_len = s_hs->aps[i].ssid_len;
+            if (*out_len > 0U)
+            {
+                memcpy(out_ssid, s_hs->aps[i].ssid, *out_len);
+            }
+            return *out_len > 0U;
+        }
+    }
+
+    return false;
+}
+
+static void poom_pcap_handshake_attach_ssid_(const uint8_t *bssid, const uint8_t *ssid, uint8_t ssid_len)
+{
+    if ((s_hs == NULL) || (bssid == NULL) || (ssid == NULL) || (ssid_len == 0U) || (ssid_len > 32U))
+    {
+        return;
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_SESSION_MAX; i++)
+    {
+        poom_pcap_handshake_session_t *session = &s_hs->sessions[i];
+        if (session->used && (session->essid_len == 0U) && (memcmp(session->mac_ap, bssid, 6U) == 0))
+        {
+            memcpy(session->essid, ssid, ssid_len);
+            session->essid_len = ssid_len;
+        }
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_PMKID_MAX; i++)
+    {
+        poom_pcap_handshake_pmkid_t *pmkid = &s_hs->pmkids[i];
+        if (pmkid->used && (pmkid->essid_len == 0U) && (memcmp(pmkid->mac_ap, bssid, 6U) == 0))
+        {
+            memcpy(pmkid->essid, ssid, ssid_len);
+            pmkid->essid_len = ssid_len;
+        }
+    }
+}
+
+static void poom_pcap_handshake_store_ssid_(const uint8_t *bssid, const uint8_t *ssid, uint8_t ssid_len)
+{
+    if ((s_hs == NULL) || (bssid == NULL) || (ssid == NULL) || (ssid_len == 0U) || (ssid_len > 32U))
+    {
+        return;
+    }
+
+    poom_pcap_handshake_ap_t *slot = NULL;
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_AP_MAX; i++)
+    {
+        if (s_hs->aps[i].used && memcmp(s_hs->aps[i].bssid, bssid, 6U) == 0)
+        {
+            slot = &s_hs->aps[i];
+            break;
+        }
+        if ((slot == NULL) && !s_hs->aps[i].used)
+        {
+            slot = &s_hs->aps[i];
+        }
+    }
+
+    if (slot == NULL)
+    {
+        return;
+    }
+
+    slot->used = true;
+    memcpy(slot->bssid, bssid, 6U);
+    memcpy(slot->ssid, ssid, ssid_len);
+    slot->ssid_len = ssid_len;
+    s_hs->has_beacon = true;
+    poom_pcap_handshake_attach_ssid_(bssid, ssid, ssid_len);
+    poom_pcap_handshake_status_update_();
+}
+
+static void poom_pcap_handshake_parse_beacon_(const uint8_t *frame, size_t len)
+{
+    uint16_t fc = 0U;
+    if (!poom_pcap_wifi_get_frame_control_(frame, len, &fc))
+    {
+        return;
+    }
+
+    const uint8_t type = (uint8_t)((fc >> 2) & 0x03U);
+    const uint8_t subtype = (uint8_t)((fc >> 4) & 0x0FU);
+    if ((type != 0U) || ((subtype != 8U) && (subtype != 5U)) || (len < 36U))
+    {
+        return;
+    }
+
+    const uint8_t *bssid = &frame[16];
+    size_t pos = 36U;
+    while (pos + 2U <= len)
+    {
+        const uint8_t tag = frame[pos];
+        const uint8_t tag_len = frame[pos + 1U];
+        pos += 2U;
+        if (pos + tag_len > len)
+        {
+            return;
+        }
+        if ((tag == 0U) && (tag_len > 0U) && (tag_len <= 32U))
+        {
+            poom_pcap_handshake_store_ssid_(bssid, &frame[pos], tag_len);
+            return;
+        }
+        pos += tag_len;
+    }
+}
+
+static bool poom_pcap_handshake_get_addrs_(const uint8_t *frame,
+                                            size_t len,
+                                            uint8_t *out_ap,
+                                            uint8_t *out_sta,
+                                            bool *out_from_ap)
+{
+    uint16_t fc = 0U;
+    if (!poom_pcap_wifi_get_frame_control_(frame, len, &fc) || (len < 24U))
+    {
+        return false;
+    }
+
+    const bool to_ds = ((fc >> 8) & 0x01U) != 0U;
+    const bool from_ds = ((fc >> 9) & 0x01U) != 0U;
+    const uint8_t *addr1 = &frame[4];
+    const uint8_t *addr2 = &frame[10];
+    const uint8_t *addr3 = &frame[16];
+
+    if (to_ds && !from_ds)
+    {
+        memcpy(out_ap, addr1, 6U);
+        memcpy(out_sta, addr2, 6U);
+        *out_from_ap = false;
+        return true;
+    }
+    if (!to_ds && from_ds)
+    {
+        memcpy(out_ap, addr2, 6U);
+        memcpy(out_sta, addr1, 6U);
+        *out_from_ap = true;
+        return true;
+    }
+    if (!to_ds && !from_ds)
+    {
+        memcpy(out_ap, addr3, 6U);
+        if (memcmp(addr2, addr3, 6U) == 0)
+        {
+            memcpy(out_sta, addr1, 6U);
+            *out_from_ap = true;
+        }
+        else
+        {
+            memcpy(out_sta, addr2, 6U);
+            *out_from_ap = false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static uint8_t poom_pcap_handshake_eapol_message_(uint16_t key_info, const uint8_t *nonce)
+{
+    const bool ack = (key_info & POOM_PCAP_KEY_INFO_KEY_ACK) != 0U;
+    const bool install = (key_info & POOM_PCAP_KEY_INFO_INSTALL) != 0U;
+    const bool mic = (key_info & POOM_PCAP_KEY_INFO_KEY_MIC) != 0U;
+    const bool nonce_present = poom_pcap_mem_nonzero_(nonce, 32U);
+
+    if (ack && !install && !mic)
+    {
+        return 1U;
+    }
+    if (!ack && mic && nonce_present)
+    {
+        return 2U;
+    }
+    if (ack && install && mic)
+    {
+        return 3U;
+    }
+    if (!ack && mic && !nonce_present)
+    {
+        return 4U;
+    }
+    return 0U;
+}
+
+static bool poom_pcap_handshake_has_msg_(const poom_pcap_handshake_session_t *session, uint8_t msg)
+{
+    if ((session == NULL) || (msg == 0U) || (msg > 4U))
+    {
+        return false;
+    }
+    return (session->message_mask & (uint8_t)(1U << (msg - 1U))) != 0U;
+}
+
+static bool poom_pcap_handshake_replay_pair_(const poom_pcap_handshake_session_t *session, uint8_t first_msg, uint8_t second_msg)
+{
+    if (!poom_pcap_handshake_has_msg_(session, first_msg) || !poom_pcap_handshake_has_msg_(session, second_msg))
+    {
+        return false;
+    }
+
+    const uint64_t first = session->replay_counter[first_msg - 1U];
+    const uint64_t second = session->replay_counter[second_msg - 1U];
+
+    if (((first_msg == 1U) && (second_msg == 2U)) || ((first_msg == 3U) && (second_msg == 4U)))
+    {
+        return first == second;
+    }
+    if ((first_msg == 2U) && (second_msg == 3U))
+    {
+        return (first + 1U) == second;
+    }
+    if ((first_msg == 1U) && (second_msg == 4U))
+    {
+        return (first + 1U) == second;
+    }
+
+    return false;
+}
+
+static void poom_pcap_handshake_update_pair_(poom_pcap_handshake_session_t *session)
+{
+    if (session == NULL)
+    {
+        return;
+    }
+
+    session->message_pair = 255U;
+    if (poom_pcap_handshake_replay_pair_(session, 1U, 2U))
+    {
+        session->message_pair = 0U;
+    }
+    else if (poom_pcap_handshake_replay_pair_(session, 2U, 3U))
+    {
+        session->message_pair = 2U;
+    }
+    else if (poom_pcap_handshake_replay_pair_(session, 3U, 4U))
+    {
+        session->message_pair = 5U;
+    }
+    else if (poom_pcap_handshake_replay_pair_(session, 1U, 4U))
+    {
+        session->message_pair = 1U;
+    }
+}
+
+static poom_pcap_handshake_session_t *poom_pcap_handshake_session_get_(const uint8_t *ap, const uint8_t *sta)
+{
+    if ((s_hs == NULL) || (ap == NULL) || (sta == NULL))
+    {
+        return NULL;
+    }
+
+    poom_pcap_handshake_session_t *empty = NULL;
+    poom_pcap_handshake_session_t *replace = NULL;
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_SESSION_MAX; i++)
+    {
+        poom_pcap_handshake_session_t *session = &s_hs->sessions[i];
+        if (session->used && (memcmp(session->mac_ap, ap, 6U) == 0) && (memcmp(session->mac_sta, sta, 6U) == 0))
+        {
+            return session;
+        }
+        if ((empty == NULL) && !session->used)
+        {
+            empty = session;
+        }
+        if ((replace == NULL) ||
+            (poom_pcap_handshake_session_valid_(replace) && !poom_pcap_handshake_session_valid_(session)) ||
+            (session->message_mask < replace->message_mask))
+        {
+            replace = session;
+        }
+    }
+
+    poom_pcap_handshake_session_t *session = (empty != NULL) ? empty : replace;
+    if (session == NULL)
+    {
+        return NULL;
+    }
+
+    memset(session, 0, sizeof(*session));
+    session->used = true;
+    session->message_pair = 255U;
+    session->keyver = 2U;
+    memcpy(session->mac_ap, ap, 6U);
+    memcpy(session->mac_sta, sta, 6U);
+    (void)poom_pcap_handshake_lookup_ssid_(ap, session->essid, &session->essid_len);
+    return session;
+}
+
+static void poom_pcap_handshake_save_eapol_(poom_pcap_handshake_session_t *session,
+                                            uint8_t msg,
+                                            const uint8_t *eapol,
+                                            size_t eapol_len,
+                                            const uint8_t *mic)
+{
+    if ((session == NULL) || (eapol == NULL) || (mic == NULL) ||
+        (eapol_len == 0U) || (eapol_len > POOM_PCAP_HANDSHAKE_EAPOL_MAX))
+    {
+        return;
+    }
+
+    poom_pcap_handshake_eapol_t *saved = NULL;
+    if (msg == 2U)
+    {
+        saved = &session->msg2;
+    }
+    else if (msg == 4U)
+    {
+        saved = &session->msg4;
+    }
+    else
+    {
+        return;
+    }
+
+    saved->used = true;
+    saved->eapol_len = (uint16_t)eapol_len;
+    memcpy(saved->eapol, eapol, eapol_len);
+    memcpy(saved->keymic, mic, 16U);
+    if (eapol_len >= 97U)
+    {
+        memset(&saved->eapol[81], 0, 16U);
+    }
+}
+
+static bool poom_pcap_handshake_pmkid_exists_(const uint8_t *pmkid, const uint8_t *ap, const uint8_t *sta)
+{
+    if ((s_hs == NULL) || (pmkid == NULL) || (ap == NULL) || (sta == NULL))
+    {
+        return true;
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_PMKID_MAX; i++)
+    {
+        const poom_pcap_handshake_pmkid_t *entry = &s_hs->pmkids[i];
+        if (entry->used && (memcmp(entry->pmkid, pmkid, 16U) == 0) &&
+            (memcmp(entry->mac_ap, ap, 6U) == 0) && (memcmp(entry->mac_sta, sta, 6U) == 0))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void poom_pcap_handshake_store_pmkid_(const uint8_t *pmkid, const uint8_t *ap, const uint8_t *sta)
+{
+    if ((s_hs == NULL) || (pmkid == NULL) || (ap == NULL) || (sta == NULL) ||
+        poom_pcap_handshake_pmkid_exists_(pmkid, ap, sta))
+    {
+        return;
+    }
+
+    poom_pcap_handshake_pmkid_t *slot = NULL;
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_PMKID_MAX; i++)
+    {
+        if (!s_hs->pmkids[i].used)
+        {
+            slot = &s_hs->pmkids[i];
+            break;
+        }
+    }
+    if (slot == NULL)
+    {
+        return;
+    }
+
+    slot->used = true;
+    memcpy(slot->pmkid, pmkid, 16U);
+    memcpy(slot->mac_ap, ap, 6U);
+    memcpy(slot->mac_sta, sta, 6U);
+    (void)poom_pcap_handshake_lookup_ssid_(ap, slot->essid, &slot->essid_len);
+    s_hs->pmkid_count++;
+    poom_pcap_handshake_status_update_();
+}
+
+static void poom_pcap_handshake_parse_pmkid_(const uint8_t *key_data,
+                                             size_t key_data_len,
+                                             const uint8_t *ap,
+                                             const uint8_t *sta)
+{
+    if ((key_data == NULL) || (ap == NULL) || (sta == NULL) || (key_data_len < 22U))
+    {
+        return;
+    }
+
+    size_t pos = 0U;
+    while (pos + 2U <= key_data_len)
+    {
+        const uint8_t tag = key_data[pos];
+        const uint8_t tag_len = key_data[pos + 1U];
+        pos += 2U;
+        if (pos + tag_len > key_data_len)
+        {
+            break;
+        }
+
+        if ((tag == 0xDDU) && (tag_len >= 20U) &&
+            (key_data[pos] == 0x00U) && (key_data[pos + 1U] == 0x0FU) &&
+            (key_data[pos + 2U] == 0xACU) && (key_data[pos + 3U] == 0x04U))
+        {
+            poom_pcap_handshake_store_pmkid_(&key_data[pos + 4U], ap, sta);
+            return;
+        }
+
+        pos += tag_len;
+    }
+}
+
+static void poom_pcap_handshake_parse_eapol_(const uint8_t *frame, size_t len)
+{
+    if (s_hs == NULL)
+    {
+        return;
+    }
+
+    uint16_t fc = 0U;
+    uint16_t ethertype = 0U;
+    size_t off = 0U;
+    size_t hdr_len = 0U;
+    uint8_t ap[6] = {0};
+    uint8_t sta[6] = {0};
+    bool from_ap = false;
+
+    if (!poom_pcap_wifi_get_frame_control_(frame, len, &fc) ||
+        !poom_pcap_wifi_get_header_len_(frame, len, fc, &hdr_len) ||
+        !poom_pcap_wifi_get_llc_ethertype_(frame, len, &ethertype, &off) ||
+        (ethertype != POOM_PCAP_ETHERTYPE_EAPOL) ||
+        !poom_pcap_handshake_get_addrs_(frame, len, ap, sta, &from_ap))
+    {
+        return;
+    }
+
+    const uint8_t *eapol = &frame[off];
+    const size_t eapol_avail = len - off;
+    if (eapol_avail < 99U || eapol[1] != POOM_PCAP_EAPOL_TYPE_KEY)
+    {
+        return;
+    }
+
+    const size_t eapol_body_len = ((size_t)eapol[2] << 8U) | (size_t)eapol[3];
+    size_t eapol_len = 4U + eapol_body_len;
+    if (eapol_len > eapol_avail)
+    {
+        eapol_len = eapol_avail;
+    }
+    if (eapol_len > POOM_PCAP_HANDSHAKE_EAPOL_MAX)
+    {
+        eapol_len = POOM_PCAP_HANDSHAKE_EAPOL_MAX;
+    }
+
+    const uint8_t *key = &eapol[4];
+    const uint16_t key_info = ((uint16_t)key[1] << 8U) | (uint16_t)key[2];
+    const uint8_t *nonce = &key[13];
+    const uint8_t *mic = &key[77];
+    const uint64_t replay_counter = poom_pcap_read_be64_(&key[5]);
+    const uint8_t msg = poom_pcap_handshake_eapol_message_(key_info, nonce);
+
+    if ((msg == 0U) || (msg > 4U))
+    {
+        return;
+    }
+
+    poom_pcap_handshake_session_t *session = poom_pcap_handshake_session_get_(ap, sta);
+    if (session == NULL)
+    {
+        return;
+    }
+
+    session->message_mask |= (uint8_t)(1U << (msg - 1U));
+    session->replay_counter[msg - 1U] = replay_counter;
+    session->keyver = ((key_info & 0x0007U) == 1U) ? 1U : 2U;
+
+    if (session->essid_len == 0U)
+    {
+        (void)poom_pcap_handshake_lookup_ssid_(ap, session->essid, &session->essid_len);
+    }
+
+    if (from_ap && ((msg == 1U) || (msg == 3U)))
+    {
+        memcpy(session->nonce_ap, nonce, 32U);
+    }
+    else if (!from_ap && (msg == 2U))
+    {
+        memcpy(session->nonce_sta, nonce, 32U);
+    }
+
+    if (((key_info & POOM_PCAP_KEY_INFO_KEY_MIC) != 0U) && ((msg == 2U) || (msg == 4U)))
+    {
+        poom_pcap_handshake_save_eapol_(session, msg, eapol, eapol_len, mic);
+    }
+
+    if ((key_info & POOM_PCAP_KEY_INFO_ENCRYPTED_KEY_DATA) == 0U && eapol_len >= 99U)
+    {
+        const size_t key_data_len_off = 4U + 95U;
+        if (key_data_len_off + 2U <= eapol_len)
+        {
+            const size_t key_data_len = ((size_t)eapol[key_data_len_off] << 8U) | (size_t)eapol[key_data_len_off + 1U];
+            const size_t key_data_off = key_data_len_off + 2U;
+            if (key_data_off + key_data_len <= eapol_len)
+            {
+                poom_pcap_handshake_parse_pmkid_(&eapol[key_data_off], key_data_len, ap, sta);
+            }
+        }
+    }
+
+    poom_pcap_handshake_update_pair_(session);
+    poom_pcap_handshake_status_update_();
+}
+
+static bool poom_pcap_replace_ext_(const char *src, const char *ext, char *out, size_t out_len)
+{
+    if ((src == NULL) || (ext == NULL) || (out == NULL) || (out_len == 0U))
+    {
+        return false;
+    }
+
+    int written = snprintf(out, out_len, "%s", src);
+    if ((written < 0) || ((size_t)written >= out_len))
+    {
+        return false;
+    }
+
+    char *dot = strrchr(out, '.');
+    if (dot == NULL)
+    {
+        return false;
+    }
+
+    const size_t prefix_len = (size_t)(dot - out);
+    written = snprintf(&out[prefix_len], out_len - prefix_len, "%s", ext);
+    return (written >= 0) && ((size_t)written < (out_len - prefix_len));
+}
+
+static void poom_pcap_hex_write_(FILE *file, const uint8_t *data, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+    if ((file == NULL) || (data == NULL))
+    {
+        return;
+    }
+    for (size_t i = 0U; i < len; i++)
+    {
+        (void)fputc(hex[data[i] >> 4], file);
+        (void)fputc(hex[data[i] & 0x0FU], file);
+    }
+}
+
+static bool poom_pcap_handshake_write_22000_(FILE *file)
+{
+    bool wrote = false;
+    if ((file == NULL) || (s_hs == NULL))
+    {
+        return false;
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_PMKID_MAX; i++)
+    {
+        const poom_pcap_handshake_pmkid_t *pmkid = &s_hs->pmkids[i];
+        if (!pmkid->used || (pmkid->essid_len == 0U))
+        {
+            continue;
+        }
+
+        (void)fputs("WPA*01*", file);
+        poom_pcap_hex_write_(file, pmkid->pmkid, 16U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, pmkid->mac_ap, 6U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, pmkid->mac_sta, 6U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, pmkid->essid, pmkid->essid_len);
+        (void)fputs("***\n", file);
+        wrote = true;
+    }
+
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_SESSION_MAX; i++)
+    {
+        const poom_pcap_handshake_session_t *session = &s_hs->sessions[i];
+        if (!poom_pcap_handshake_session_valid_(session))
+        {
+            continue;
+        }
+
+        const poom_pcap_handshake_eapol_t *saved = poom_pcap_handshake_export_eapol_(session);
+        if (!poom_pcap_handshake_eapol_valid_(saved))
+        {
+            continue;
+        }
+
+        (void)fputs("WPA*02*", file);
+        poom_pcap_hex_write_(file, saved->keymic, 16U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, session->mac_ap, 6U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, session->mac_sta, 6U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, session->essid, session->essid_len);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, session->nonce_ap, 32U);
+        (void)fputc('*', file);
+        poom_pcap_hex_write_(file, saved->eapol, saved->eapol_len);
+        (void)fprintf(file, "*%02x\n", (unsigned)session->message_pair);
+        wrote = true;
+    }
+
+    return wrote;
+}
+
+static void poom_pcap_handshake_finalize_(void)
+{
+    if (s_hs == NULL)
+    {
+        return;
+    }
+
+    const char *pcap_path = poom_pcap_manager_get_file_path();
+    char out_path[128];
+
+    (void)poom_pcap_manager_flush();
+    if (pcap_path == NULL)
+    {
+        return;
+    }
+
+    if (poom_pcap_replace_ext_(pcap_path, ".22000", out_path, sizeof(out_path)))
+    {
+        FILE *file = fopen(out_path, "w");
+        if (file != NULL)
+        {
+            s_hs->hash22000_saved = poom_pcap_handshake_write_22000_(file);
+            (void)fclose(file);
+        }
+    }
+
+    poom_pcap_handshake_status_update_();
+}
 
 /**
  * @brief Internal helper for `poom_pcap_wifi_get_frame_control`.
@@ -251,6 +1139,10 @@ static bool poom_pcap_wifi_should_capture_(const uint8_t *frame, size_t len)
             return poom_pcap_wifi_is_mgmt_subtype_(frame, len, 12U);
         case POOM_PCAP_WIFI_CAPTURE_EAPOL:
             return poom_pcap_wifi_is_protected_(frame, len) || poom_pcap_wifi_is_eapol_any_(frame, len);
+        case POOM_PCAP_WIFI_CAPTURE_HANDSHAKE:
+            return poom_pcap_wifi_is_mgmt_subtype_(frame, len, 8U) ||
+                   poom_pcap_wifi_is_mgmt_subtype_(frame, len, 5U) ||
+                   poom_pcap_wifi_is_eapol_any_(frame, len);
         case POOM_PCAP_WIFI_CAPTURE_WPS:
             return poom_pcap_wifi_is_wps_eap_(frame, len);
         case POOM_PCAP_WIFI_CAPTURE_RAW:
@@ -288,6 +1180,12 @@ static void poom_pcap_sniffer_wifi_promisc_cb_(void *buf, wifi_promiscuous_pkt_t
     if (!poom_pcap_wifi_should_capture_(pkt->payload, len))
     {
         return;
+    }
+
+    if (s_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+    {
+        poom_pcap_handshake_parse_beacon_(pkt->payload, len);
+        poom_pcap_handshake_parse_eapol_(pkt->payload, len);
     }
 
     (void)poom_pcap_manager_write_packet(pkt->payload, len, POOM_PCAP_CAPTURE_WIFI);
@@ -630,9 +1528,27 @@ esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
         return ret;
     }
 
-    ret = poom_pcap_manager_start_auto(POOM_PCAP_CAPTURE_WIFI);
+    if (capture_mode == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+    {
+        ret = poom_pcap_handshake_reset_();
+        if (ret == ESP_OK)
+        {
+            ret = poom_pcap_manager_start_file(POOM_PCAP_HANDSHAKE_BASE,
+                                               POOM_PCAP_HANDSHAKE_DIR,
+                                               POOM_PCAP_CAPTURE_WIFI,
+                                               true);
+        }
+    }
+    else
+    {
+        ret = poom_pcap_manager_start_auto(POOM_PCAP_CAPTURE_WIFI);
+    }
     if (ret != ESP_OK)
     {
+        if (capture_mode == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+        {
+            poom_pcap_handshake_free_();
+        }
         (void)poom_pcap_manager_deinit();
         return ret;
     }
@@ -644,6 +1560,10 @@ esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
     if (ret != ESP_OK)
     {
         s_mode = POOM_PCAP_SNIFFER_MODE_NONE;
+        if (s_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+        {
+            poom_pcap_handshake_free_();
+        }
         s_wifi_capture = POOM_PCAP_WIFI_CAPTURE_RAW;
         (void)poom_pcap_manager_close();
         (void)poom_pcap_manager_deinit();
@@ -824,6 +1744,11 @@ esp_err_t poom_pcap_manager_sniffer_stop(void)
     if (s_mode == POOM_PCAP_SNIFFER_MODE_WIFI)
     {
         (void)poom_pcap_manager_wifi_stop_monitor_mode();
+        if (s_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+        {
+            poom_pcap_handshake_finalize_();
+            poom_pcap_handshake_free_();
+        }
         (void)poom_wifi_ctrl_deinit();
         s_wifi_capture = POOM_PCAP_WIFI_CAPTURE_RAW;
     }
@@ -917,6 +1842,18 @@ uint8_t poom_pcap_manager_sniffer_zigbee_get_channel(void)
 #else
     return 0U;
 #endif
+}
+
+
+bool poom_pcap_manager_wifi_handshake_get_status(poom_pcap_wifi_handshake_status_t *out_status)
+{
+    if (out_status == NULL)
+    {
+        return false;
+    }
+
+    *out_status = s_hs_status;
+    return true;
 }
 
 int8_t poom_pcap_manager_sniffer_zigbee_get_rssi(void)

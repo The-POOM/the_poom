@@ -17,6 +17,7 @@
 - Stream mode: raw binary PCAP over UART without markers.
 - Capture types:
   - WiFi (adds radiotap)
+  - WiFi Handshake mode (Beacon/Probe Response + EAPOL, Hashcat 22000 sidecar export)
   - Bluetooth (DLT configured by the manager; payload is user-provided)
   - IEEE 802.15.4 (NOFCS)
 
@@ -33,6 +34,7 @@
 - `poom_pcap_manager_wifi_start_monitor_mode` (helper)
 - `poom_pcap_manager_wifi_stop_monitor_mode` (helper)
 - `poom_pcap_manager_sniffer_start_wifi` (helper)
+- `poom_pcap_manager_wifi_handshake_get_status` (helper)
 - `poom_pcap_manager_sniffer_start_ble` (helper)
 - `poom_pcap_manager_sniffer_start_zigbee` (helper)
 - `poom_pcap_manager_sniffer_stop` (helper)
@@ -55,6 +57,8 @@
 ## Output Notes
 - SD file paths are created under the mount root `SD_CARD_PATH` (typically `/sdcard`), for example:
   - `/sdcard/pcaps/capture_1.pcap`
+  - `/sdcard/pcaps/handshakes/handshake_1.pcap`
+  - `/sdcard/pcaps/handshakes/handshake_1.22000` when a PMKID or valid EAPOL pair is seen
 - UART/stream outputs are **binary** PCAP bytes printed through `printf("%c", ...)`.
   - Host tooling must capture raw UART bytes (not line-based text).
   - UART-marker mode wraps each flush with `[BUFFER/INIT]` and `[BUFFER/CLOSE]`.

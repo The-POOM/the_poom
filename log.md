@@ -1,3 +1,124 @@
+## POOM 1.0.11
+
+This release expands **THE BEAST** and **NFC** tools with a redesigned Captive Portal workflow, TV OFF IR control and deauthentication tools, expanded PCAP capture modes and deeper EMV card analysis.
+
+### CAPTIVE PORTAL
+
+- Redesigned the **Captive Portal** workflow under **THE BEAST → CAPTIVE PORTAL**.
+
+- Added separate **Start**, **Settings** and **Scan SSID** options instead of immediately starting the portal from the initial selection.
+
+- Added configurable **AP Name** under **Settings**, allowing the portal access point name to be entered manually or copied from a WiFi scan.
+
+- Added selectable portal HTML files under **Settings → Portal**.
+
+- Added SD card browsing filtered to `.html` files.
+
+- Portal files are loaded from `/sdcard/portals`, which is automatically created when missing.
+
+- Added **Scan SSID** to scan nearby WiFi networks and copy the selected SSID as the Captive Portal AP name.
+
+- Selecting an SSID no longer automatically starts the portal.
+
+### CAPTIVE PORTAL CLIENTS
+
+- Added a real-time **Clients** view while the Captive Portal is running.
+
+- Added online status indication for connected clients.
+
+- Added client information including detected name/type, IP address, MAC address and RSSI.
+
+- Added per-client detail view for inspecting connected devices.
+
+- Improved IP-to-MAC correlation for connected clients.
+
+### TV OFF
+
+- Added the new **TV OFF** application under **THE BEAST → TV OFF**.
+
+- Added transmission of common infrared **Power / Off** commands for nearby televisions.
+
+- Added support for Samsung, NEC, NEC Extended, RC5, RC6 and SIRC infrared protocols.
+
+- Added a visual progress bar showing transmitted commands and the current protocol or brand.
+
+- The **B button** stops the transmission sequence.
+
+- The **A button** repeats the TV OFF sequence after completion.
+
+### DEAUTH DETECTION
+
+- Improved **THE BEAST → DEAUTH DET** with visual and audible alerts.
+
+- Added LED notification when deauthentication activity is detected.
+
+- Added buzzer notification when deauthentication activity is detected.
+
+- Added settings to independently enable or disable detection alerts.
+
+### PCAP SNIFFER
+
+- Expanded **THE BEAST → SNIFFER** with additional packet capture modes.
+
+### WIFI PCAP
+
+- Added additional WiFi packet capture filters and modes.
+
+- Added dedicated **HANDSHAKE** capture mode.
+
+- Handshake mode captures Beacon / Probe Response, EAPOL traffic, WiFi handshakes and PMKID information.
+
+- Captured handshake data is stored under `/sdcard/pcaps/handshakes`.
+
+- Added automatic export to **Hashcat `.22000` format**.
+
+- The `.22000` export supports both **PMKID (`WPA*01`)** and **EAPOL (`WPA*02`)** entries.
+
+- Multiple detected PMKIDs and handshake sessions can be stored in the same `.22000` export.
+
+### NFC / EMV
+
+- Expanded EMV analysis under **THE ZEN → NFC**.
+
+- Added additional EMV information including card scheme, expected kernel, AIP, CVM, AFL records and recognized EMV tags.
+
+- Added parsing and display of **PDOL**, **CDOL** and **DDOL** information.
+
+- Added additional optional EMV application data when available.
+
+### EMV CARD SCHEMES
+
+- Added support for identifying additional EMV card families and AIDs.
+
+- Added **American Express**, **JCB**, **Discover / Diners Club**, **UnionPay**, **Interac**, **Cartes Bancaires**, **eftpos** and **RuPay**.
+
+### EMV CVM DETAILS
+
+- Added detailed **Cardholder Verification Method** information.
+
+- Added detection of offline PIN, online PIN, signature and No CVM rules.
+
+- Added CVM condition information including transaction amount and cashback-related conditions when available.
+
+### NFC EXPORT
+
+- Improved NFC scan and save output.
+
+- Saved NFC files now include a more complete EMV summary.
+
+- Added parsed TLV tree information.
+
+- Added CVM rules and recognized tag names.
+
+- Added certificate and optional EMV data when available.
+
+### Community Contribution
+
+Special thanks to **THNRGLABS** for suggesting the **audible alert for Deauth Detection**, helping improve real-time deauthentication notifications.
+
+Special thanks to **GohanAMP** for suggesting the **Captive Portal client monitor**, including the ability to view connected clients and inspect their details directly from the portal interface.
+
+
 ## POOM 1.0.10
 
 This release introduces the new **Motion MIDI** application, allowing POOM to use IMU motion as a BLE MIDI controller for drums and melodic gestures.

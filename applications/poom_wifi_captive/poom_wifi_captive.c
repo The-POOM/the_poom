@@ -2,6 +2,7 @@
 // Copyright (c) 2026 THE POOM
 
 #include "poom_wifi_captive.h"
+#include "captive_clients_internal.h"
 
 #include <stdbool.h>
 #include <ctype.h>
@@ -13,6 +14,7 @@
 #include "dns_server.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -58,7 +60,7 @@
 /* =========================
  * Local constants
  * ========================= */
-#define CAPTIVE_MODULE_MAX_STA_CONN                 (4)
+#define CAPTIVE_MODULE_MAX_STA_CONN                 POOM_WIFI_CAPTIVE_MAX_CLIENTS
 #define CAPTIVE_MODULE_QUERY_PARAM_MAX_LEN          (254U)
 #define CAPTIVE_MODULE_USER_DUMP_MAX_LEN            (512U)
 #define CAPTIVE_MODULE_FILE_IO_CHUNK_LEN            (512U)
@@ -98,7 +100,7 @@ typedef struct {
 static captive_module_state_t s_state = {0};
 static captive_module_user_ctx_t s_user_ctx = {0};
 
-static char s_portal_file[CAPTIVE_PORTAL_MAX_DEFAULT_LEN] = CAPTIVE_PORTAL_DEFAULT_NAME;
+static char *s_portal_file;
 static char s_sta_ssid[33] = CONFIG_POOM_STA_SSID;
 static char s_sta_pass[65] = CONFIG_POOM_STA_PASS;
 static char s_ap_clone_ssid[33] = {0};
@@ -151,6 +153,44 @@ static char *captive_module_strdup_(const char *src)
 
     memcpy(dst, src, len + 1U);
     return dst;
+}
+
+static char *captive_module_strdup_portal_(const char *src)
+{
+    size_t len;
+    char *dst;
+
+    if((src == NULL) || (src[0] == '\0')) {
+        return NULL;
+    }
+
+    len = strnlen(src, CAPTIVE_PORTAL_MAX_PATH_LEN);
+    if(len >= CAPTIVE_PORTAL_MAX_PATH_LEN) {
+        len = CAPTIVE_PORTAL_MAX_PATH_LEN - 1U;
+    }
+
+    dst = (char *)heap_caps_malloc(len + 1U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(dst == NULL) {
+        dst = (char *)malloc(len + 1U);
+    }
+    if(dst == NULL) {
+        return NULL;
+    }
+
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    return dst;
+}
+
+static const char *captive_module_portal_file_(void)
+{
+    return (s_portal_file != NULL) ? s_portal_file : CAPTIVE_PORTAL_DEFAULT_NAME;
+}
+
+static void captive_module_reset_portal_file_(void)
+{
+    free(s_portal_file);
+    s_portal_file = NULL;
 }
 
 /**
@@ -361,6 +401,8 @@ static esp_err_t captive_module_wifi_init_apsta_(void)
     }
 
     s_state.wifi_initialized = true;
+    ret = captive_clients_start();
+    if(ret != ESP_OK) return ret;
 
     strncpy((char *)sta_config.sta.ssid, s_sta_ssid, sizeof(sta_config.sta.ssid));
     sta_config.sta.ssid[sizeof(sta_config.sta.ssid) - 1U] = '\0';
@@ -441,6 +483,8 @@ static esp_err_t captive_module_http_root_get_handler_(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    captive_clients_observe_http(req);
+
     httpd_resp_set_type(req, "text/html");
 
     if(sd_card_is_not_mounted()) {
@@ -449,8 +493,13 @@ static esp_err_t captive_module_http_root_get_handler_(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/%s/%s", SD_CARD_PATH, CAPTIVE_PORTAL_PATH_NAME, s_portal_file);
+    const char *portal_file = captive_module_portal_file_();
+    char path[CAPTIVE_PORTAL_MAX_PATH_LEN + 32U];
+    if(portal_file[0] == '/') {
+        snprintf(path, sizeof(path), "%s", portal_file);
+    } else {
+        snprintf(path, sizeof(path), "%s/%s/%s", SD_CARD_PATH, CAPTIVE_PORTAL_PATH_NAME, portal_file);
+    }
 
     FILE *file = fopen(path, "r");
     if(file == NULL) {
@@ -524,6 +573,8 @@ static esp_err_t captive_module_http_validate_get_handler_(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    captive_clients_observe_http(req);
+
     captive_module_free_user_ctx_();
 
     query_len = httpd_req_get_url_query_len(req);
@@ -578,6 +629,7 @@ static esp_err_t captive_module_http_validate_get_handler_(httpd_req_t *req)
 static esp_err_t captive_module_http_404_handler_(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
+    captive_clients_observe_http(req);
 
     httpd_resp_set_status(req, "302 Temporary Redirect");
     httpd_resp_set_hdr(req, "Location", "/");
@@ -596,6 +648,8 @@ static esp_err_t captive_module_http_detect_handler_(httpd_req_t *req)
     if(req == NULL) {
         return ESP_FAIL;
     }
+
+    captive_clients_observe_http(req);
 
     if((strstr(req->uri, "connectivitycheck") != NULL) ||
        (strstr(req->uri, "generate_204") != NULL) ||
@@ -621,6 +675,8 @@ static esp_err_t captive_module_http_redirect_handler_(httpd_req_t *req)
     if(req == NULL) {
         return ESP_FAIL;
     }
+
+    captive_clients_observe_http(req);
 
     httpd_resp_set_type(req, "text/html");
     captive_module_send_embedded_redirect_(req);
@@ -753,9 +809,11 @@ static void captive_module_stop_services_(void)
         s_state.event_handler_registered = false;
     }
 
+    captive_clients_stop();
     captive_module_wifi_stack_stop_();
 
     captive_module_free_user_ctx_();
+    captive_module_reset_portal_file_();
     s_state.started = false;
 }
 
@@ -793,6 +851,7 @@ static esp_err_t captive_module_start_services_(void)
     s_state.dns_server = start_dns_server(&dns_cfg);
     if(s_state.dns_server == NULL) {
         CAPTIVE_MODULE_PRINTF_W("DNS server failed to start");
+        return ESP_FAIL;
     }
 
     s_state.started = true;
@@ -804,12 +863,20 @@ static esp_err_t captive_module_start_services_(void)
  * ========================= */
 void poom_wifi_captive_set_portal_file(const char *filename)
 {
-    if(filename == NULL) {
+    char *copy;
+
+    if((filename == NULL) || (filename[0] == '\0')) {
+        captive_module_reset_portal_file_();
         return;
     }
 
-    strncpy(s_portal_file, filename, sizeof(s_portal_file) - 1U);
-    s_portal_file[sizeof(s_portal_file) - 1U] = '\0';
+    copy = captive_module_strdup_portal_(filename);
+    if(copy == NULL) {
+        return;
+    }
+
+    free(s_portal_file);
+    s_portal_file = copy;
 }
 
 void poom_wifi_captive_set_ap_clone(const char *ssid, bool open_auth)
@@ -825,7 +892,7 @@ void poom_wifi_captive_set_ap_clone(const char *ssid, bool open_auth)
     s_ap_clone_ssid[sizeof(s_ap_clone_ssid) - 1U] = '\0';
 }
 
-void poom_wifi_captive_start(void)
+esp_err_t poom_wifi_captive_start(void)
 {
     if(s_state.started) {
         captive_module_stop_services_();
@@ -837,16 +904,15 @@ void poom_wifi_captive_start(void)
 
     captive_module_load_sta_creds_from_sd_();
 
-    strncpy(s_portal_file, CAPTIVE_PORTAL_DEFAULT_NAME, sizeof(s_portal_file) - 1U);
-    s_portal_file[sizeof(s_portal_file) - 1U] = '\0';
-
-    if(captive_module_start_services_() != ESP_OK) {
+    esp_err_t status = captive_module_start_services_();
+    if(status != ESP_OK) {
         CAPTIVE_MODULE_PRINTF_E("failed to start captive module");
         captive_module_stop_services_();
-        return;
+        return status;
     }
 
     CAPTIVE_MODULE_PRINTF_I("captive portal running (AP+STA)");
+    return ESP_OK;
 }
 
 void poom_wifi_captive_stop(void)

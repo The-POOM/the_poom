@@ -2,6 +2,10 @@ file(GLOB POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/*.c"
 )
 
+list(APPEND POOM_APP_PACK_SRCS
+    "${COMPONENT_DIR}/src/menu_tv_off.c"
+)
+
 if(NOT CONFIG_ZB_ENABLED)
     list(REMOVE_ITEM POOM_APP_PACK_SRCS
         "${COMPONENT_DIR}/src/menu_cli_zigbee.c"
@@ -72,6 +76,8 @@ set(POOM_APP_PACK_REQUIRES
     poom_wifi_spam
     poom_wii
     sd_card
+    ws2812
+    board
 )
 
 set(POOM_APP_PACK_PRIV_REQUIRES)

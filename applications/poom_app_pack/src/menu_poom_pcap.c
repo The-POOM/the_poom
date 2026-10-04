@@ -158,6 +158,8 @@ static const char *menu_poom_pcap_wifi_capture_label_(poom_pcap_wifi_capture_t c
             return "RAW";
         case POOM_PCAP_WIFI_CAPTURE_EAPOL:
             return "EAPOL";
+        case POOM_PCAP_WIFI_CAPTURE_HANDSHAKE:
+            return "HANDSHAKE";
         case POOM_PCAP_WIFI_CAPTURE_WPS:
             return "WPS";
         default:
@@ -212,6 +214,7 @@ static void menu_poom_pcap_draw_wifi_type_(void)
         POOM_PCAP_WIFI_CAPTURE_BEACON,
         POOM_PCAP_WIFI_CAPTURE_RAW,
         POOM_PCAP_WIFI_CAPTURE_EAPOL,
+        POOM_PCAP_WIFI_CAPTURE_HANDSHAKE,
         POOM_PCAP_WIFI_CAPTURE_WPS,
     };
 
@@ -385,12 +388,25 @@ static void menu_poom_pcap_draw_running_(void)
     }
     else if (s_menu_poom_pcap_mode == MENU_POOM_PCAP_MODE_WIFI)
     {
-        char ch[4];
-        (void)snprintf(ch, sizeof(ch), "%hhu", s_menu_poom_pcap_wifi_channel);
-        (void)snprintf(line2, sizeof(line2), "O:%.4s %.6s C:%.3s",
-                       menu_poom_pcap_output_label_(),
-                       menu_poom_pcap_wifi_capture_label_(s_menu_poom_pcap_wifi_capture),
-                       ch);
+        if (s_menu_poom_pcap_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+        {
+            poom_pcap_wifi_handshake_status_t hs = {0};
+            (void)poom_pcap_manager_wifi_handshake_get_status(&hs);
+            (void)snprintf(line2,
+                           sizeof(line2),
+                           "HS:%u PMK:%u",
+                           (unsigned)hs.valid_pair_count,
+                           (unsigned)hs.pmkid_count);
+        }
+        else
+        {
+            char ch[4];
+            (void)snprintf(ch, sizeof(ch), "%hhu", s_menu_poom_pcap_wifi_channel);
+            (void)snprintf(line2, sizeof(line2), "O:%.4s %.6s C:%.3s",
+                           menu_poom_pcap_output_label_(),
+                           menu_poom_pcap_wifi_capture_label_(s_menu_poom_pcap_wifi_capture),
+                           ch);
+        }
     }
     else
     {
@@ -510,6 +526,10 @@ static esp_err_t menu_poom_pcap_start_capture_(void)
             (s_menu_poom_pcap_wifi_capture == POOM_PCAP_WIFI_CAPTURE_BEACON))
         {
             filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+        }
+        else if (s_menu_poom_pcap_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+        {
+            filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
         }
         else if ((s_menu_poom_pcap_wifi_capture == POOM_PCAP_WIFI_CAPTURE_EAPOL) ||
                  (s_menu_poom_pcap_wifi_capture == POOM_PCAP_WIFI_CAPTURE_WPS))
@@ -744,6 +764,7 @@ static void menu_poom_pcap_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx
             POOM_PCAP_WIFI_CAPTURE_BEACON,
             POOM_PCAP_WIFI_CAPTURE_RAW,
             POOM_PCAP_WIFI_CAPTURE_EAPOL,
+            POOM_PCAP_WIFI_CAPTURE_HANDSHAKE,
             POOM_PCAP_WIFI_CAPTURE_WPS,
         };
 
