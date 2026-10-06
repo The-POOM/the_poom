@@ -71,6 +71,7 @@
 #include "menu_tv_off.h"
 #include "menu_wifi_detector.h"
 #include "poom_breakout.h"
+#include "poom_i2c_as5600.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -894,6 +895,13 @@ static void action_lua_(void)
     menu_lua_show();
 }
 
+static void action_poom_i2c_as5600(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    app_poom_i2c_as5600_menu();
+}
+
 // ==============================================================
 // Menu model (mirrors the app-pack categories)
 // ==============================================================
@@ -952,6 +960,7 @@ static const poom_menu_item_t s_apps_maker[] = {
     {"I2C", action_i2c_scan_},
     {"LUA", action_lua_},
     {"EDGE AI", action_edge_ai_},
+    {"AS5600 I2C", action_poom_i2c_as5600},
 };
 
 static const poom_menu_item_t s_apps_settings[] = {
