@@ -97,7 +97,9 @@ static void menu_ble_spam_draw_(void)
     (void)poom_arduboy_print(line_state);
 
     poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + ROW_STEP));
-    (void)poom_arduboy_print(F("Name:"));
+    (void)poom_arduboy_print(F("PLT:"));
+    (void)poom_arduboy_print(poom_ble_spam_platform_name(poom_ble_spam_get_platform()));
+    (void)poom_arduboy_print(F(" <>"));
 
     poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + 2 * ROW_STEP));
     (void)poom_arduboy_print(s_menu_ble_spam_name);
@@ -234,6 +236,13 @@ static void menu_ble_spam_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
         {
             s_menu_ble_spam_exit_requested = true;
         }
+        return;
+    }
+
+    if ((ev.button == BUTTON_LEFT) || (ev.button == BUTTON_RIGHT))
+    {
+        (void)poom_ble_spam_cycle_platform((ev.button == BUTTON_LEFT) ? -1 : 1);
+        menu_ble_spam_draw_();
         return;
     }
 
