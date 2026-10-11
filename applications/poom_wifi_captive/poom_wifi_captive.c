@@ -22,6 +22,7 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "poom_wifi_ctrl.h"
+#include "poom_secrets_store.h"
 #include "sd_card.h"
 
 /**
@@ -877,6 +878,35 @@ void poom_wifi_captive_set_portal_file(const char *filename)
 
     free(s_portal_file);
     s_portal_file = copy;
+}
+
+esp_err_t poom_wifi_captive_load_saved_portal(char *out, size_t out_len)
+{
+    size_t len = out_len;
+
+    if((out == NULL) || (out_len == 0U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    out[0] = '\0';
+    if(poom_secrets_get_str(CAPTIVE_PORTAL_CONFIG_KEY, out, &len) != ESP_OK) {
+        out[0] = '\0';
+        return ESP_FAIL;
+    }
+
+    out[out_len - 1U] = '\0';
+    return (out[0] != '\0') ? ESP_OK : ESP_FAIL;
+}
+
+void poom_wifi_captive_apply_saved_portal(void)
+{
+    char portal[CAPTIVE_PORTAL_MAX_PATH_LEN];
+
+    if(poom_wifi_captive_load_saved_portal(portal, sizeof(portal)) == ESP_OK) {
+        poom_wifi_captive_set_portal_file(portal);
+    } else {
+        poom_wifi_captive_set_portal_file(CAPTIVE_PORTAL_DEFAULT_NAME);
+    }
 }
 
 void poom_wifi_captive_set_ap_clone(const char *ssid, bool open_auth)

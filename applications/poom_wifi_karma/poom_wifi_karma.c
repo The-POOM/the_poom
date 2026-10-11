@@ -192,6 +192,7 @@ static void poom_wifi_karma_promote_to_captive_(const char *ssid)
     (void)poom_wifi_ctrl_set_promiscuous_rx_cb(NULL);
 
     poom_wifi_captive_set_ap_clone(ssid, true);
+    poom_wifi_captive_apply_saved_portal();
     poom_wifi_captive_start();
     strncpy(s_poom_wifi_karma_active_ssid, ssid, sizeof(s_poom_wifi_karma_active_ssid) - 1U);
     s_poom_wifi_karma_active_ssid[sizeof(s_poom_wifi_karma_active_ssid) - 1U] = '\0';

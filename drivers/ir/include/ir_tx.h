@@ -18,6 +18,7 @@ extern "C" {
 #include "driver/rmt_tx.h"
 #include "esp_err.h"
 #include "ir_dec.h"
+#include "ir_raw.h"
 
 /**
  * @brief IR transmitter configuration.
@@ -53,6 +54,10 @@ esp_err_t ir_tx_init(ir_tx_handle_t* transmitter, const ir_tx_config_t* config, 
 esp_err_t ir_tx_deinit(ir_tx_handle_t* transmitter);
 
 esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32_t address, uint32_t command);
+
+/* Sends the complete RAW capture and waits for completion before returning.
+ * The caller retains ownership of signal. Parsed TX carrier settings are preserved. */
+esp_err_t ir_tx_send_raw(ir_tx_handle_t* transmitter, const ir_raw_signal_t* signal, size_t size);
 
 /**
  * @brief Send NEC (8-bit addr + ~addr + 8-bit cmd + ~cmd) using raw symbols.

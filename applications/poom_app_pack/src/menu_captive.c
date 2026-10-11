@@ -40,7 +40,7 @@
 #define CLIENT_COLS (17U)
 #define CAPTIVE_AP_NAME_DEFAULT "coffee"
 #define CAPTIVE_CFG_KEY_AP_NAME "captive_ap_name"
-#define CAPTIVE_CFG_KEY_PORTAL "captive_portal"
+#define CAPTIVE_CFG_KEY_PORTAL CAPTIVE_PORTAL_CONFIG_KEY
 #define CAPTIVE_PORTAL_STORE_LEN (128U)
 
 typedef enum {

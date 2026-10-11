@@ -3638,7 +3638,8 @@ static int cmd_deauth_det_ch(int argc, char** argv)
         printf("Usage: deauth-det-ch <channel>\n");
         return 1;
     }
-    if(!cli_apps_parse_u32_(argv[1], POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT, &channel) || (channel == 0U))
+    if(!cli_apps_parse_u32_(argv[1], POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MAX, &channel) ||
+       (poom_wifi_deauth_detector_channel_index((uint8_t)channel) < 0))
     {
         printf("Invalid deauth-det channel\n");
         return 1;

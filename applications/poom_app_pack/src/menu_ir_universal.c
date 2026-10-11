@@ -56,8 +56,17 @@
 #define MENU_IR_UNIV_STATUS_HOLD_MS (900U)
 #define MENU_IR_UNIV_ERROR_HOLD_MS (1300U)
 #define MENU_IR_UNIV_RCV_TIMEOUT_MS (200U)
-#define MENU_IR_UNIV_RX_BUFFER_SYMBOLS (256U)
+#define MENU_IR_UNIV_RX_BUFFER_SYMBOLS (IR_RAW_MAX_TIMINGS / 2U + 1U)
+/* 2 us ticks allow a 60 ms idle delimiter within the 15-bit RMT limit.
+ * Internal gaps shorter than this remain part of a single RAW capture. */
+#define MENU_IR_UNIV_RX_CLK_HZ (500000U)
+#define MENU_IR_UNIV_RX_IDLE_NS (60000000U)
+#define MENU_IR_UNIV_PROTO_RAW (0xFFU)
 #define MENU_IR_UNIV_RX_DUMP_SYMBOLS_MAX (80U)
+
+#ifndef MENU_IR_UNIV_RX_DUMP
+#define MENU_IR_UNIV_RX_DUMP (0)
+#endif
 
 #define MENU_IR_UNIV_HEADER_H (11)
 #define MENU_IR_UNIV_BOX_Y (12)
@@ -146,6 +155,7 @@ typedef struct
     bool right_down;
 
     menu_ir_univ_code_t pending_code;
+    ir_raw_signal_t* pending_raw;
 } menu_ir_univ_state_t;
 
 static TaskHandle_t s_menu_ir_univ_task = NULL;
@@ -188,7 +198,7 @@ static void menu_ir_univ_draw_sd_header_(void);
 
 static void menu_ir_univ_draw_main_(uint8_t selected);
 static void menu_ir_univ_draw_status_(const char* line1, const char* line2, const char* footer);
-static void menu_ir_univ_draw_assign_list_(uint8_t selected);
+static void menu_ir_univ_draw_assign_list_(uint8_t selected, bool raw);
 static void menu_ir_univ_draw_emulator_(uint8_t mapped_count);
 static void menu_ir_univ_exit_(void);
 static void menu_ir_univ_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx);
@@ -437,7 +447,7 @@ static void menu_ir_univ_draw_sd_header_(void)
  * @param[in] selected Parameter passed to the helper.
  * @return void
  */
-static void menu_ir_univ_draw_assign_list_(uint8_t selected)
+static void menu_ir_univ_draw_assign_list_(uint8_t selected, bool raw)
 {
     const int16_t list_y0 = 16;
     const int16_t row_step = 12;
@@ -449,7 +459,7 @@ static void menu_ir_univ_draw_assign_list_(uint8_t selected)
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
 
-    menu_ir_univ_draw_header_(F("BIND"));
+    menu_ir_univ_draw_header_(raw ? F("BIND RAW") : F("BIND"));
 
     poom_arduboy_draw_rect(0, MENU_IR_UNIV_BOX_Y, ARDUBOY_WIDTH, MENU_IR_UNIV_BOX_H, WHITE);
 
@@ -1100,7 +1110,8 @@ typedef enum
  * @param[in] out_code Parameter passed to the helper.
  * @return menu_ir_univ_load_result_t
  */
-static menu_ir_univ_load_result_t menu_ir_univ_load_code_for_button_(uint8_t button, menu_ir_univ_code_t* out_code)
+static menu_ir_univ_load_result_t menu_ir_univ_load_code_for_button_(uint8_t button, menu_ir_univ_code_t* out_code,
+                                                                   ir_raw_signal_t** out_raw)
 {
     esp_err_t err;
     const char* key;
@@ -1108,6 +1119,8 @@ static menu_ir_univ_load_result_t menu_ir_univ_load_code_for_button_(uint8_t but
     uint8_t raw[8] = {0};
     menu_ir_univ_code_t code = {0};
     menu_ir_univ_code_legacy_t legacy = {0};
+
+    if(out_raw != NULL) *out_raw = NULL;
 
     if(out_code == NULL)
     {
@@ -1138,7 +1151,25 @@ static menu_ir_univ_load_result_t menu_ir_univ_load_code_for_button_(uint8_t but
         return MENU_IR_UNIV_LOAD_STORE_ERR;
     }
 
-    if(blob_len == 4U)
+    if(blob_len >= sizeof(ir_raw_signal_t) &&
+       blob_len <= sizeof(ir_raw_signal_t) + IR_RAW_MAX_TIMINGS * sizeof(uint32_t))
+    {
+        ir_raw_signal_t* signal = malloc(blob_len);
+        if(signal == NULL) return MENU_IR_UNIV_LOAD_STORE_ERR;
+        size_t len = blob_len;
+        err = poom_secrets_get_blob(key, signal, &len);
+        if(err != ESP_OK || len != blob_len || !ir_raw_signal_valid(signal, len))
+        {
+            free(signal);
+            return MENU_IR_UNIV_LOAD_BAD_DATA;
+        }
+        code.protocol = MENU_IR_UNIV_PROTO_RAW;
+        *out_code = code;
+        if(out_raw != NULL) *out_raw = signal;
+        else free(signal);
+        return MENU_IR_UNIV_LOAD_OK;
+    }
+    else if(blob_len == 4U)
     {
         size_t tmp_len = sizeof(raw);
         err = poom_secrets_get_blob(key, raw, &tmp_len);
@@ -1203,7 +1234,8 @@ static menu_ir_univ_load_result_t menu_ir_univ_load_code_for_button_(uint8_t but
  * @param[in] code Parameter passed to the helper.
  * @return bool
  */
-static bool menu_ir_univ_save_code_for_button_(uint8_t button, const menu_ir_univ_code_t* code)
+static bool menu_ir_univ_save_code_for_button_(uint8_t button, const menu_ir_univ_code_t* code,
+                                               const ir_raw_signal_t* raw)
 {
     esp_err_t err;
     const char* key;
@@ -1225,7 +1257,16 @@ static bool menu_ir_univ_save_code_for_button_(uint8_t button, const menu_ir_uni
         return false;
     }
 
-    err = poom_secrets_set_blob(key, code, sizeof(*code));
+    if(code->protocol == MENU_IR_UNIV_PROTO_RAW)
+    {
+        if(raw == NULL || !ir_raw_signal_valid(raw, ir_raw_signal_size(raw))) return false;
+        /* One blob at the existing button key: replacement is atomic in NVS. */
+        err = poom_secrets_set_blob(key, raw, ir_raw_signal_size(raw));
+    }
+    else
+    {
+        err = poom_secrets_set_blob(key, code, sizeof(*code));
+    }
     return err == ESP_OK;
 }
 
@@ -1241,7 +1282,7 @@ static uint8_t menu_ir_univ_count_mapped_(void)
     for(uint8_t i = 0U; i < (uint8_t)(sizeof(s_menu_ir_univ_assign_buttons) / sizeof(s_menu_ir_univ_assign_buttons[0])); i++)
     {
         menu_ir_univ_code_t tmp;
-        if(menu_ir_univ_load_code_for_button_(s_menu_ir_univ_assign_buttons[i], &tmp) == MENU_IR_UNIV_LOAD_OK)
+        if(menu_ir_univ_load_code_for_button_(s_menu_ir_univ_assign_buttons[i], &tmp, NULL) == MENU_IR_UNIV_LOAD_OK)
         {
             count++;
         }
@@ -1275,6 +1316,7 @@ static menu_ir_univ_send_result_t menu_ir_univ_send_for_button_(ir_tx_handle_t* 
                                                                 uint8_t button)
 {
     menu_ir_univ_code_t code;
+    ir_raw_signal_t* raw = NULL;
     menu_ir_univ_load_result_t load_result;
 
     if((transmitter == NULL) || (transmitter_ready == NULL) || (transmitter_cfg == NULL))
@@ -1282,7 +1324,7 @@ static menu_ir_univ_send_result_t menu_ir_univ_send_for_button_(ir_tx_handle_t* 
         return MENU_IR_UNIV_SEND_FAILED;
     }
 
-    load_result = menu_ir_univ_load_code_for_button_(button, &code);
+    load_result = menu_ir_univ_load_code_for_button_(button, &code, &raw);
     if(load_result != MENU_IR_UNIV_LOAD_OK)
     {
         if(load_result == MENU_IR_UNIV_LOAD_NO_CODE)
@@ -1308,15 +1350,140 @@ static menu_ir_univ_send_result_t menu_ir_univ_send_for_button_(ir_tx_handle_t* 
             MENU_IR_UNIV_PRINTF_E("IR TX init failed (gpio=%d): %s",
                                   transmitter_cfg->gpio,
                                   esp_err_to_name(err));
+            free(raw);
             return MENU_IR_UNIV_SEND_TX_INIT_FAILED;
         }
 
         *transmitter_ready = true;
     }
 
-    return (ir_tx_send(transmitter, (ir_protocol_t)code.protocol, code.address, code.command) == ESP_OK)
+    esp_err_t send_err = raw != NULL
+        ? ir_tx_send_raw(transmitter, raw, ir_raw_signal_size(raw))
+        : ir_tx_send(transmitter, (ir_protocol_t)code.protocol, code.address, code.command);
+    free(raw);
+    return (send_err == ESP_OK)
         ? MENU_IR_UNIV_SEND_OK
         : MENU_IR_UNIV_SEND_FAILED;
+}
+
+#if MENU_IR_UNIV_ENABLE_LOG
+/* Keep lines short enough for a serial terminal. M is carrier present (RX low),
+ * S is a space (RX high). Print before RX is freed or its buffer is rearmed. */
+static void menu_ir_univ_log_capture_(const rmt_rx_done_event_data_t* rx,
+                                      uint32_t clk_hz, size_t capacity)
+{
+    if(rx == NULL || rx->received_symbols == NULL || clk_hz == 0U) return;
+
+    size_t timing_count = 0U;
+    uint64_t total_us = 0U;
+    printf("[IR RX] symbols=%u clock=%lu Hz buffer_full=%s\n",
+           (unsigned)rx->num_symbols, (unsigned long)clk_hz,
+           rx->num_symbols >= capacity ? "YES" : "no");
+    printf("[IR RX] Times in us; M=pulse, S=space (includes final idle)\n");
+    for(size_t i = 0U; i < rx->num_symbols * 2U; ++i)
+    {
+        const rmt_symbol_word_t* symbol = &rx->received_symbols[i / 2U];
+        uint32_t ticks = (i % 2U) ? symbol->duration1 : symbol->duration0;
+        bool space = (i % 2U) ? symbol->level1 : symbol->level0;
+        if(ticks == 0U) continue;
+        uint32_t us = (uint32_t)(((uint64_t)ticks * 1000000U) / clk_hz);
+        if((timing_count % 8U) == 0U) printf("data[%04u]:", (unsigned)timing_count);
+        printf(" %c:%lu", space ? 'S' : 'M', (unsigned long)us);
+        ++timing_count;
+        total_us += us;
+        if((timing_count % 8U) == 0U) printf("\n");
+    }
+    if((timing_count % 8U) != 0U) printf("\n");
+    printf("[IR RX] timings=%u total=%llu us\n",
+           (unsigned)timing_count, (unsigned long long)total_us);
+}
+#endif
+
+/* Apply this check to one frame, not the whole capture: the extended RX idle
+ * window can collect several normal remote repeats in a single buffer. */
+static bool menu_ir_univ_decoded_capture_complete_(const rmt_rx_done_event_data_t* rx,
+                                                  ir_protocol_t protocol)
+{
+    size_t count = rx->num_symbols;
+    while(count && rx->received_symbols[count - 1U].duration0 == 0U &&
+          rx->received_symbols[count - 1U].duration1 == 0U) --count;
+    switch(protocol)
+    {
+        case IR_PROTOCOL_NEC:
+        case IR_PROTOCOL_NEC_EXT:
+        case IR_PROTOCOL_SAMSUNG32: return count == 34U;
+        case IR_PROTOCOL_NEC42:
+        case IR_PROTOCOL_NEC42_EXT: return count == 44U;
+        case IR_PROTOCOL_RCA: return count == 26U;
+        case IR_PROTOCOL_PIONEER: return count == 34U || count == 35U;
+        case IR_PROTOCOL_KASEIKYO: return count == 50U;
+        case IR_PROTOCOL_SIRC: return count == 13U;
+        case IR_PROTOCOL_SIRC15: return count == 16U;
+        case IR_PROTOCOL_SIRC20: return count == 21U;
+        case IR_PROTOCOL_RC5:
+        case IR_PROTOCOL_RC5X: return count <= 15U;
+        case IR_PROTOCOL_RC6: return count <= 24U;
+        default: return false;
+    }
+}
+
+/* Normalize from the captured mark/space timings, then decode every frame.
+ * A gap >=10 ms separates supported remote repeats. Shorter A/C block gaps
+ * remain inside their frame. Only collapse a capture when every frame is a
+ * complete decoding of the same command (including NEC/Samsung short repeats).
+ * An unknown block or a different command preserves the entire signal as RAW. */
+static bool menu_ir_univ_decode_learned_(const ir_raw_signal_t* raw, ir_decoded_frame_t* out)
+{
+    const size_t capacity = (raw->count + 1U) / 2U;
+    rmt_symbol_word_t* symbols = calloc(capacity, sizeof(*symbols));
+    if(symbols == NULL) return false;
+    ir_decoder_context_t context = {0};
+    ir_decoded_frame_t first = {0};
+    size_t start = 0U;
+    bool valid = true;
+    while(start < raw->count)
+    {
+        size_t end = start + 1U;
+        while(end < raw->count && raw->timings_us[end] < 10000U) end += 2U;
+        size_t count = (end - start + 1U) / 2U;
+        memset(symbols, 0, count * sizeof(*symbols));
+        for(size_t i = start; i < end; ++i)
+        {
+            /* The decoder uses microseconds at 1 MHz. Never truncate a long
+             * RAW mark into the RMT symbol's 15-bit field. */
+            if(raw->timings_us[i] > 32767U) { valid = false; break; }
+            rmt_symbol_word_t* symbol = &symbols[(i - start) / 2U];
+            if((i % 2U) == 0U) symbol->duration0 = raw->timings_us[i];
+            else { symbol->level1 = 1U; symbol->duration1 = raw->timings_us[i]; }
+        }
+        if(!valid) break;
+        rmt_rx_done_event_data_t frame_rx = {.received_symbols = symbols, .num_symbols = count};
+        ir_decoded_frame_t frame = {0};
+        if(!ir_decode_any_ex(symbols, count, 1000000U, &context, &frame))
+        {
+            valid = false;
+            break;
+        }
+        bool short_repeat = frame.repeat && count == 2U &&
+            (frame.protocol == IR_PROTOCOL_NEC || frame.protocol == IR_PROTOCOL_NEC_EXT ||
+             frame.protocol == IR_PROTOCOL_NEC42 || frame.protocol == IR_PROTOCOL_NEC42_EXT ||
+             frame.protocol == IR_PROTOCOL_SAMSUNG32);
+        if(!short_repeat && !menu_ir_univ_decoded_capture_complete_(&frame_rx, frame.protocol))
+        {
+            valid = false;
+            break;
+        }
+        if(start == 0U) first = frame;
+        else if(frame.protocol != first.protocol || frame.address != first.address || frame.command != first.command)
+        {
+            valid = false;
+            break;
+        }
+        start = end + 1U;
+    }
+    free(symbols);
+    if(valid) *out = first;
+    return valid;
 }
 
 /**
@@ -1330,7 +1497,6 @@ static void menu_ir_univ_task_(void* arg)
     menu_ir_univ_state_t s = {0};
     ir_rcv_handle_t receiver = {0};
     ir_tx_handle_t transmitter = {0};
-    ir_decoder_context_t decoder_ctx = {0};
     bool receiver_ready = false;
     bool transmitter_ready = false;
     ir_rcv_config_t receiver_cfg;
@@ -1346,7 +1512,6 @@ static void menu_ir_univ_task_(void* arg)
     s.left_down = false;
     s.right_down = false;
     (void)memset(&s.pending_code, 0, sizeof(s.pending_code));
-    ir_decoder_context_reset(&decoder_ctx);
 
     free(s_menu_ir_univ_sd_cmds);
     s_menu_ir_univ_sd_cmds = (menu_ir_univ_sd_cmd_t*)calloc(MENU_IR_UNIV_SD_MAX_COMMANDS, sizeof(*s_menu_ir_univ_sd_cmds));
@@ -1394,7 +1559,8 @@ static void menu_ir_univ_task_(void* arg)
 
     receiver_cfg = ir_rcv_default_config();
     receiver_cfg.gpio = PIN_NUM_IR_RX;
-    receiver_cfg.clk_hz = MENU_IR_UNIV_NEC_CLK_HZ;
+    receiver_cfg.clk_hz = MENU_IR_UNIV_RX_CLK_HZ;
+    receiver_cfg.pulse_max_ns = MENU_IR_UNIV_RX_IDLE_NS;
     receiver_cfg.buffer_symbols = MENU_IR_UNIV_RX_BUFFER_SYMBOLS;
 
     transmitter_cfg = ir_tx_default_config();
@@ -1439,6 +1605,11 @@ static void menu_ir_univ_task_(void* arg)
 
     while(1)
     {
+        if(s.screen != MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON)
+        {
+            free(s.pending_raw);
+            s.pending_raw = NULL;
+        }
         menu_ir_univ_button_msg_t button_msg = {0};
         bool got_button = menu_ir_univ_pop_button_msg_(&button_msg, 50U);
 
@@ -1610,14 +1781,24 @@ static void menu_ir_univ_task_(void* arg)
         {
             if(!receiver_ready)
             {
-                if(ir_rcv_init(&receiver, &receiver_cfg, "ir_univ_rx") == ESP_OK)
+                esp_err_t rx_err = ir_rcv_init(&receiver, &receiver_cfg, "ir_univ_rx");
+                if(rx_err == ESP_OK)
+                {
+                    rx_err = ir_rcv_start(&receiver, &receiver_cfg);
+                    if(rx_err != ESP_OK)
+                    {
+                        (void)ir_rcv_deinit(&receiver);
+                    }
+                }
+                if(rx_err == ESP_OK)
                 {
                     receiver_ready = true;
                 }
                 else
                 {
-                    MENU_IR_UNIV_PRINTF_E("IR RX init failed (gpio=%d)", receiver_cfg.gpio);
-                    menu_ir_univ_draw_status_("IR RX init", "failed", "B:BACK");
+                    MENU_IR_UNIV_PRINTF_E("IR RX start failed (gpio=%d): %s", receiver_cfg.gpio,
+                                          esp_err_to_name(rx_err));
+                    menu_ir_univ_draw_status_("IR RX start", "failed", "B:BACK");
                     vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_ERROR_HOLD_MS));
                     s.screen = MENU_IR_UNIV_SCREEN_MAIN;
                     menu_ir_univ_draw_main_(s.main_selected);
@@ -1625,20 +1806,39 @@ static void menu_ir_univ_task_(void* arg)
                 }
             }
 
-            if(ir_rcv_start(&receiver, &receiver_cfg) == ESP_OK)
+            /* A queue timeout is only a UI polling interval. Restarting RMT here
+             * can discard the header or cut a frame that is still arriving. */
+            rmt_rx_done_event_data_t rx = {0};
+            if(ir_rcv_wait(&receiver, &rx, MENU_IR_UNIV_RCV_TIMEOUT_MS))
             {
-                rmt_rx_done_event_data_t rx = {0};
-                if(ir_rcv_wait(&receiver, &rx, MENU_IR_UNIV_RCV_TIMEOUT_MS))
+                ir_decoded_frame_t frame = {0};
+#if MENU_IR_UNIV_ENABLE_LOG
+                menu_ir_univ_log_capture_(&rx, receiver_cfg.clk_hz, receiver.buffer_symbols);
+#endif
+#if MENU_IR_UNIV_RX_DUMP
+                ir_rcv_dump(&receiver, &rx, MENU_IR_UNIV_RX_DUMP_SYMBOLS_MAX);
+#endif
+                /* Preserve the original decoder path for a single complete frame.
+                 * Only normalize/split the capture if that path did not succeed. */
+                bool decoded = rx.num_symbols < receiver.buffer_symbols &&
+                    ir_decode_any(rx.received_symbols, rx.num_symbols, receiver_cfg.clk_hz, &frame) &&
+                    menu_ir_univ_decoded_capture_complete_(&rx, frame.protocol);
+                esp_err_t raw_err = ESP_OK;
+                if(!decoded)
                 {
-                    ir_decoded_frame_t frame = {0};
-                    MENU_IR_UNIV_PRINTF_I("RX done: symbols=%u", (unsigned)rx.num_symbols);
-                    ir_rcv_dump(&receiver, &rx, MENU_IR_UNIV_RX_DUMP_SYMBOLS_MAX);
-                    if(ir_decode_any_ex(rx.received_symbols,
-                                        rx.num_symbols,
-                                        receiver_cfg.clk_hz,
-                                        &decoder_ctx,
-                                        &frame))
+                    raw_err = ir_raw_signal_from_capture(rx.received_symbols,
+                        rx.num_symbols, receiver.buffer_symbols, receiver_cfg.clk_hz, &s.pending_raw);
+                    if(raw_err == ESP_OK) decoded = menu_ir_univ_decode_learned_(s.pending_raw, &frame);
+                }
+                if(raw_err == ESP_OK)
+                {
+                    (void)ir_rcv_deinit(&receiver);
+                    receiver_ready = false;
+                    memset(&s.pending_code, 0, sizeof(s.pending_code));
+                    if(decoded)
                     {
+                        free(s.pending_raw);
+                        s.pending_raw = NULL;
                         MENU_IR_UNIV_PRINTF_I("Decoded: %s addr=0x%08lX cmd=0x%08lX repeat=%u",
                                               ir_protocol_name(frame.protocol),
                                               (unsigned long)frame.address,
@@ -1646,32 +1846,35 @@ static void menu_ir_univ_task_(void* arg)
                                               (unsigned)frame.repeat);
                         s.pending_code.protocol = (uint8_t)frame.protocol;
                         s.pending_code.flags = frame.repeat ? 1U : 0U;
-                        s.pending_code.reserved = 0U;
                         s.pending_code.address = frame.address;
                         s.pending_code.command = frame.command;
-                        s.screen = MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON;
-                        s.assign_selected = 0U;
-                        menu_ir_univ_draw_assign_list_(s.assign_selected);
                     }
                     else
                     {
-                        MENU_IR_UNIV_PRINTF_W("Decode failed (unsupported)");
-                        menu_ir_univ_draw_status_("Unsupported", "Try again", "B:BACK");
-                        vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_STATUS_HOLD_MS));
-                        menu_ir_univ_draw_status_("LEARN", "Press remote", "B:BACK");
+                        s.pending_code.protocol = MENU_IR_UNIV_PROTO_RAW;
+                        MENU_IR_UNIV_PRINTF_I("RAW learned: %u timings; replay defaults 38000 Hz, 33%%",
+                                              (unsigned)s.pending_raw->count);
                     }
-
-                    (void)ir_rcv_deinit(&receiver);
-                    receiver_ready = false;
+                    s.screen = MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON;
+                    s.assign_selected = 0U;
+                    menu_ir_univ_draw_assign_list_(s.assign_selected, s.pending_raw != NULL);
                 }
                 else
                 {
-                    MENU_IR_UNIV_PRINTF_D("RX wait timeout");
+                    /* Decode before rearming: RMT reuses the same buffer.
+                     * Keep listening while updating the UI; do not sleep. */
+                    const bool capture_full = rx.num_symbols >= receiver.buffer_symbols;
+                    if(ir_rcv_start(&receiver, &receiver_cfg) != ESP_OK)
+                    {
+                        (void)ir_rcv_deinit(&receiver);
+                        receiver_ready = false;
+                    }
+                    MENU_IR_UNIV_PRINTF_W("IR frame not decoded (%u symbols); listening again",
+                                          (unsigned)rx.num_symbols);
+                    menu_ir_univ_draw_status_("LEARN",
+                        raw_err == ESP_ERR_NO_MEM ? "No RAM" :
+                        capture_full ? "Too long: short press" : "Press again", "B:BACK");
                 }
-            }
-            else
-            {
-                MENU_IR_UNIV_PRINTF_W("ir_rcv_start failed (gpio=%d)", receiver_cfg.gpio);
             }
         }
         else if(s.screen == MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON)
@@ -1690,7 +1893,7 @@ static void menu_ir_univ_task_(void* arg)
                     {
                         s.assign_selected--;
                     }
-                    menu_ir_univ_draw_assign_list_(s.assign_selected);
+                    menu_ir_univ_draw_assign_list_(s.assign_selected, s.pending_raw != NULL);
                 }
                 else if(button_msg.button == BUTTON_DOWN)
                 {
@@ -1699,18 +1902,21 @@ static void menu_ir_univ_task_(void* arg)
                     {
                         s.assign_selected = 0U;
                     }
-                    menu_ir_univ_draw_assign_list_(s.assign_selected);
+                    menu_ir_univ_draw_assign_list_(s.assign_selected, s.pending_raw != NULL);
                 }
                 else if(button_msg.button == BUTTON_A)
                 {
                     uint8_t target_button = s_menu_ir_univ_assign_buttons[s.assign_selected];
-                    if(menu_ir_univ_save_code_for_button_(target_button, &s.pending_code))
+                    if(menu_ir_univ_save_code_for_button_(target_button, &s.pending_code, s.pending_raw))
                     {
                         menu_ir_univ_draw_status_("SAVED", " ", "B:BACK");
                     }
                     else
                     {
                         menu_ir_univ_draw_status_("SAVE FAIL", " ", "B:BACK");
+                        vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_STATUS_HOLD_MS));
+                        menu_ir_univ_draw_assign_list_(s.assign_selected, s.pending_raw != NULL);
+                        continue;
                     }
 
                     vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_STATUS_HOLD_MS));
@@ -1835,6 +2041,7 @@ static void menu_ir_univ_task_(void* arg)
         (void)ir_tx_deinit(&transmitter);
     }
 
+    free(s.pending_raw);
     free(s_menu_ir_univ_sd_cmds);
     s_menu_ir_univ_sd_cmds = NULL;
     s_menu_ir_univ_sd_cmd_count = 0U;

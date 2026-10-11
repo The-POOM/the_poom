@@ -1,3 +1,29 @@
+## POOM 1.0.12
+
+### IR UNIVERSAL
+
+- Improved IR signal reception and learning.
+- Added support for capturing, saving and replaying RAW IR signals.
+- Added diagnostic logs for IR signal analysis.
+- Expanded the **TV OFF** database from 13 to 45 codes, including LG, Samsung, NEC and Sony.
+
+### DEAUTH DETECTION
+
+- Added **2.4 GHz and 5 GHz** channel support for ESP32-C5.
+- Improved automatic channel hopping and manual channel selection.
+- Updated the `deauth-det-ch` command.
+
+### CAPTIVE PORTAL, DEAUTH AND KARMA
+
+- Improved selection and recovery of saved HTML portals.
+- Added connected client monitoring in **DEAUTH** and **KARMA**.
+- Added device details including IP address, MAC address, RSSI and device type when available.
+- Improved navigation and real-time client information updates.
+
+### Community Contribution
+
+Special thanks to **THNRGLABS** and **GohanAMP** for reporting issues, testing features and providing valuable feedback that helped improve POOM's IR, Deauth Detection and Captive Portal functionality.
+
 ## POOM 1.0.11
 
 This release expands **THE BEAST** and **NFC** tools with a redesigned Captive Portal workflow, TV OFF IR control and deauthentication tools, expanded PCAP capture modes and deeper EMV card analysis.

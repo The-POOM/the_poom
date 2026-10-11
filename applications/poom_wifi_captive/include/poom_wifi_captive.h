@@ -59,6 +59,7 @@ const char *poom_wifi_captive_client_label(const poom_wifi_captive_client_t *cli
 #define CAPTIVE_PORTAL_MAX_PATH_LEN              (128)
 #define CAPTIVE_PORTAL_MODE_FS_KEY               "cpmode"
 #define CAPTIVE_PORTAL_FS_KEY                    "cpportal"
+#define CAPTIVE_PORTAL_CONFIG_KEY                "captive_portal"
 #define CAPTIVE_PORTAL_REDIRECT_FS_KEY           "cpredirect"
 #define CAPTIVE_PORTAL_PREF_FS_KEY               "cpprefs"
 #define CAPTIVE_PORTAL_CHANNEL                   "cpchan"
@@ -101,6 +102,20 @@ void poom_wifi_captive_stop(void);
  * @param filename File name or path (e.g. "root.html" or "sub/login.html").
  */
 void poom_wifi_captive_set_portal_file(const char *filename);
+
+/**
+ * @brief Loads the saved portal selection from persistent config.
+ *
+ * @param[out] out Portal file/path buffer.
+ * @param[in] out_len Output buffer length.
+ * @return ESP_OK when a saved portal was loaded, otherwise an error.
+ */
+esp_err_t poom_wifi_captive_load_saved_portal(char *out, size_t out_len);
+
+/**
+ * @brief Applies saved portal selection, or the default portal when unset.
+ */
+void poom_wifi_captive_apply_saved_portal(void);
 
 /**
  * @brief Override SoftAP clone SSID and auth mode used by captive start.

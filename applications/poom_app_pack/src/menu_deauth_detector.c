@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "Arduboy2.h"
@@ -112,8 +113,10 @@ static TaskHandle_t s_menu_deauth_detector_task = NULL;
 static char s_menu_deauth_detector_sbus_user[] = "menu_deauth_detector";
 static char s_menu_deauth_detector_status_override[22] = {0};
 static uint8_t s_menu_deauth_detector_status_hold_cycles = 0;
-static poom_wifi_deauth_detector_stats_t s_menu_deauth_detector_stats;
-static poom_wifi_deauth_detector_report_t s_menu_deauth_detector_report;
+static poom_wifi_deauth_detector_stats_t *s_menu_deauth_detector_stats_storage = NULL;
+static poom_wifi_deauth_detector_report_t *s_menu_deauth_detector_report_storage = NULL;
+#define s_menu_deauth_detector_stats (*s_menu_deauth_detector_stats_storage)
+#define s_menu_deauth_detector_report (*s_menu_deauth_detector_report_storage)
 static menu_deauth_det_view_t s_menu_deauth_detector_view = MENU_DEAUTH_DET_VIEW_OVERVIEW;
 
 static bool s_alert_sound = false;
@@ -132,6 +135,56 @@ static esp_err_t menu_deauth_detector_exit_(void);
 static void menu_deauth_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_deauth_detector_status_hold_(const char *text, uint8_t hold_cycles);
 static bool menu_deauth_detector_channel_attacked_(uint8_t channel);
+static uint8_t menu_deauth_detector_first_channel_(void);
+static bool menu_deauth_detector_alloc_runtime_(void);
+static void menu_deauth_detector_free_runtime_(void);
+
+static bool menu_deauth_detector_alloc_runtime_(void)
+{
+    if(s_menu_deauth_detector_stats_storage == NULL)
+    {
+        s_menu_deauth_detector_stats_storage = (poom_wifi_deauth_detector_stats_t *)heap_caps_calloc(
+            1U,
+            sizeof(*s_menu_deauth_detector_stats_storage),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if(s_menu_deauth_detector_stats_storage == NULL)
+        {
+            s_menu_deauth_detector_stats_storage =
+                (poom_wifi_deauth_detector_stats_t *)calloc(1U, sizeof(*s_menu_deauth_detector_stats_storage));
+        }
+    }
+
+    if(s_menu_deauth_detector_report_storage == NULL)
+    {
+        s_menu_deauth_detector_report_storage = (poom_wifi_deauth_detector_report_t *)heap_caps_calloc(
+            1U,
+            sizeof(*s_menu_deauth_detector_report_storage),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if(s_menu_deauth_detector_report_storage == NULL)
+        {
+            s_menu_deauth_detector_report_storage =
+                (poom_wifi_deauth_detector_report_t *)calloc(1U, sizeof(*s_menu_deauth_detector_report_storage));
+        }
+    }
+
+    if((s_menu_deauth_detector_stats_storage == NULL) || (s_menu_deauth_detector_report_storage == NULL))
+    {
+        menu_deauth_detector_free_runtime_();
+        return false;
+    }
+
+    (void)memset(s_menu_deauth_detector_stats_storage, 0, sizeof(*s_menu_deauth_detector_stats_storage));
+    (void)memset(s_menu_deauth_detector_report_storage, 0, sizeof(*s_menu_deauth_detector_report_storage));
+    return true;
+}
+
+static void menu_deauth_detector_free_runtime_(void)
+{
+    free(s_menu_deauth_detector_stats_storage);
+    s_menu_deauth_detector_stats_storage = NULL;
+    free(s_menu_deauth_detector_report_storage);
+    s_menu_deauth_detector_report_storage = NULL;
+}
 
 /* Start/reset baselines match the detector's cleared counters. No packet history. */
 static void menu_deauth_detector_alerts_reset_(void)
@@ -298,6 +351,13 @@ static unsigned menu_deauth_detector_cap_u_(unsigned value, unsigned cap)
     return (value > cap) ? cap : value;
 }
 
+static uint8_t menu_deauth_detector_first_channel_(void)
+{
+    uint8_t ch = poom_wifi_deauth_detector_channel_at(0U);
+
+    return (ch == 0U) ? 1U : ch;
+}
+
 /**
  * @brief Summarizes the most active attacked channels without temporary arrays.
  *
@@ -325,13 +385,13 @@ static void menu_deauth_detector_summarize_attacked_channels_(uint8_t *out_prima
     uint32_t third_hits = 0U;
     uint32_t fourth_hits = 0U;
 
-    for(channel = 1U; channel <= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT; channel++)
+    for(channel = 0U; channel < poom_wifi_deauth_detector_channel_count(); channel++)
     {
-        const uint8_t idx = (uint8_t)(channel - 1U);
-        const uint32_t hits = s_menu_deauth_detector_stats.deauth_by_channel[idx] +
-                              s_menu_deauth_detector_stats.disassoc_by_channel[idx];
+        const uint8_t actual_channel = poom_wifi_deauth_detector_channel_at(channel);
+        const uint32_t hits = s_menu_deauth_detector_stats.deauth_by_channel[channel] +
+                              s_menu_deauth_detector_stats.disassoc_by_channel[channel];
 
-        if(hits == 0U)
+        if((actual_channel == 0U) || (hits == 0U))
         {
             continue;
         }
@@ -346,7 +406,7 @@ static void menu_deauth_detector_summarize_attacked_channels_(uint8_t *out_prima
             third_hits = second_hits;
             second = primary;
             second_hits = primary_hits;
-            primary = channel;
+            primary = actual_channel;
             primary_hits = hits;
         }
         else if(hits > second_hits)
@@ -355,19 +415,19 @@ static void menu_deauth_detector_summarize_attacked_channels_(uint8_t *out_prima
             fourth_hits = third_hits;
             third = second;
             third_hits = second_hits;
-            second = channel;
+            second = actual_channel;
             second_hits = hits;
         }
         else if(hits > third_hits)
         {
             fourth = third;
             fourth_hits = third_hits;
-            third = channel;
+            third = actual_channel;
             third_hits = hits;
         }
         else if(hits > fourth_hits)
         {
-            fourth = channel;
+            fourth = actual_channel;
             fourth_hits = hits;
         }
     }
@@ -402,16 +462,15 @@ static void menu_deauth_detector_summarize_attacked_channels_(uint8_t *out_prima
  */
 static bool menu_deauth_detector_channel_attacked_(uint8_t channel)
 {
-    uint8_t idx;
+    int8_t idx = poom_wifi_deauth_detector_channel_index(channel);
 
-    if((channel < 1U) || (channel > POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT))
+    if(idx < 0)
     {
         return false;
     }
 
-    idx = (uint8_t)(channel - 1U);
-    return (s_menu_deauth_detector_stats.deauth_by_channel[idx] != 0U) ||
-           (s_menu_deauth_detector_stats.disassoc_by_channel[idx] != 0U);
+    return (s_menu_deauth_detector_stats.deauth_by_channel[(uint8_t)idx] != 0U) ||
+           (s_menu_deauth_detector_stats.disassoc_by_channel[(uint8_t)idx] != 0U);
 }
 
 /**
@@ -424,11 +483,24 @@ static bool menu_deauth_detector_channel_attacked_(uint8_t channel)
 static uint8_t menu_deauth_detector_next_attacked_channel_(uint8_t current_channel, int direction)
 {
     uint8_t step;
-    uint8_t ch;
+    uint8_t idx;
+    uint8_t count = poom_wifi_deauth_detector_channel_count();
+    int8_t current_idx = poom_wifi_deauth_detector_channel_index(current_channel);
     bool any_attacked = false;
 
-    for(ch = 1U; ch <= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT; ch++)
+    if(count == 0U)
     {
+        return current_channel;
+    }
+
+    if(current_idx < 0)
+    {
+        current_idx = 0;
+    }
+
+    for(idx = 0U; idx < count; idx++)
+    {
+        const uint8_t ch = poom_wifi_deauth_detector_channel_at(idx);
         if(menu_deauth_detector_channel_attacked_(ch))
         {
             any_attacked = true;
@@ -438,35 +510,33 @@ static uint8_t menu_deauth_detector_next_attacked_channel_(uint8_t current_chann
 
     if(!any_attacked)
     {
+        uint8_t next_idx;
         if(direction >= 0)
         {
-            return (current_channel >= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT) ? 1U : (uint8_t)(current_channel + 1U);
-        }
-        return (current_channel <= 1U) ? POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT : (uint8_t)(current_channel - 1U);
-    }
-
-    for(step = 1U; step <= POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT; step++)
-    {
-        if(direction >= 0)
-        {
-            ch = (uint8_t)(current_channel + step);
-            if(ch > POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT)
-            {
-                ch = (uint8_t)(ch - POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT);
-            }
+            next_idx = (uint8_t)(((uint8_t)current_idx + 1U) % count);
         }
         else
         {
-            if(current_channel > step)
-            {
-                ch = (uint8_t)(current_channel - step);
-            }
-            else
-            {
-                ch = (uint8_t)(POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT - (step - current_channel));
-            }
+            next_idx = ((uint8_t)current_idx == 0U) ? (uint8_t)(count - 1U) : (uint8_t)((uint8_t)current_idx - 1U);
+        }
+        return poom_wifi_deauth_detector_channel_at(next_idx);
+    }
+
+    for(step = 1U; step <= count; step++)
+    {
+        uint8_t next_idx;
+        uint8_t ch;
+
+        if(direction >= 0)
+        {
+            next_idx = (uint8_t)(((uint8_t)current_idx + step) % count);
+        }
+        else
+        {
+            next_idx = (uint8_t)(((uint8_t)current_idx + count - (step % count)) % count);
         }
 
+        ch = poom_wifi_deauth_detector_channel_at(next_idx);
         if(menu_deauth_detector_channel_attacked_(ch))
         {
             return ch;
@@ -487,9 +557,9 @@ static void menu_deauth_detector_lock_attacked_channel_(int direction)
     uint8_t current_ch = s_menu_deauth_detector_stats.current_channel;
     uint8_t next_ch;
 
-    if((current_ch < 1U) || (current_ch > POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT))
+    if(poom_wifi_deauth_detector_channel_index(current_ch) < 0)
     {
-        current_ch = 1U;
+        current_ch = menu_deauth_detector_first_channel_();
     }
 
     next_ch = menu_deauth_detector_next_attacked_channel_(current_ch, direction);
@@ -707,7 +777,7 @@ static esp_err_t menu_deauth_detector_draw_(void)
     char line3[22];
     char line4[22];
     uint8_t ch;
-    uint8_t index;
+    int8_t index;
     uint32_t ch_deauth;
 
     if(s_menu_deauth_detector_screen != MENU_DEAUTH_DET_SCREEN_MONITOR)
@@ -716,13 +786,19 @@ static esp_err_t menu_deauth_detector_draw_(void)
         return ESP_OK;
     }
 
-    ch = s_menu_deauth_detector_stats.current_channel;
-    if((ch < 1U) || (ch > POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT))
+    if((s_menu_deauth_detector_stats_storage == NULL) || (s_menu_deauth_detector_report_storage == NULL))
     {
-        ch = 1U;
+        return ESP_ERR_NO_MEM;
     }
-    index = (uint8_t)(ch - 1U);
-    ch_deauth = s_menu_deauth_detector_stats.deauth_by_channel[index];
+
+    ch = s_menu_deauth_detector_stats.current_channel;
+    index = poom_wifi_deauth_detector_channel_index(ch);
+    if(index < 0)
+    {
+        ch = menu_deauth_detector_first_channel_();
+        index = poom_wifi_deauth_detector_channel_index(ch);
+    }
+    ch_deauth = (index >= 0) ? s_menu_deauth_detector_stats.deauth_by_channel[(uint8_t)index] : 0U;
 
     (void)memset(line1, 0, sizeof(line1));
     (void)memset(line2, 0, sizeof(line2));
@@ -922,7 +998,9 @@ static void menu_deauth_detector_task_(void *task_arg)
         {
             break;
         }
-        if(s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_MONITOR)
+        if((s_menu_deauth_detector_screen == MENU_DEAUTH_DET_SCREEN_MONITOR) &&
+           (s_menu_deauth_detector_stats_storage != NULL) &&
+           (s_menu_deauth_detector_report_storage != NULL))
         {
             (void)poom_wifi_deauth_detector_get_stats(&s_menu_deauth_detector_stats);
             (void)poom_wifi_deauth_detector_get_report(&s_menu_deauth_detector_report);
@@ -975,6 +1053,7 @@ static esp_err_t menu_deauth_detector_exit_(void)
         (void)poom_wifi_deauth_detector_stop();
         menu_deauth_detector_alerts_release_();
     }
+    menu_deauth_detector_free_runtime_();
     {
         const uint8_t token = 1;
         (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
@@ -1040,6 +1119,11 @@ void app_deauth_detector(void)
     {
         return;
     }
+    if(!menu_deauth_detector_alloc_runtime_())
+    {
+        return;
+    }
+
     menu_deauth_detector_load_settings_();
     s_menu_deauth_detector_screen = MENU_DEAUTH_DET_SCREEN_HOME;
     s_menu_deauth_detector_selection = 0U;

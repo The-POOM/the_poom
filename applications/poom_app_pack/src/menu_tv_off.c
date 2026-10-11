@@ -61,11 +61,16 @@ typedef struct
  * order as little-endian: "64 46" becomes 0x4664.
  */
 static const menu_tv_off_code_t s_menu_tv_off_codes[] = {
+    /* Original POOM */
     {IR_PROTOCOL_SAMSUNG32, 0x0007U, 0x02U, "Samsung"},
     {IR_PROTOCOL_RC5,       0x0000U, 0x0CU, "Grundig"},
     {IR_PROTOCOL_SIRC,      0x0001U, 0x15U, "Sony"},
     {IR_PROTOCOL_RC5,       0x0001U, 0x0CU, "Telefunken"},
     {IR_PROTOCOL_NEC,       0x0004U, 0x08U, "LG / Vizio"},
+
+    /* LG captured with POOM */
+    {IR_PROTOCOL_NEC,       0x0020U, 0x52U, "LG Captured 2"},
+
     {IR_PROTOCOL_RC6,       0x0000U, 0x0CU, "Philips"},
     {IR_PROTOCOL_NEC,       0x0019U, 0x18U, "Medion"},
     {IR_PROTOCOL_NEC,       0x0049U, 0x1AU, "Oppo"},
@@ -74,6 +79,38 @@ static const menu_tv_off_code_t s_menu_tv_off_codes[] = {
     {IR_PROTOCOL_NEC_EXT,   0x7F00U, 0x15U, "Plat / Elitelux"},
     {IR_PROTOCOL_NEC_EXT,   0xBF00U, 0x0DU, "Hisense"},
     {IR_PROTOCOL_NEC_EXT,   0xC7EAU, 0x17U, "TCL"},
+
+    /* Additional POWER codes */
+    {IR_PROTOCOL_SIRC,      0x0010U, 0x15U, "SIRC 10/15"},
+    {IR_PROTOCOL_NEC,       0x0008U, 0x05U, "NEC 08/05"},
+    {IR_PROTOCOL_NEC_EXT,   0xDF00U, 0x1CU, "NECext DF00/1C"},
+    {IR_PROTOCOL_SAMSUNG32, 0x000EU, 0x0CU, "Samsung 0E/0C"},
+    {IR_PROTOCOL_SAMSUNG32, 0x0007U, 0xE6U, "Samsung 07/E6"},
+    {IR_PROTOCOL_NEC,       0x0050U, 0x17U, "NEC 50/17"},
+    {IR_PROTOCOL_NEC,       0x0040U, 0x12U, "NEC 40/12"},
+    {IR_PROTOCOL_NEC_EXT,   0x4931U, 0x63U, "NECext 4931/63"},
+    {IR_PROTOCOL_NEC,       0x00AAU, 0x1CU, "NEC AA/1C"},
+    {IR_PROTOCOL_NEC,       0x0038U, 0x1CU, "NEC 38/1C"},
+    {IR_PROTOCOL_NEC_EXT,   0x7A83U, 0x08U, "NECext 7A83/08"},
+    {IR_PROTOCOL_NEC,       0x0053U, 0x17U, "NEC 53/17"},
+    {IR_PROTOCOL_NEC_EXT,   0x1818U, 0xC0U, "NECext 1818/C0"},
+    {IR_PROTOCOL_NEC,       0x0038U, 0x10U, "NEC 38/10"},
+    {IR_PROTOCOL_NEC,       0x00AAU, 0xC5U, "NEC AA/C5"},
+    {IR_PROTOCOL_NEC,       0x0018U, 0x08U, "NEC 18/08"},
+    {IR_PROTOCOL_NEC,       0x0071U, 0x08U, "NEC 71/08"},
+    {IR_PROTOCOL_NEC_EXT,   0x6F80U, 0x0AU, "NECext 6F80/0A"},
+    {IR_PROTOCOL_NEC,       0x0048U, 0x00U, "NEC 48/00"},
+    {IR_PROTOCOL_NEC_EXT,   0x7B80U, 0x13U, "NECext 7B80/13"},
+    {IR_PROTOCOL_NEC_EXT,   0x7E80U, 0x18U, "NECext 7E80/18"},
+    {IR_PROTOCOL_NEC,       0x0050U, 0x08U, "NEC 50/08"},
+    {IR_PROTOCOL_NEC_EXT,   0x7580U, 0x0AU, "NECext 7580/0A"},
+    {IR_PROTOCOL_NEC_EXT,   0x5780U, 0x0AU, "NECext 5780/0A"},
+    {IR_PROTOCOL_SAMSUNG32, 0x000BU, 0x0AU, "Samsung 0B/0A"},
+    {IR_PROTOCOL_NEC,       0x00AAU, 0x1BU, "NEC AA/1B"},
+    {IR_PROTOCOL_NEC_EXT,   0x4685U, 0x12U, "NECext 4685/12"},
+    {IR_PROTOCOL_SAMSUNG32, 0x0005U, 0x02U, "Samsung 05/02"},
+    {IR_PROTOCOL_SAMSUNG32, 0x0008U, 0x0FU, "Samsung 08/0F"},
+    {IR_PROTOCOL_NEC,       0x0000U, 0x01U, "NEC 00/01"},
 };
 
 static void menu_tv_off_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx);

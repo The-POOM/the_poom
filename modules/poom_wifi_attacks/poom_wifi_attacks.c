@@ -257,6 +257,7 @@ static void poom_wifi_attacks_rogue_ap_attack_task_(void *param)
     }
 
     poom_wifi_captive_set_ap_clone((const char *)ap.ssid, true);
+    poom_wifi_captive_apply_saved_portal();
     poom_wifi_captive_start();
 
     poom_wifi_attacks_force_ap_config_(&ap);

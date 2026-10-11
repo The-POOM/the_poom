@@ -13,8 +13,16 @@ extern "C" {
 
 #include "esp_err.h"
 
+#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MIN (1U)
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MAX (165U)
+#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT (38U)
+#else
+#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_MAX (13U)
 #define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT (13U)
-#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_HOP_SENTINEL (99U)
+#endif
+#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_HOP_SENTINEL (255U)
+#define POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_HOP_SENTINEL_LEGACY (99U)
 #define POOM_WIFI_DEAUTH_DETECTOR_PPS_WINDOW_MS (1000U)
 #define POOM_WIFI_DEAUTH_DETECTOR_TH_MED_PPS (4U)
 #define POOM_WIFI_DEAUTH_DETECTOR_TH_HIGH_PPS (12U)
@@ -30,8 +38,8 @@ typedef struct
 {
     uint32_t deauth_total;
     uint32_t disassoc_total;
-    uint32_t deauth_by_channel[POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT];
-    uint32_t disassoc_by_channel[POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT];
+    uint32_t *deauth_by_channel;
+    uint32_t *disassoc_by_channel;
     uint8_t current_channel;
     bool channel_hopping;
 } poom_wifi_deauth_detector_stats_t;
@@ -100,8 +108,28 @@ esp_err_t poom_wifi_deauth_detector_get_stats(poom_wifi_deauth_detector_stats_t 
 esp_err_t poom_wifi_deauth_detector_get_report(poom_wifi_deauth_detector_report_t *out_report);
 
 /**
+ * @brief Returns number of channels in the detector hop list.
+ * @return uint8_t
+ */
+uint8_t poom_wifi_deauth_detector_channel_count(void);
+
+/**
+ * @brief Returns channel number for a detector channel-list index.
+ * @param[in] index 0-based channel-list index.
+ * @return uint8_t Channel number, or 0 when index is invalid.
+ */
+uint8_t poom_wifi_deauth_detector_channel_at(uint8_t index);
+
+/**
+ * @brief Returns channel-list index for a channel number.
+ * @param[in] channel Wi-Fi channel number.
+ * @return int8_t 0-based index, or -1 when unsupported.
+ */
+int8_t poom_wifi_deauth_detector_channel_index(uint8_t channel);
+
+/**
  * @brief Switches detector to fixed-channel mode and sets channel.
- * @param[in] channel 1..POOM_WIFI_DEAUTH_DETECTOR_CHANNEL_COUNT
+ * @param[in] channel Supported Wi-Fi channel number.
  * @return esp_err_t
  */
 esp_err_t poom_wifi_deauth_detector_set_fixed_channel(uint8_t channel);
@@ -128,8 +156,8 @@ esp_err_t poom_wifi_deauth_detector_reset_stats(void);
 esp_err_t poom_wifi_deauth_detector_print_stats(void);
 
 /**
- * @brief Sets detector saved-channel value following draft logic.
- * @param[in] saved_channel `99` enables hopping, otherwise uses `saved_channel + 1`.
+ * @brief Sets detector saved-channel value.
+ * @param[in] saved_channel `255` or legacy `99` enables hopping; otherwise use the channel when supported.
  * @return void
  */
 void poom_wifi_deauth_detector_set_saved_channel(uint8_t saved_channel);

@@ -330,6 +330,81 @@ static esp_err_t ir_tx_transmit_builder_(ir_tx_handle_t* transmitter,
                         &transmit_cfg);
 }
 
+esp_err_t ir_tx_send_raw(ir_tx_handle_t* transmitter, const ir_raw_signal_t* signal, size_t size)
+{
+    if(transmitter == NULL || transmitter->channel == NULL || transmitter->copy_encoder == NULL ||
+       transmitter->clk_hz == 0U)
+        return ESP_ERR_INVALID_STATE;
+    if(!ir_raw_signal_valid(signal, size)) return ESP_ERR_INVALID_ARG;
+
+    /* RMT durations are 15-bit. Split long gaps without changing the level. */
+    size_t halves = 0U;
+    for(size_t i = 0; i < signal->count; ++i)
+    {
+        uint64_t ticks = ((uint64_t)signal->timings_us[i] * transmitter->clk_hz) / 1000000U;
+        if(ticks == 0U) return ESP_ERR_INVALID_ARG;
+        uint64_t parts = (ticks + 32766U) / 32767U;
+        if(parts > SIZE_MAX - halves) return ESP_ERR_INVALID_ARG;
+        halves += (size_t)parts;
+    }
+    if(halves > (SIZE_MAX / sizeof(rmt_symbol_word_t)) * 2U - 1U)
+        return ESP_ERR_INVALID_ARG;
+    size_t count = (halves + 1U) / 2U;
+    rmt_symbol_word_t* symbols = heap_caps_calloc(count, sizeof(*symbols), MALLOC_CAP_DEFAULT);
+    if(symbols == NULL) return ESP_ERR_NO_MEM;
+
+    size_t half = 0U;
+    for(size_t i = 0; i < signal->count; ++i)
+    {
+        uint64_t ticks = ((uint64_t)signal->timings_us[i] * transmitter->clk_hz) / 1000000U;
+        while(ticks)
+        {
+            uint32_t part = (ticks > 32767U) ? 32767U : (uint32_t)ticks;
+            if((half % 2U) == 0U)
+            {
+                symbols[half / 2U].level0 = (i % 2U) == 0U;
+                symbols[half / 2U].duration0 = part;
+            }
+            else
+            {
+                symbols[half / 2U].level1 = (i % 2U) == 0U;
+                symbols[half / 2U].duration1 = part;
+            }
+            ++half;
+            ticks -= part;
+        }
+    }
+
+    esp_err_t err = rmt_tx_wait_all_done(transmitter->channel, -1);
+    if(err == ESP_OK)
+    {
+        rmt_carrier_config_t carrier = {
+            .frequency_hz = signal->carrier_hz,
+            .duty_cycle = signal->duty_permille / 1000.0f,
+        };
+        err = rmt_apply_carrier(transmitter->channel, &carrier);
+        /* Force the next parsed transmission to restore its carrier and duty. */
+        transmitter->current_carrier_hz = 0U;
+    }
+    if(err == ESP_OK)
+    {
+        ir_tx_waveform_builder_t builder = {.symbols = symbols, .count = count, .capacity = count};
+        err = ir_tx_transmit_builder_(transmitter, &builder);
+        if(err == ESP_OK)
+        {
+            err = rmt_tx_wait_all_done(transmitter->channel, -1);
+            if(err != ESP_OK)
+            {
+                /* Stop DMA/interrupt access to the buffer before releasing it. */
+                (void)rmt_disable(transmitter->channel);
+                (void)rmt_enable(transmitter->channel);
+            }
+        }
+    }
+    heap_caps_free(symbols);
+    return err;
+}
+
 /**
  * @brief Internal helper for `ir_tx_emit_pdwm_space_frame`.
  *
