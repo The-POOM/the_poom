@@ -1,18 +1,18 @@
 dependencies:
   espressif/button:
-    component_hash: 30a3f495c3862d505ce6e41adbbd218b2750e9723ab2151feff00e9fe685b326
+    component_hash: ad64de1d1b8aa139564810a8519b2f1ac275a560a512479ee94c1b6983469d4b
     dependencies:
     - name: espressif/cmake_utilities
       registry_url: https://components.espressif.com
       require: private
-      version: 0.*
+      version: '*'
     - name: idf
       require: private
       version: '>=4.0'
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 3.5.0
+    version: 4.2.0
   espressif/cjson:
     component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
     dependencies:
@@ -24,7 +24,7 @@ dependencies:
       type: service
     version: 1.7.19~2
   espressif/cmake_utilities:
-    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    component_hash: 05165f30922b422b4b90c08845e6d449329b97370fbd06309803d8cb539d79e3
     dependencies:
     - name: idf
       require: private
@@ -32,7 +32,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.5.3
+    version: 1.1.1
   espressif/esp-zboss-lib:
     component_hash: 321883d142421f65009972408287441794250057668a11abbdfd8bec77c3309a
     dependencies:
@@ -56,13 +56,13 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 6.1.0
+    version: 6.0.2
 direct_dependencies:
 - espressif/button
 - espressif/cjson
 - espressif/esp-zboss-lib
 - espressif/esp-zigbee-lib
 - idf
-manifest_hash: f1de5356633500d661b214c5c4fe92f47bff9abc054e7525f5d5387c0f726c14
+manifest_hash: ff0138700ac0d3a1a2ecdb6528f9ab2198e43342045204a88fd203960b5afeef
 target: esp32c5
-version: 2.0.0
+version: 3.0.0
