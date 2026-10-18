@@ -33,7 +33,7 @@ POOM is delivered as an ESP-IDF firmware project with a modular architecture and
 
 - Wi-Fi scan, deauth testing (authorized), karma, captive/evil twin, SSID spam, ARP spoofing.
 - BLE spam and BLE proximity/tag tracking.
-- Wi-Fi, BLE, Zigbee, and 802.15.4/Thread capture paths. U
+- Wi-Fi, BLE, Zigbee, and 802.15.4/Thread capture paths.
 - ART and host export pipelines for offline analysis.
 - Drone ID and drone research features.
 
@@ -47,38 +47,80 @@ POOM is delivered as an ESP-IDF firmware project with a modular architecture and
 
 ## Platform and Targets
 
-- Framework: ESP-IDF `v6.1.0`
-- Primary targets: `esp32c5`, `esp32c6`
-- Current default target in this workspace: `esp32c6`
+- Framework: ESP-IDF `v6.1` — see note
+
+  > **Note:** upstream esp-idf is tagged `v6.1`. There is **no `v6.1.0` tag**, so
+  > `git checkout v6.1.0` fails.
+  >
+  > ⚠ **Needs confirmation:** a clean `esp32c5` build currently *fails* on v6.1 —
+  > `espressif/button` 3.x cannot compile because `driver/gpio.h` was removed when
+  > the driver component was split into `esp_driver_*` in IDF 6.x, and button 4.x
+  > requires porting `drivers/button_driver/`. The supported IDF version should be
+  > verified and stated here.
+
+- **Shipping hardware target: `esp32c5`** — ESP32-C5, dual-band 2.4/5 GHz Wi-Fi 6,
+  Bluetooth 5 (LE), and IEEE 802.15.4 (Zigbee/Thread)
+- Additionally builds for: `esp32c6`
+
+> **Build the `esp32c5` target for production devices.** The C5 is what ships.
+> C6 is retained for development/alternate boards; a C6 image will not run on a
+> C5 device.
 
 ## Repository Structure
 
 ```text
 .
-├── applications/   # Product applications and end-user features
-├── modules/        # Reusable POOM modules
-├── drivers/        # Hardware-facing drivers
-├── third-party/    # Integrated external components
-├── kernel/         # Internal runtime and system utilities
-├── main/           # Firmware entry point
-└── CMakeLists.txt  # Root build orchestration
+├── applications/          # Product applications and end-user features
+├── modules/               # Reusable POOM modules
+├── drivers/               # Hardware-facing drivers
+├── third-party/           # Integrated external components
+├── kernel/                # Internal runtime and system utilities
+├── board/                 # Board support / BSP definitions
+├── bootloader_components/ # Custom bootloader components
+├── main/                  # Firmware entry point
+├── sdkconfig.defaults     # Base configuration
+├── sdkconfig.zigbee       # Zigbee overlay
+├── sdkconfig.openthread   # OpenThread overlay
+├── partitions.csv         # Custom partition table
+└── CMakeLists.txt         # Root build orchestration
 ```
 
 ## Build and Flash
 
 ```bash
+# Clone the matching framework version (the tag is v6.1, not v6.1.0)
+git clone -b v6.1 --recursive https://github.com/espressif/esp-idf.git "$HOME/esp/esp-idf"
+"$HOME/esp/esp-idf/install.sh" esp32c5
 . "$HOME/esp/esp-idf/export.sh"
 
-# Build for ESP32-C6
-idf.py set-target esp32c6
-idf.py build
-
-# Build for ESP32-C5
+# Build for ESP32-C5 (shipping hardware)
 idf.py set-target esp32c5
 idf.py build
 
 # Flash and monitor
 idf.py flash monitor
+```
+
+### Optional: build for ESP32-C6 (development boards)
+
+```bash
+idf.py set-target esp32c6
+idf.py build
+```
+
+### Optional: Zigbee / OpenThread overlays
+
+Zigbee and OpenThread are mutually exclusive in RAM budget, so they are supplied
+as separate overlays on top of `sdkconfig.defaults`:
+
+```bash
+# Zigbee
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.zigbee" reconfigure
+idf.py build
+
+# OpenThread
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.openthread" reconfigure
+idf.py build
 ```
 
 ## Security and Legal
