@@ -18,6 +18,25 @@ extern "C" {
 #define POOM_WIFI_CTRL_WIFI_CHANNEL_MIN      (1U)
 #define POOM_WIFI_CTRL_WIFI_CHANNEL_MAX      (13U)
 
+/*
+ * 5 GHz monitoring range. The ESP32-C5 is dual band, and the scanner already
+ * hops this curated set, so captures must be able to tune here too.
+ */
+#define POOM_WIFI_CTRL_WIFI_CHANNEL_5G_MIN   (36U)
+#define POOM_WIFI_CTRL_WIFI_CHANNEL_5G_MAX   (165U)
+
+/**
+ * @brief Reports whether this platform can tune to a channel.
+ *
+ * Accepts the 2.4 GHz range (1..13) and the specific 5 GHz channels the scanner
+ * uses, which includes the DFS channels (100..144). Monitoring a DFS channel is
+ * receive-only, so no radar detection is required to observe it.
+ *
+ * @param[in] channel Channel to test.
+ * @return bool True when the channel is supported.
+ */
+bool poom_wifi_ctrl_wifi_channel_is_valid(uint8_t channel);
+
 /* =========================
  * Kconfig mapping (project)
  * =========================

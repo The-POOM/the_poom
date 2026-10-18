@@ -81,6 +81,53 @@ static esp_err_t menu_poom_pcap_exit_(void);
 static void menu_poom_pcap_request_render_from_input_(void);
 
 /**
+ * @brief Channels the WiFi channel picker steps through.
+ *
+ * 2.4 GHz first, then the 5 GHz channels the radio can monitor. The 5 GHz band
+ * is not contiguous, so the list is explicit rather than a min/max range.
+ */
+static const uint8_t s_menu_poom_pcap_wifi_channels[] = {
+    1U,   2U,   3U,   4U,   5U,   6U,   7U,   8U,   9U,   10U,  11U,
+    12U,  13U,  36U,  40U,  44U,  48U,  100U, 104U, 108U, 112U, 116U,
+    120U, 124U, 128U, 132U, 136U, 140U, 144U, 149U, 153U, 157U, 161U,
+    165U,
+};
+
+/**
+ * @brief Returns the next channel in the picker list, wrapping at both ends.
+ *
+ * @param[in] direction +1 for the next channel, -1 for the previous one.
+ * @return uint8_t Selected channel.
+ */
+static uint8_t menu_poom_pcap_wifi_channel_step_(int direction)
+{
+    const size_t count =
+        sizeof(s_menu_poom_pcap_wifi_channels) / sizeof(s_menu_poom_pcap_wifi_channels[0]);
+    size_t idx = 0U;
+    size_t i;
+
+    for (i = 0U; i < count; i++)
+    {
+        if (s_menu_poom_pcap_wifi_channels[i] == s_menu_poom_pcap_wifi_channel)
+        {
+            idx = i;
+            break;
+        }
+    }
+
+    if (direction < 0)
+    {
+        idx = (idx == 0U) ? (count - 1U) : (idx - 1U);
+    }
+    else
+    {
+        idx = (idx + 1U) % count;
+    }
+
+    return s_menu_poom_pcap_wifi_channels[idx];
+}
+
+/**
  * @brief Renders the current menu state.
  *
  * @return void
@@ -537,7 +584,7 @@ static esp_err_t menu_poom_pcap_start_capture_(void)
             filter_mask = WIFI_PROMIS_FILTER_MASK_DATA;
         }
 
-        if ((s_menu_poom_pcap_wifi_channel < MENU_POOM_PCAP_WIFI_CH_MIN) || (s_menu_poom_pcap_wifi_channel > MENU_POOM_PCAP_WIFI_CH_MAX))
+        if (!poom_wifi_ctrl_wifi_channel_is_valid(s_menu_poom_pcap_wifi_channel))
         {
             s_menu_poom_pcap_wifi_channel = MENU_POOM_PCAP_WIFI_CH_DEFAULT;
         }
@@ -724,27 +771,13 @@ static void menu_poom_pcap_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx
         }
         if (button_msg.button == BUTTON_UP)
         {
-            if (s_menu_poom_pcap_wifi_channel <= MENU_POOM_PCAP_WIFI_CH_MIN)
-            {
-                s_menu_poom_pcap_wifi_channel = MENU_POOM_PCAP_WIFI_CH_MAX;
-            }
-            else
-            {
-                s_menu_poom_pcap_wifi_channel--;
-            }
+            s_menu_poom_pcap_wifi_channel = menu_poom_pcap_wifi_channel_step_(-1);
             menu_poom_pcap_request_render_from_input_();
             return;
         }
         if (button_msg.button == BUTTON_DOWN)
         {
-            if (s_menu_poom_pcap_wifi_channel >= MENU_POOM_PCAP_WIFI_CH_MAX)
-            {
-                s_menu_poom_pcap_wifi_channel = MENU_POOM_PCAP_WIFI_CH_MIN;
-            }
-            else
-            {
-                s_menu_poom_pcap_wifi_channel++;
-            }
+            s_menu_poom_pcap_wifi_channel = menu_poom_pcap_wifi_channel_step_(1);
             menu_poom_pcap_request_render_from_input_();
             return;
         }
