@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "button_gpio.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -218,7 +219,10 @@ static void button_register_callbacks_(button_handle_t button, uint8_t mask)
     for (i = 0U; i < (sizeof(s_registered_events) / sizeof(s_registered_events[0])); i++)
     {
         button_event_t payload = (button_event_t)(s_registered_events[i] | mask);
-        err |= iot_button_register_cb(button, s_registered_events[i], button_event_cb, (void *)(uintptr_t)payload);
+        /* ESP-IDF button 4.x adds an event_args parameter before the callback.
+         * NULL selects the default arguments for each event, which matches the
+         * behaviour of the 3.x call this replaces. */
+        err |= iot_button_register_cb(button, s_registered_events[i], NULL, button_event_cb, (void *)(uintptr_t)payload);
     }
 
     ESP_ERROR_CHECK(err);
@@ -229,16 +233,29 @@ static void button_register_callbacks_(button_handle_t button, uint8_t mask)
  */
 static void button_init_(uint32_t button_num, uint8_t mask)
 {
-    button_config_t btn_cfg = {
-        .type = BUTTON_TYPE_GPIO,
+    /* ESP-IDF button 4.x splits the old single config struct:
+     *   - button_config_t now carries only timing (0 = library default)
+     *   - button_gpio_config_t carries the GPIO specifics
+     *   - the GPIO device is created with iot_button_new_gpio_device()
+     * Every value matches the previous 3.x initialiser: long_press_time and both
+     * flags were implicitly zero there, so behaviour is unchanged. */
+    const button_config_t btn_cfg = {
+        .long_press_time = 0U,
         .short_press_time = BUTTON_SHORT_PRESS_TIME_MS_OVERRIDE,
-        .gpio_button_config =
-            {
-                .gpio_num = button_num,
-                .active_level = BUTTON_ACTIVE_LEVEL,
-            },
     };
-    button_handle_t btn = iot_button_create(&btn_cfg);
+    const button_gpio_config_t gpio_cfg = {
+        .gpio_num = (int32_t)button_num,
+        .active_level = BUTTON_ACTIVE_LEVEL,
+        .enable_power_save = false,
+        .disable_pull = false,
+    };
+    button_handle_t btn = NULL;
+    const esp_err_t err = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &btn);
+
+    if (err != ESP_OK)
+    {
+        BUTTON_PRINTF_E("button init failed (%d) gpio=%lu", (int)err, (unsigned long)button_num);
+    }
 
     assert(btn != NULL);
     button_register_callbacks_(btn, mask);

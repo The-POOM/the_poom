@@ -20,7 +20,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
-#include "mbedtls/sha256.h"
+#include "psa/crypto.h"
 #include "miniz.h"
 #include "sd_card.h"
 
@@ -59,7 +59,7 @@ typedef struct
 typedef struct
 {
     FILE* file;
-    mbedtls_sha256_context sha;
+    psa_hash_operation_t sha;
     size_t received;
     size_t expected;
     poom_game_store_progress_cb_t progress_cb;
@@ -1377,8 +1377,9 @@ esp_err_t poom_game_store_verify_local(const poom_game_store_game_t* game,
                                        char* out_path,
                                        size_t out_path_len)
 {
-    mbedtls_sha256_context sha;
+    psa_hash_operation_t sha = PSA_HASH_OPERATION_INIT;
     unsigned char digest[32];
+    size_t digest_len = 0U;
     char digest_hex[POOM_GAME_STORE_SHA256_HEX_LEN + 1U];
     unsigned char* buffer = NULL;
     FILE* file = NULL;
@@ -1424,8 +1425,8 @@ esp_err_t poom_game_store_verify_local(const poom_game_store_game_t* game,
         return ESP_ERR_NO_MEM;
     }
 
-    mbedtls_sha256_init(&sha);
-    if(mbedtls_sha256_starts(&sha, 0) != 0)
+    if((psa_crypto_init() != PSA_SUCCESS) ||
+       (psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS))
     {
         err = POOM_GAME_STORE_ERR_HASH;
         goto cleanup_verify;
@@ -1444,7 +1445,7 @@ esp_err_t poom_game_store_verify_local(const poom_game_store_game_t* game,
             err = POOM_GAME_STORE_ERR_SD_READ;
             goto cleanup_verify;
         }
-        if(mbedtls_sha256_update(&sha, buffer, bytes_read) != 0)
+        if(psa_hash_update(&sha, buffer, bytes_read) != PSA_SUCCESS)
         {
             err = POOM_GAME_STORE_ERR_HASH;
             goto cleanup_verify;
@@ -1452,7 +1453,8 @@ esp_err_t poom_game_store_verify_local(const poom_game_store_game_t* game,
         received += bytes_read;
     }
 
-    if(mbedtls_sha256_finish(&sha, digest) != 0)
+    if((psa_hash_finish(&sha, digest, sizeof(digest), &digest_len) != PSA_SUCCESS) ||
+       (digest_len != sizeof(digest)))
     {
         err = POOM_GAME_STORE_ERR_HASH;
         goto cleanup_verify;
@@ -1465,7 +1467,7 @@ esp_err_t poom_game_store_verify_local(const poom_game_store_game_t* game,
     err = (strcasecmp(digest_hex, game->sha256) == 0) ? ESP_OK : ESP_ERR_INVALID_CRC;
 
 cleanup_verify:
-    mbedtls_sha256_free(&sha);
+    (void)psa_hash_abort(&sha);
     free(buffer);
     (void)fclose(file);
     return err;
@@ -1487,7 +1489,7 @@ esp_err_t poom_game_store_download(const poom_game_store_game_t* game,
     uint64_t free_bytes;
     int64_t content_length;
     int written;
-    int hash_status;
+    size_t digest_len = 0U;
     unsigned read_timeouts = 0U;
     esp_err_t err;
 
@@ -1536,10 +1538,8 @@ esp_err_t poom_game_store_download(const poom_game_store_game_t* game,
     download.progress_cb = progress_cb;
     download.progress_ctx = user_ctx;
     download.error = ESP_OK;
-    mbedtls_sha256_init(&download.sha);
-
-    hash_status = mbedtls_sha256_starts(&download.sha, 0);
-    if(hash_status != 0)
+    if((psa_crypto_init() != PSA_SUCCESS) ||
+       (psa_hash_setup(&download.sha, PSA_ALG_SHA_256) != PSA_SUCCESS))
     {
         err = POOM_GAME_STORE_ERR_HASH;
         goto cleanup;
@@ -1645,9 +1645,9 @@ esp_err_t poom_game_store_download(const poom_game_store_game_t* game,
             err = POOM_GAME_STORE_ERR_SD_WRITE;
             goto cleanup;
         }
-        if(mbedtls_sha256_update(&download.sha,
-                                 read_buffer,
-                                 (size_t)bytes_read) != 0)
+        if(psa_hash_update(&download.sha,
+                           read_buffer,
+                           (size_t)bytes_read) != PSA_SUCCESS)
         {
             err = POOM_GAME_STORE_ERR_HASH;
             goto cleanup;
@@ -1668,7 +1668,8 @@ esp_err_t poom_game_store_download(const poom_game_store_game_t* game,
         goto cleanup;
     }
 
-    if(mbedtls_sha256_finish(&download.sha, digest) != 0)
+    if((psa_hash_finish(&download.sha, digest, sizeof(digest), &digest_len) != PSA_SUCCESS) ||
+       (digest_len != sizeof(digest)))
     {
         err = POOM_GAME_STORE_ERR_HASH;
         goto cleanup;
@@ -1721,7 +1722,7 @@ cleanup:
         (void)esp_http_client_cleanup(client);
     }
     free(read_buffer);
-    mbedtls_sha256_free(&download.sha);
+    (void)psa_hash_abort(&download.sha);
     if(download.file != NULL)
     {
         (void)fclose(download.file);
