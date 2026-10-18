@@ -551,7 +551,15 @@ esp_err_t poom_wifi_ctrl_init_apsta(void)
 
 esp_err_t poom_wifi_ctrl_init_sta(void)
 {
-    return poom_wifi_ctrl_common_init_(WIFI_MODE_STA);
+    esp_err_t err = poom_wifi_ctrl_common_init_(WIFI_MODE_STA);
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    if(err == ESP_OK)
+    {
+        err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+    }
+#endif
+    return err;
 }
 
 esp_err_t poom_wifi_ctrl_init_null(void)
@@ -803,16 +811,42 @@ esp_err_t poom_wifi_ctrl_get_sta_mac(uint8_t *sta_mac)
     return esp_wifi_get_mac(WIFI_IF_STA, sta_mac);
 }
 
+bool poom_wifi_ctrl_channel_is_valid(uint8_t channel)
+{
+    if((channel >= POOM_WIFI_CTRL_WIFI_CHANNEL_MIN) &&
+       (channel <= POOM_WIFI_CTRL_WIFI_CHANNEL_MAX))
+    {
+        return true;
+    }
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    return (((channel >= 36U) && (channel <= 64U) && (((channel - 36U) % 4U) == 0U)) ||
+            ((channel >= 100U) && (channel <= 144U) && (((channel - 100U) % 4U) == 0U)) ||
+            ((channel >= 149U) && (channel <= POOM_WIFI_CTRL_WIFI_5G_CHANNEL_MAX) &&
+             (((channel - 149U) % 4U) == 0U)));
+#else
+    (void)channel;
+    return false;
+#endif
+}
+
 esp_err_t poom_wifi_ctrl_set_channel(uint8_t channel)
 {
-    if ((channel < POOM_WIFI_CTRL_WIFI_CHANNEL_MIN) || (channel > POOM_WIFI_CTRL_WIFI_CHANNEL_MAX))
+    if(!poom_wifi_ctrl_channel_is_valid(channel))
     {
-        POOM_PRINTF_E("Channel out of range. Expected <%u..%u> got %u",
-                      (unsigned)POOM_WIFI_CTRL_WIFI_CHANNEL_MIN,
-                      (unsigned)POOM_WIFI_CTRL_WIFI_CHANNEL_MAX,
-                      (unsigned)channel);
+        POOM_PRINTF_E("Unsupported WiFi channel: %u", (unsigned)channel);
         return ESP_ERR_INVALID_ARG;
     }
 
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    if(channel > POOM_WIFI_CTRL_WIFI_CHANNEL_MAX)
+    {
+        esp_err_t err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+        if(err != ESP_OK)
+        {
+            return err;
+        }
+    }
+#endif
     return esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }

@@ -25,6 +25,8 @@
 #include "poom_sd_browser.h"
 #include "poom_secrets_store.h"
 #include "poom_sbus.h"
+#include "poom_ui_keyboard.h"
+#include "sd_card.h"
 
 #define POOM_MENU_RESUME_TOPIC "poom/menu/resume"
 
@@ -70,7 +72,7 @@
 
 #define MENU_IR_UNIV_HEADER_H (11)
 #define MENU_IR_UNIV_BOX_Y (12)
-#define MENU_IR_UNIV_BOX_H (40)
+#define MENU_IR_UNIV_BOX_H (41)
 #define MENU_IR_UNIV_TEXT_X (6)
 #define MENU_IR_UNIV_ROW0_Y (16)
 #define MENU_IR_UNIV_ROW_STEP (10)
@@ -91,14 +93,35 @@
 #define BUTTON_PRESS_UP (1U)
 #endif
 
+#ifndef BUTTON_LONG_PRESS_START
+#define BUTTON_LONG_PRESS_START (6U)
+#endif
+
+#ifndef BUTTON_LONG_PRESS_HOLD
+#define BUTTON_LONG_PRESS_HOLD (7U)
+#endif
+
+#ifndef BUTTON_LONG_PRESS_UP
+#define BUTTON_LONG_PRESS_UP (8U)
+#endif
+
 typedef enum
 {
     MENU_IR_UNIV_SCREEN_MAIN = 0,
+    MENU_IR_UNIV_SCREEN_LEARN_TARGET,
     MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR,
     MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON,
+    MENU_IR_UNIV_SCREEN_LEARN_NAME,
+    MENU_IR_UNIV_SCREEN_NEW_REMOTE_NAME,
     MENU_IR_UNIV_SCREEN_EMULATOR,
     MENU_IR_UNIV_SCREEN_SD_COMMANDS,
 } menu_ir_univ_screen_t;
+
+typedef enum
+{
+    MENU_IR_UNIV_LEARN_TARGET_EMBEDDED = 0,
+    MENU_IR_UNIV_LEARN_TARGET_SD,
+} menu_ir_univ_learn_target_t;
 
 typedef enum
 {
@@ -148,14 +171,20 @@ typedef struct
     menu_ir_univ_screen_t screen;
     uint8_t main_selected;
     uint8_t assign_selected;
+    uint8_t learn_target_selected;
     uint8_t emulator_mapped_count;
     uint8_t sd_selected;
 
     bool left_down;
     bool right_down;
 
+    menu_ir_univ_learn_target_t learn_target;
+
     menu_ir_univ_code_t pending_code;
     ir_raw_signal_t* pending_raw;
+    char pending_name[21];
+    char remote_name[21];
+    poom_ui_keyboard_t keyboard;
 } menu_ir_univ_state_t;
 
 static TaskHandle_t s_menu_ir_univ_task = NULL;
@@ -166,6 +195,7 @@ static bool s_menu_ir_univ_restore_rainbow = false;
 static bool s_menu_ir_univ_led_owned = false;
 
 #define MENU_IR_UNIV_SD_PATH_MAX (256U)
+#define MENU_IR_UNIV_REMOTES_DIR "/ir/remotes"
 #define MENU_IR_UNIV_SD_MAX_COMMANDS (48U)
 #define MENU_IR_UNIV_SD_NAME_MAX (20U)
 #define MENU_IR_UNIV_SD_TITLE_MAX (21U)
@@ -180,8 +210,10 @@ typedef struct
 
 static char s_menu_ir_univ_sd_selected_path[MENU_IR_UNIV_SD_PATH_MAX] = {0};
 static bool s_menu_ir_univ_sd_path_pending = false;
+static bool s_menu_ir_univ_sd_learn_path_pending = false;
+static bool s_menu_ir_univ_sd_select_for_learn = false;
 static bool s_menu_ir_univ_sd_bad_ext_pending = false;
-static char s_menu_ir_univ_sd_start_dir[MENU_IR_UNIV_SD_PATH_MAX] = "/sdcard";
+static char s_menu_ir_univ_sd_start_dir[MENU_IR_UNIV_SD_PATH_MAX] = "/sdcard/ir/remotes";
 static char s_menu_ir_univ_sd_title[MENU_IR_UNIV_SD_TITLE_MAX + 1U] = {0};
 static menu_ir_univ_sd_cmd_t* s_menu_ir_univ_sd_cmds = NULL;
 static uint8_t s_menu_ir_univ_sd_cmd_count = 0U;
@@ -197,14 +229,26 @@ static void menu_ir_univ_sd_set_title_from_path_(const char* abs_path);
 static void menu_ir_univ_draw_sd_header_(void);
 
 static void menu_ir_univ_draw_main_(uint8_t selected);
+static void menu_ir_univ_draw_learn_target_(uint8_t selected);
 static void menu_ir_univ_draw_status_(const char* line1, const char* line2, const char* footer);
 static void menu_ir_univ_draw_assign_list_(uint8_t selected, bool raw);
-static void menu_ir_univ_draw_emulator_(uint8_t mapped_count);
+static void menu_ir_univ_draw_emulator_(const char* remote_name, const char* button_name,
+                                        const char* signal_name, uint8_t mapped_count);
+static bool menu_ir_univ_export_active_profile_(const char* remote_name);
+static bool menu_ir_univ_sd_append_learned_code_(const char* abs_path, const menu_ir_univ_code_t* code,
+                                                 const ir_raw_signal_t* raw, const char* signal_name);
 static void menu_ir_univ_exit_(void);
 static void menu_ir_univ_button_cb_(const poom_sbus_msg_t* msg, void* user_ctx);
 static void menu_ir_univ_task_(void* arg);
 static bool menu_ir_univ_pop_button_msg_(menu_ir_univ_button_msg_t* out_msg, uint32_t timeout_ms);
 static bool menu_ir_univ_is_exit_chord_active_(const menu_ir_univ_state_t* s);
+
+static bool menu_ir_univ_is_long_press_event_(uint8_t event)
+{
+    return (event == BUTTON_LONG_PRESS_START) ||
+           (event == BUTTON_LONG_PRESS_HOLD) ||
+           (event == BUTTON_LONG_PRESS_UP);
+}
 
 static void menu_ir_univ_handover_exit_to_sd_browser_(void);
 
@@ -237,6 +281,20 @@ static const char* menu_ir_univ_assign_label_(uint8_t idx)
     }
 }
 
+static const char* menu_ir_univ_button_label_(uint8_t button)
+{
+    switch(button)
+    {
+        case BUTTON_UP: return "UP";
+        case BUTTON_DOWN: return "DOWN";
+        case BUTTON_LEFT: return "LEFT";
+        case BUTTON_RIGHT: return "RIGHT";
+        case BUTTON_A: return "A";
+        case BUTTON_B: return "B";
+        default: return "?";
+    }
+}
+
 /**
  * @brief Internal helper for `menu_ir_univ_button_key`.
  *
@@ -254,6 +312,70 @@ static const char* menu_ir_univ_button_key_(uint8_t button)
         case BUTTON_UP: return "ir_u";
         case BUTTON_DOWN: return "ir_d";
         default: return NULL;
+    }
+}
+
+static const char* menu_ir_univ_button_name_key_(uint8_t button)
+{
+    switch(button)
+    {
+        case BUTTON_A: return "irn_a";
+        case BUTTON_B: return "irn_b";
+        case BUTTON_LEFT: return "irn_l";
+        case BUTTON_RIGHT: return "irn_r";
+        case BUTTON_UP: return "irn_u";
+        case BUTTON_DOWN: return "irn_d";
+        default: return NULL;
+    }
+}
+
+static void menu_ir_univ_load_remote_name_(char* out_name, size_t out_name_len)
+{
+    size_t name_len;
+
+    if((out_name == NULL) || (out_name_len == 0U)) return;
+
+    (void)snprintf(out_name, out_name_len, "%s", "REMOTE");
+    name_len = out_name_len;
+    if((poom_secrets_init() == ESP_OK) &&
+       (poom_secrets_get_str("irp_name", out_name, &name_len) == ESP_OK) &&
+       (out_name[0] != '\0'))
+    {
+        return;
+    }
+    (void)snprintf(out_name, out_name_len, "%s", "REMOTE");
+}
+
+static void menu_ir_univ_load_button_name_(uint8_t button, char* out_name, size_t out_name_len)
+{
+    const char* key = menu_ir_univ_button_name_key_(button);
+    size_t name_len;
+
+    if((out_name == NULL) || (out_name_len == 0U)) return;
+
+    (void)snprintf(out_name, out_name_len, "%s", menu_ir_univ_button_label_(button));
+    if(key == NULL) return;
+
+    name_len = out_name_len;
+    if((poom_secrets_init() != ESP_OK) ||
+       (poom_secrets_get_str(key, out_name, &name_len) != ESP_OK) ||
+       (out_name[0] == '\0'))
+    {
+        (void)snprintf(out_name, out_name_len, "%s", menu_ir_univ_button_label_(button));
+    }
+}
+
+static void menu_ir_univ_clear_embedded_remote_(void)
+{
+    (void)poom_secrets_init();
+    for(uint8_t i = 0U; i < (uint8_t)(sizeof(s_menu_ir_univ_assign_buttons) /
+                                       sizeof(s_menu_ir_univ_assign_buttons[0])); i++)
+    {
+        const uint8_t button = s_menu_ir_univ_assign_buttons[i];
+        const char* code_key = menu_ir_univ_button_key_(button);
+        const char* name_key = menu_ir_univ_button_name_key_(button);
+        if(code_key != NULL) (void)poom_secrets_erase_key(code_key);
+        if(name_key != NULL) (void)poom_secrets_erase_key(name_key);
     }
 }
 
@@ -313,7 +435,7 @@ static void menu_ir_univ_draw_status_(const char* line1, const char* line2, cons
  */
 static void menu_ir_univ_draw_main_(uint8_t selected)
 {
-    const int16_t list_y0 = 16;
+    const int16_t list_y0 = 14;
     const int16_t row_step = 10;
     const int16_t row_h = 9;
 
@@ -325,13 +447,16 @@ static void menu_ir_univ_draw_main_(uint8_t selected)
     poom_arduboy_draw_rect(0, MENU_IR_UNIV_BOX_Y, ARDUBOY_WIDTH, MENU_IR_UNIV_BOX_H, WHITE);
 
     poom_arduboy_set_cursor(2, list_y0);
-    (void)poom_arduboy_print(F("LEARN"));
+    (void)poom_arduboy_print(F("LEARN SIGNAL"));
 
     poom_arduboy_set_cursor(2, (int16_t)(list_y0 + row_step));
-    (void)poom_arduboy_print(F("EMULATOR"));
+    (void)poom_arduboy_print(F("NEW REMOTE"));
 
     poom_arduboy_set_cursor(2, (int16_t)(list_y0 + (int16_t)row_step * 2));
-    (void)poom_arduboy_print(F("SD EMULATOR"));
+    (void)poom_arduboy_print(F("REMOTE MODE"));
+
+    poom_arduboy_set_cursor(2, (int16_t)(list_y0 + (int16_t)row_step * 3));
+    (void)poom_arduboy_print(F("FLIPPER FILE"));
 
     poom_arduboy_fill_rect(
         0,
@@ -345,6 +470,30 @@ static void menu_ir_univ_draw_main_(uint8_t selected)
     poom_arduboy_set_cursor(72, 56);
     (void)poom_arduboy_print(F("B:EXIT"));
 
+    poom_arduboy_display();
+}
+
+static void menu_ir_univ_draw_learn_target_(uint8_t selected)
+{
+    const int16_t list_y0 = 18;
+    const int16_t row_step = 14;
+
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+    menu_ir_univ_draw_header_(F("LEARN TO"));
+    poom_arduboy_draw_rect(0, MENU_IR_UNIV_BOX_Y, ARDUBOY_WIDTH, MENU_IR_UNIV_BOX_H, WHITE);
+
+    poom_arduboy_set_cursor(2, list_y0);
+    (void)poom_arduboy_print(F("EMBEDDED REMOTE"));
+    poom_arduboy_set_cursor(2, (int16_t)(list_y0 + row_step));
+    (void)poom_arduboy_print(F("SD IR FILE"));
+    poom_arduboy_fill_rect(0, (int16_t)(list_y0 + (int16_t)selected * row_step - 1),
+                           ARDUBOY_WIDTH, 11, INVERT);
+
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(F("A:SELECT"));
+    poom_arduboy_set_cursor(72, 56);
+    (void)poom_arduboy_print(F("B:BACK"));
     poom_arduboy_display();
 }
 
@@ -510,12 +659,48 @@ static void menu_ir_univ_draw_assign_list_(uint8_t selected, bool raw)
  * @param[in] mapped_count Parameter passed to the helper.
  * @return void
  */
-static void menu_ir_univ_draw_emulator_(uint8_t mapped_count)
+static void menu_ir_univ_draw_emulator_(const char* remote_name, const char* button_name,
+                                        const char* signal_name, uint8_t mapped_count)
 {
+    char title[22];
+    char line1[22];
     char line2[22];
+    size_t title_len;
+    int16_t title_x = 2;
 
-    (void)snprintf(line2, sizeof(line2), "Mapped: %u/6", (unsigned)mapped_count);
-    menu_ir_univ_draw_status_("EMULATOR", line2, "B:BACK");
+    (void)snprintf(title, sizeof(title), "%.*s", 21,
+                   (remote_name != NULL) ? remote_name : "REMOTE");
+    title_len = strlen(title);
+    if(title_len * 6U < (size_t)(ARDUBOY_WIDTH - 4))
+    {
+        title_x = (int16_t)((ARDUBOY_WIDTH - (int16_t)(title_len * 6U)) / 2);
+    }
+
+    if((button_name != NULL) && (signal_name != NULL))
+    {
+        (void)snprintf(line1, sizeof(line1), "%s", button_name);
+        (void)snprintf(line2, sizeof(line2), "%s", signal_name);
+    }
+    else
+    {
+        (void)snprintf(line1, sizeof(line1), "DIRECT BUTTONS");
+        (void)snprintf(line2, sizeof(line2), "Mapped: %u/6", (unsigned)mapped_count);
+    }
+
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+    poom_arduboy_set_cursor(title_x, 2);
+    (void)poom_arduboy_print(title);
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, MENU_IR_UNIV_HEADER_H, INVERT);
+    poom_arduboy_draw_rect(0, MENU_IR_UNIV_BOX_Y, ARDUBOY_WIDTH, MENU_IR_UNIV_BOX_H, WHITE);
+    poom_arduboy_set_cursor(MENU_IR_UNIV_TEXT_X, MENU_IR_UNIV_ROW0_Y);
+    (void)poom_arduboy_print(line1);
+    poom_arduboy_set_cursor(MENU_IR_UNIV_TEXT_X,
+                            (int16_t)(MENU_IR_UNIV_ROW0_Y + MENU_IR_UNIV_ROW_STEP));
+    (void)poom_arduboy_print(line2);
+    poom_arduboy_set_cursor(0, 56);
+    (void)poom_arduboy_print(F("B HOLD:BACK"));
+    poom_arduboy_display();
 }
 
 /**
@@ -718,6 +903,7 @@ static void menu_ir_univ_sd_set_start_dir_from_abs_path_(const char* abs_path)
 static void menu_ir_univ_sd_exit_cb_(void* user_ctx)
 {
     (void)user_ctx;
+    s_menu_ir_univ_sd_select_for_learn = false;
     (void)poom_sd_browser_set_exit_callback(NULL, NULL);
     menu_ir_universal_show();
 }
@@ -731,11 +917,16 @@ static void menu_ir_univ_sd_exit_cb_(void* user_ctx)
  */
 static void menu_ir_univ_sd_file_selected_cb_(const char* abs_path, void* user_ctx)
 {
+    const bool select_for_learn = s_menu_ir_univ_sd_select_for_learn;
+
     (void)user_ctx;
     (void)poom_sd_browser_set_exit_callback(NULL, NULL);
+    s_menu_ir_univ_sd_select_for_learn = false;
 
     s_menu_ir_univ_sd_selected_path[0] = '\0';
+    s_menu_ir_univ_sd_path_pending = false;
     s_menu_ir_univ_sd_bad_ext_pending = false;
+    s_menu_ir_univ_sd_learn_path_pending = false;
     if((abs_path != NULL) && (abs_path[0] != '\0'))
     {
         menu_ir_univ_sd_set_start_dir_from_abs_path_(abs_path);
@@ -743,7 +934,8 @@ static void menu_ir_univ_sd_file_selected_cb_(const char* abs_path, void* user_c
         if(menu_ir_univ_sd_has_ir_ext_(abs_path))
         {
             (void)snprintf(s_menu_ir_univ_sd_selected_path, sizeof(s_menu_ir_univ_sd_selected_path), "%s", abs_path);
-            s_menu_ir_univ_sd_path_pending = true;
+            if(select_for_learn) s_menu_ir_univ_sd_learn_path_pending = true;
+            else s_menu_ir_univ_sd_path_pending = true;
         }
         else
         {
@@ -761,6 +953,17 @@ static void menu_ir_univ_sd_file_selected_cb_(const char* abs_path, void* user_c
  */
 static void menu_ir_univ_launch_sd_browser_and_handover_(void)
 {
+    sd_card_begin();
+    if(sd_card_is_not_mounted())
+    {
+        (void)sd_card_mount();
+    }
+    if(!sd_card_is_not_mounted())
+    {
+        (void)sd_card_create_dir("/ir");
+        (void)sd_card_create_dir(MENU_IR_UNIV_REMOTES_DIR);
+    }
+
     poom_sd_browser_config_t cfg = {
         .start_dir = s_menu_ir_univ_sd_start_dir,
         .header = "IR",
@@ -1270,6 +1473,108 @@ static bool menu_ir_univ_save_code_for_button_(uint8_t button, const menu_ir_uni
     return err == ESP_OK;
 }
 
+/* Export only decoded entries.  RAW captures remain complete in the embedded
+ * NVS profile, where their exact timing blob is preserved by the established
+ * learn/send path.  The parsed part uses Flipper's .ir text format. */
+static bool menu_ir_univ_export_active_profile_(const char* remote_name)
+{
+    char file_name[24];
+    char abs_path[MENU_IR_UNIV_SD_PATH_MAX];
+    FILE* f;
+    uint8_t exported = 0U;
+
+    if((remote_name == NULL) || (remote_name[0] == '\0')) return false;
+
+    sd_card_begin();
+    if(sd_card_is_not_mounted() && (sd_card_mount() != ESP_OK)) return false;
+    if(sd_card_is_not_mounted()) return false;
+    if((sd_card_create_dir("/ir") != ESP_OK) ||
+       (sd_card_create_dir(MENU_IR_UNIV_REMOTES_DIR) != ESP_OK)) return false;
+
+    for(size_t i = 0U; i < sizeof(file_name) - 4U; i++)
+    {
+        const unsigned char c = (unsigned char)remote_name[i];
+        if(c == '\0')
+        {
+            file_name[i] = '\0';
+            break;
+        }
+        file_name[i] = (char)(((c >= 'a') && (c <= 'z')) ||
+                              ((c >= 'A') && (c <= 'Z')) ||
+                              ((c >= '0') && (c <= '9')) || (c == '-') || (c == '_')
+                              ? c : '_');
+        file_name[i + 1U] = '\0';
+    }
+    if(file_name[0] == '\0') (void)snprintf(file_name, sizeof(file_name), "%s", "REMOTE");
+    (void)strncat(file_name, ".ir", sizeof(file_name) - strlen(file_name) - 1U);
+    if(snprintf(abs_path, sizeof(abs_path), "%s%s/%s", SD_CARD_PATH,
+                MENU_IR_UNIV_REMOTES_DIR, file_name) >= (int)sizeof(abs_path)) return false;
+
+    f = fopen(abs_path, "w");
+    if(f == NULL) return false;
+
+    (void)fprintf(f, "Filetype: IR signals file\nVersion: 1\n# %s\n", remote_name);
+    for(uint8_t i = 0U; i < (uint8_t)(sizeof(s_menu_ir_univ_assign_buttons) /
+                                       sizeof(s_menu_ir_univ_assign_buttons[0])); i++)
+    {
+        const uint8_t button = s_menu_ir_univ_assign_buttons[i];
+        menu_ir_univ_code_t code = {0};
+        ir_raw_signal_t* raw = NULL;
+        char signal_name[MENU_IR_UNIV_SD_NAME_MAX + 1U];
+
+        if(menu_ir_univ_load_code_for_button_(button, &code, &raw) != MENU_IR_UNIV_LOAD_OK)
+        {
+            free(raw);
+            continue;
+        }
+        menu_ir_univ_load_button_name_(button, signal_name, sizeof(signal_name));
+        if(raw == NULL)
+        {
+            const uint8_t* address = (const uint8_t*)&code.address;
+            const uint8_t* command = (const uint8_t*)&code.command;
+            (void)fprintf(f,
+                          "name: %s\ntype: parsed\nprotocol: %s\n"
+                          "address: %02X %02X %02X %02X\n"
+                          "command: %02X %02X %02X %02X\n#\n",
+                          signal_name, ir_protocol_name((ir_protocol_t)code.protocol),
+                          address[0], address[1], address[2], address[3],
+                          command[0], command[1], command[2], command[3]);
+            exported++;
+        }
+        free(raw);
+    }
+
+    return (fclose(f) == 0) && (exported > 0U);
+}
+
+static bool menu_ir_univ_sd_append_learned_code_(const char* abs_path, const menu_ir_univ_code_t* code,
+                                                 const ir_raw_signal_t* raw, const char* signal_name)
+{
+    FILE* f;
+    const uint8_t* address;
+    const uint8_t* command;
+
+    if((abs_path == NULL) || (abs_path[0] == '\0') || (code == NULL) ||
+       (signal_name == NULL) || (signal_name[0] == '\0') || (raw != NULL) ||
+       !ir_protocol_is_supported((ir_protocol_t)code->protocol))
+    {
+        return false;
+    }
+
+    f = fopen(abs_path, "a");
+    if(f == NULL) return false;
+    address = (const uint8_t*)&code->address;
+    command = (const uint8_t*)&code->command;
+    (void)fprintf(f,
+                  "\nname: %s\ntype: parsed\nprotocol: %s\n"
+                  "address: %02X %02X %02X %02X\n"
+                  "command: %02X %02X %02X %02X\n#\n",
+                  signal_name, ir_protocol_name((ir_protocol_t)code->protocol),
+                  address[0], address[1], address[2], address[3],
+                  command[0], command[1], command[2], command[3]);
+    return fclose(f) == 0;
+}
+
 /**
  * @brief Internal helper for `menu_ir_univ_count_mapped`.
  *
@@ -1507,11 +1812,14 @@ static void menu_ir_univ_task_(void* arg)
     s.screen = MENU_IR_UNIV_SCREEN_MAIN;
     s.main_selected = 0U;
     s.assign_selected = 0U;
+    s.learn_target_selected = 0U;
+    s.learn_target = MENU_IR_UNIV_LEARN_TARGET_EMBEDDED;
     s.emulator_mapped_count = 0U;
     s.sd_selected = 0U;
     s.left_down = false;
     s.right_down = false;
     (void)memset(&s.pending_code, 0, sizeof(s.pending_code));
+    menu_ir_univ_load_remote_name_(s.remote_name, sizeof(s.remote_name));
 
     free(s_menu_ir_univ_sd_cmds);
     s_menu_ir_univ_sd_cmds = (menu_ir_univ_sd_cmd_t*)calloc(MENU_IR_UNIV_SD_MAX_COMMANDS, sizeof(*s_menu_ir_univ_sd_cmds));
@@ -1569,7 +1877,14 @@ static void menu_ir_univ_task_(void* arg)
     transmitter_cfg.carrier_hz = MENU_IR_UNIV_NEC_CARRIER_HZ;
     transmitter_cfg.duty_cycle = MENU_IR_UNIV_NEC_DUTY_CYCLE;
 
-    if(s_menu_ir_univ_sd_path_pending)
+    if(s_menu_ir_univ_sd_learn_path_pending)
+    {
+        s_menu_ir_univ_sd_learn_path_pending = false;
+        s.learn_target = MENU_IR_UNIV_LEARN_TARGET_SD;
+        s.screen = MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR;
+        menu_ir_univ_draw_status_("LEARN SD", "Press remote", "B:BACK");
+    }
+    else if(s_menu_ir_univ_sd_path_pending)
     {
         s_menu_ir_univ_sd_path_pending = false;
         if(menu_ir_univ_sd_load_file_(s_menu_ir_univ_sd_selected_path))
@@ -1605,7 +1920,8 @@ static void menu_ir_univ_task_(void* arg)
 
     while(1)
     {
-        if(s.screen != MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON)
+        if((s.screen != MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON) &&
+           (s.screen != MENU_IR_UNIV_SCREEN_LEARN_NAME))
         {
             free(s.pending_raw);
             s.pending_raw = NULL;
@@ -1666,7 +1982,18 @@ static void menu_ir_univ_task_(void* arg)
             }
         }
 
-        if(got_button && (button_msg.event == BUTTON_SINGLE_CLICK) && (button_msg.button == BUTTON_B))
+        if(got_button && (s.screen == MENU_IR_UNIV_SCREEN_EMULATOR) &&
+           (button_msg.button == BUTTON_B) && menu_ir_univ_is_long_press_event_(button_msg.event))
+        {
+            s.screen = MENU_IR_UNIV_SCREEN_MAIN;
+            menu_ir_univ_draw_main_(s.main_selected);
+            continue;
+        }
+
+        if(got_button && (button_msg.event == BUTTON_SINGLE_CLICK) && (button_msg.button == BUTTON_B) &&
+           (s.screen != MENU_IR_UNIV_SCREEN_LEARN_NAME) &&
+           (s.screen != MENU_IR_UNIV_SCREEN_NEW_REMOTE_NAME) &&
+           (s.screen != MENU_IR_UNIV_SCREEN_EMULATOR))
         {
             if(s.screen == MENU_IR_UNIV_SCREEN_MAIN)
             {
@@ -1696,6 +2023,7 @@ static void menu_ir_univ_task_(void* arg)
 
                 menu_ir_univ_handover_exit_to_sd_browser_();
                 s_menu_ir_univ_task = NULL;
+                s_menu_ir_univ_sd_select_for_learn = false;
                 menu_ir_univ_launch_sd_browser_and_handover_();
                 vTaskDelete(NULL);
             }
@@ -1734,7 +2062,7 @@ static void menu_ir_univ_task_(void* arg)
                 }
                 else if(button_msg.button == BUTTON_DOWN)
                 {
-                    if(s.main_selected < 2U)
+                    if(s.main_selected < 3U)
                     {
                         s.main_selected++;
                     }
@@ -1744,28 +2072,63 @@ static void menu_ir_univ_task_(void* arg)
                 {
                     if(s.main_selected == 0U)
                     {
-                        s.screen = MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR;
-                        menu_ir_univ_draw_status_("LEARN", "Press remote", "B:BACK");
+                        s.learn_target_selected = 0U;
+                        s.screen = MENU_IR_UNIV_SCREEN_LEARN_TARGET;
+                        menu_ir_univ_draw_learn_target_(s.learn_target_selected);
                     }
                     else if(s.main_selected == 1U)
                     {
+                        (void)snprintf(s.pending_name, sizeof(s.pending_name), "%s", "REMOTE");
+                        poom_ui_keyboard_init(&s.keyboard, s.pending_name, sizeof(s.pending_name), "REMOTE NAME");
+                        s.learn_target = MENU_IR_UNIV_LEARN_TARGET_EMBEDDED;
+                        s.screen = MENU_IR_UNIV_SCREEN_NEW_REMOTE_NAME;
+                        poom_ui_keyboard_draw(&s.keyboard);
+                    }
+                    else if(s.main_selected == 2U)
+                    {
                         s.screen = MENU_IR_UNIV_SCREEN_EMULATOR;
                         s.emulator_mapped_count = menu_ir_univ_count_mapped_();
-                        menu_ir_univ_draw_emulator_(s.emulator_mapped_count);
+                        menu_ir_univ_draw_emulator_(s.remote_name, NULL, NULL, s.emulator_mapped_count);
                     }
                     else
                     {
-                        if(receiver_ready)
-                        {
-                            (void)ir_rcv_deinit(&receiver);
-                            receiver_ready = false;
-                        }
-                        if(transmitter_ready)
-                        {
-                            (void)ir_tx_deinit(&transmitter);
-                            transmitter_ready = false;
-                        }
-
+                        s_menu_ir_univ_sd_select_for_learn = false;
+                        menu_ir_univ_handover_exit_to_sd_browser_();
+                        free(s_menu_ir_univ_sd_cmds);
+                        s_menu_ir_univ_sd_cmds = NULL;
+                        s_menu_ir_univ_sd_cmd_count = 0U;
+                        s_menu_ir_univ_task = NULL;
+                        menu_ir_univ_launch_sd_browser_and_handover_();
+                        vTaskDelete(NULL);
+                    }
+                }
+            }
+        }
+        else if(s.screen == MENU_IR_UNIV_SCREEN_LEARN_TARGET)
+        {
+            if(got_button && (button_msg.event == BUTTON_SINGLE_CLICK))
+            {
+                if(button_msg.button == BUTTON_UP)
+                {
+                    s.learn_target_selected = (s.learn_target_selected == 0U) ? 1U : 0U;
+                    menu_ir_univ_draw_learn_target_(s.learn_target_selected);
+                }
+                else if(button_msg.button == BUTTON_DOWN)
+                {
+                    s.learn_target_selected = (s.learn_target_selected == 0U) ? 1U : 0U;
+                    menu_ir_univ_draw_learn_target_(s.learn_target_selected);
+                }
+                else if(button_msg.button == BUTTON_A)
+                {
+                    if(s.learn_target_selected == 0U)
+                    {
+                        s.learn_target = MENU_IR_UNIV_LEARN_TARGET_EMBEDDED;
+                        s.screen = MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR;
+                        menu_ir_univ_draw_status_("LEARN", "Embedded remote", "B:BACK");
+                    }
+                    else
+                    {
+                        s_menu_ir_univ_sd_select_for_learn = true;
                         menu_ir_univ_handover_exit_to_sd_browser_();
                         free(s_menu_ir_univ_sd_cmds);
                         s_menu_ir_univ_sd_cmds = NULL;
@@ -1855,9 +2218,11 @@ static void menu_ir_univ_task_(void* arg)
                         MENU_IR_UNIV_PRINTF_I("RAW learned: %u timings; replay defaults 38000 Hz, 33%%",
                                               (unsigned)s.pending_raw->count);
                     }
-                    s.screen = MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON;
+                    (void)snprintf(s.pending_name, sizeof(s.pending_name), "%s", "SIGNAL");
+                    poom_ui_keyboard_init(&s.keyboard, s.pending_name, sizeof(s.pending_name), "SIGNAL NAME");
+                    s.screen = MENU_IR_UNIV_SCREEN_LEARN_NAME;
                     s.assign_selected = 0U;
-                    menu_ir_univ_draw_assign_list_(s.assign_selected, s.pending_raw != NULL);
+                    poom_ui_keyboard_draw(&s.keyboard);
                 }
                 else
                 {
@@ -1875,6 +2240,90 @@ static void menu_ir_univ_task_(void* arg)
                         raw_err == ESP_ERR_NO_MEM ? "No RAM" :
                         capture_full ? "Too long: short press" : "Press again", "B:BACK");
                 }
+            }
+        }
+        else if(s.screen == MENU_IR_UNIV_SCREEN_LEARN_NAME)
+        {
+            if(got_button && (button_msg.event == BUTTON_SINGLE_CLICK))
+            {
+                if(button_msg.button == BUTTON_B)
+                {
+                    s.screen = MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR;
+                    menu_ir_univ_draw_status_("LEARN", "Press remote", "B:BACK");
+                }
+                else if(poom_ui_keyboard_handle_button(&s.keyboard, button_msg.button) == POOM_UI_KEYBOARD_ACTION_ACCEPT)
+                {
+                    if(s.pending_name[0] == '\0')
+                    {
+                        menu_ir_univ_draw_status_("Name empty", "", "B:BACK");
+                    }
+                    else if(s.learn_target == MENU_IR_UNIV_LEARN_TARGET_SD)
+                    {
+                        if(s.pending_raw != NULL)
+                        {
+                            /* The existing exact RAW blob belongs to the embedded
+                             * profile.  Do not flatten or corrupt it for an .ir file. */
+                            s.learn_target = MENU_IR_UNIV_LEARN_TARGET_EMBEDDED;
+                            s.screen = MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON;
+                            menu_ir_univ_draw_assign_list_(s.assign_selected, true);
+                        }
+                        else if(menu_ir_univ_sd_append_learned_code_(s_menu_ir_univ_sd_selected_path,
+                                                                      &s.pending_code, NULL, s.pending_name))
+                        {
+                            menu_ir_univ_draw_status_("SAVED TO SD", s.pending_name, "B:BACK");
+                            vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_STATUS_HOLD_MS));
+                            s.screen = MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR;
+                            menu_ir_univ_draw_status_("LEARN SD", "Press remote", "B:BACK");
+                        }
+                        else
+                        {
+                            menu_ir_univ_draw_status_("SD SAVE FAIL", "", "B:BACK");
+                            vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_STATUS_HOLD_MS));
+                            poom_ui_keyboard_draw(&s.keyboard);
+                        }
+                    }
+                    else
+                    {
+                        s.screen = MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON;
+                        menu_ir_univ_draw_assign_list_(s.assign_selected, s.pending_raw != NULL);
+                    }
+                }
+                else poom_ui_keyboard_draw(&s.keyboard);
+            }
+        }
+        else if(s.screen == MENU_IR_UNIV_SCREEN_NEW_REMOTE_NAME)
+        {
+            if(got_button && (button_msg.event == BUTTON_SINGLE_CLICK))
+            {
+                if(button_msg.button == BUTTON_B)
+                {
+                    s.screen = MENU_IR_UNIV_SCREEN_MAIN;
+                    menu_ir_univ_draw_main_(s.main_selected);
+                }
+                else if(poom_ui_keyboard_handle_button(&s.keyboard, button_msg.button) == POOM_UI_KEYBOARD_ACTION_ACCEPT)
+                {
+                    if(s.pending_name[0] == '\0')
+                    {
+                        menu_ir_univ_draw_status_("Name empty", "", "B:BACK");
+                    }
+                    else if((poom_secrets_init() != ESP_OK) ||
+                            (poom_secrets_set_str("irp_name", s.pending_name) != ESP_OK))
+                    {
+                        menu_ir_univ_draw_status_("SAVE FAIL", "", "B:BACK");
+                    }
+                    else
+                    {
+                        /* The active remote is always usable from NVS.  If a card is
+                         * present, preserve the previous one as a portable .ir file
+                         * before reusing the six embedded button slots. */
+                        (void)menu_ir_univ_export_active_profile_(s.remote_name);
+                        menu_ir_univ_clear_embedded_remote_();
+                        (void)snprintf(s.remote_name, sizeof(s.remote_name), "%s", s.pending_name);
+                        s.screen = MENU_IR_UNIV_SCREEN_LEARN_WAIT_IR;
+                        menu_ir_univ_draw_status_(s.remote_name, "Learn signal", "B:BACK");
+                    }
+                }
+                else poom_ui_keyboard_draw(&s.keyboard);
             }
         }
         else if(s.screen == MENU_IR_UNIV_SCREEN_LEARN_SELECT_BUTTON)
@@ -1909,7 +2358,10 @@ static void menu_ir_univ_task_(void* arg)
                     uint8_t target_button = s_menu_ir_univ_assign_buttons[s.assign_selected];
                     if(menu_ir_univ_save_code_for_button_(target_button, &s.pending_code, s.pending_raw))
                     {
-                        menu_ir_univ_draw_status_("SAVED", " ", "B:BACK");
+                        const char* name_key = menu_ir_univ_button_name_key_(target_button);
+                        if(name_key != NULL) (void)poom_secrets_set_str(name_key, s.pending_name);
+                        (void)menu_ir_univ_export_active_profile_(s.remote_name);
+                        menu_ir_univ_draw_status_("SAVED", s.pending_name, "B:BACK");
                     }
                     else
                     {
@@ -1929,36 +2381,37 @@ static void menu_ir_univ_task_(void* arg)
         {
             if(got_button && (button_msg.event == BUTTON_SINGLE_CLICK))
             {
+                char signal_name[MENU_IR_UNIV_SD_NAME_MAX + 1U];
+                const char* button_name = menu_ir_univ_button_label_(button_msg.button);
                 menu_ir_univ_send_result_t send_result =
                     menu_ir_univ_send_for_button_(&transmitter, &transmitter_ready, &transmitter_cfg, button_msg.button);
 
                 if(send_result == MENU_IR_UNIV_SEND_OK)
                 {
-                    menu_ir_univ_draw_status_("SENT", " ", "B:BACK");
+                    menu_ir_univ_load_button_name_(button_msg.button, signal_name, sizeof(signal_name));
+                    menu_ir_univ_draw_emulator_(s.remote_name, button_name, signal_name,
+                                                s.emulator_mapped_count);
                 }
                 else if(send_result == MENU_IR_UNIV_SEND_NO_CODE)
                 {
-                    menu_ir_univ_draw_status_("NOT SET", "Use LEARN", "B:BACK");
+                    menu_ir_univ_draw_status_(s.remote_name, "NOT SET", "B HOLD:BACK");
                 }
                 else if(send_result == MENU_IR_UNIV_SEND_STORE_ERR)
                 {
-                    menu_ir_univ_draw_status_("STORE ERR", " ", "B:BACK");
+                    menu_ir_univ_draw_status_(s.remote_name, "STORE ERR", "B HOLD:BACK");
                 }
                 else if(send_result == MENU_IR_UNIV_SEND_BAD_DATA)
                 {
-                    menu_ir_univ_draw_status_("BAD CODE", "Relearn", "B:BACK");
+                    menu_ir_univ_draw_status_(s.remote_name, "BAD CODE", "B HOLD:BACK");
                 }
                 else if(send_result == MENU_IR_UNIV_SEND_TX_INIT_FAILED)
                 {
-                    menu_ir_univ_draw_status_("IR TX FAIL", " ", "B:BACK");
+                    menu_ir_univ_draw_status_(s.remote_name, "IR TX FAIL", "B HOLD:BACK");
                 }
                 else
                 {
-                    menu_ir_univ_draw_status_("SEND FAIL", " ", "B:BACK");
+                    menu_ir_univ_draw_status_(s.remote_name, "SEND FAIL", "B HOLD:BACK");
                 }
-
-                vTaskDelay(pdMS_TO_TICKS(140U));
-                menu_ir_univ_draw_emulator_(s.emulator_mapped_count);
             }
         }
         else if(s.screen == MENU_IR_UNIV_SCREEN_SD_COMMANDS)

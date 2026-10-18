@@ -1,3 +1,47 @@
+## POOM 1.0.13
+
+### IR UNIVERSAL
+
+- Added **POOM REMOTE** to create custom remote controls with configurable button assignments.
+- Added support for assigning IR signals to `UP`, `DOWN`, `LEFT`, `RIGHT`, `A` and `B`.
+- Added custom names for IR signals and remote control profiles.
+- Added support for importing and exporting **Flipper-compatible `.ir` files**.
+- Added persistent storage for remote control configurations.
+- Improved IR learning with support for decoded and RAW signals.
+- Improved button handling: short press `B` sends the assigned signal, while long press exits remote mode.
+- Expanded the **TV OFF** database with additional Samsung, NEC, RC5, RC6, Sony and LG signals.
+- Improved TV OFF progress display, repeat controls and OLED layout.
+
+### POOMGOTCHI
+
+- Added **POOMGOTCHI**, an autonomous Wi-Fi scanning and handshake capture mode.
+- Added intelligent AP selection based on security, signal strength, connected clients and previous capture results.
+- Added support for capturing **EAPOL handshakes and PMKID** from selected targets.
+- Added real-time monitoring of connected clients and detected deauthentication frames.
+- Added interaction policies: `OFF`, `MANUAL` and `ASSIST`.
+- Added session statistics for scanned APs, targets, clients, handshakes, PMKIDs and deauthentication activity.
+- Added automatic PCAP recording and `.22000` export support in `/sdcard/pcaps/handshakes/`.
+- Improved memory management with PSRAM support and reduced RAM usage.
+- Added a dedicated interface with scanning animations, capture status and session summaries.
+- Added **UART/CLI PCAP streaming** when the microSD card is unavailable. POOMGOTCHI sends binary PCAP data over the serial console for host-side capture instead of saving a file. `.22000` export is not available in this mode.
+- POOMGOTCHI is still undergoing UX improvements. Community feedback on its functionality is welcome to help guide future updates.
+
+### WI-FI CHANNEL SUPPORT
+
+- Improved **2.4 GHz and 5 GHz** channel handling for ESP32-C5.
+- Added support for standard 5 GHz primary channels, including `36–64`, `100–144` and `149–177`.
+- Fixed channel selection issues in **PCAP SNIFFER** and **POOMGOTCHI**.
+- Updated the shared Wi-Fi controller to configure the correct frequency band before switching channels.
+- Improved channel compatibility across Wi-Fi scanning and monitoring features.
+
+### Community Contribution
+
+Special thanks to **thenrglabs** for reporting issues, sharing valuable feedback and proposing the **POOMGOTCHI** concept.
+
+Thanks also to **Da-Mikey** for contributing a pull request that improved build configuration and compilation compatibility.
+
+Your ideas, contributions and feedback continue to shape POOM and help the project grow.
+
 ## POOM 1.0.12
 
 ### IR UNIVERSAL

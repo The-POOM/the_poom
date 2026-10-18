@@ -57,6 +57,7 @@
 #include "menu_nfc_tuning.h"
 #include "menu_plot.h"
 #include "menu_poom_pcap.h"
+#include "menu_poomgotchi.h"
 #include "menu_poom_droneid.h"
 #include "menu_poom_drone_scan.h"
 #include "menu_poom_drone_emul.h"
@@ -407,6 +408,13 @@ static void action_wifi_detector_(void)
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
     menu_wifi_detector_show();
+}
+
+static void action_poomgotchi_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_poomgotchi_show();
 }
 
 /**
@@ -912,6 +920,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"TV OFF", action_tv_off_},
     {"BLE DETECT", action_ble_detector_},
     {"WIFI DETECT", action_wifi_detector_},
+    {"POOMGOTCHI", action_poomgotchi_},
     {"SNIFFER", action_pcap_snf_},
     {"SNNIFER RT", action_sniffer_rt_},
     {"SCAN CHANNELS", action_scanner_core_},

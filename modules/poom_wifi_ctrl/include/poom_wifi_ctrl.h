@@ -16,7 +16,9 @@ extern "C" {
  * ========================= */
 #define POOM_WIFI_CTRL_MAC_LEN               (6U)
 #define POOM_WIFI_CTRL_WIFI_CHANNEL_MIN      (1U)
-#define POOM_WIFI_CTRL_WIFI_CHANNEL_MAX      (13U)
+#define POOM_WIFI_CTRL_WIFI_CHANNEL_MAX      (13U) /* legacy 2.4 GHz menu range */
+#define POOM_WIFI_CTRL_WIFI_5G_CHANNEL_MIN   (36U)
+#define POOM_WIFI_CTRL_WIFI_5G_CHANNEL_MAX   (177U)
 
 /* =========================
  * Kconfig mapping (project)
@@ -154,7 +156,18 @@ esp_err_t poom_wifi_ctrl_restore_ap_mac(void);
 esp_err_t poom_wifi_ctrl_get_sta_mac(uint8_t *sta_mac);
 
 /**
- * @brief Set Wi-Fi primary channel (1..13).
+ * @brief Returns whether a primary channel is supported by the current target.
+ *
+ * ESP32-C5 accepts 2.4 GHz channels 1..13 and standard 5 GHz 20 MHz
+ * primary channels. Other targets accept 2.4 GHz channels 1..13 only.
+ */
+bool poom_wifi_ctrl_channel_is_valid(uint8_t channel);
+
+/**
+ * @brief Set Wi-Fi primary channel.
+ *
+ * On ESP32-C5, tuning a 5 GHz channel enables automatic dual-band mode before
+ * selecting the channel. The Wi-Fi driver still applies country restrictions.
  *
  * @param[in] channel Primary channel.
  * @return esp_err_t

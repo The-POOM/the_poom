@@ -192,7 +192,7 @@ static void poom_wifi_attacks_broadcast_attack_task_(void *param)
                   ap.bssid[4],
                   ap.bssid[5]);
 
-    (void)esp_wifi_set_channel(ap.primary, WIFI_SECOND_CHAN_NONE);
+    (void)poom_wifi_ctrl_set_channel(ap.primary);
     (void)esp_wifi_set_promiscuous(true);
 
     while(s_poom_wifi_attacks_broadcast_running)

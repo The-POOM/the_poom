@@ -60,6 +60,7 @@ static bool poom_pcap_wifi_get_llc_ethertype_(const uint8_t *frame,
 #define POOM_PCAP_HANDSHAKE_AP_MAX (8U)
 #define POOM_PCAP_HANDSHAKE_SESSION_MAX (4U)
 #define POOM_PCAP_HANDSHAKE_PMKID_MAX (4U)
+#define POOM_PCAP_HANDSHAKE_CLIENT_MAX (4U)
 #define POOM_PCAP_HANDSHAKE_EAPOL_MAX (256U)
 #define POOM_PCAP_ETHERTYPE_EAPOL (0x888EU)
 #define POOM_PCAP_EAPOL_TYPE_KEY (0x03U)
@@ -113,13 +114,23 @@ typedef struct
 
 typedef struct
 {
+    bool used;
+    uint8_t mac[6];
+} poom_pcap_handshake_client_t;
+
+typedef struct
+{
     poom_pcap_handshake_ap_t aps[POOM_PCAP_HANDSHAKE_AP_MAX];
     poom_pcap_handshake_session_t sessions[POOM_PCAP_HANDSHAKE_SESSION_MAX];
     poom_pcap_handshake_pmkid_t pmkids[POOM_PCAP_HANDSHAKE_PMKID_MAX];
+    poom_pcap_handshake_client_t clients[POOM_PCAP_HANDSHAKE_CLIENT_MAX];
     uint8_t pmkid_count;
     uint8_t valid_pair_count;
+    uint16_t deauth_count;
     bool has_beacon;
     bool hash22000_saved;
+    bool target_filter;
+    uint8_t target_bssid[6];
 } poom_pcap_handshake_state_t;
 
 static poom_pcap_handshake_state_t *s_hs = NULL;
@@ -204,6 +215,7 @@ static void poom_pcap_handshake_status_update_(void)
     }
 
     s_hs_status.pmkid_count = s_hs->pmkid_count;
+    s_hs_status.deauth_count = s_hs->deauth_count;
     s_hs_status.has_beacon = s_hs->has_beacon;
     s_hs_status.hash22000_saved = s_hs->hash22000_saved;
 
@@ -220,6 +232,13 @@ static void poom_pcap_handshake_status_update_(void)
             s_hs_status.valid_pair_count++;
         }
     }
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_CLIENT_MAX; i++)
+    {
+        if (s_hs->clients[i].used)
+        {
+            s_hs_status.client_count++;
+        }
+    }
 
     s_hs_status.complete = (s_hs_status.valid_pair_count > 0U) || (s_hs_status.pmkid_count > 0U);
 }
@@ -233,7 +252,7 @@ static void poom_pcap_handshake_free_(void)
     }
 }
 
-static esp_err_t poom_pcap_handshake_reset_(void)
+static esp_err_t poom_pcap_handshake_reset_(const uint8_t *target_bssid)
 {
     poom_pcap_handshake_free_();
     memset(&s_hs_status, 0, sizeof(s_hs_status));
@@ -242,6 +261,11 @@ static esp_err_t poom_pcap_handshake_reset_(void)
     if (s_hs == NULL)
     {
         return ESP_ERR_NO_MEM;
+    }
+    if(target_bssid != NULL)
+    {
+        s_hs->target_filter = true;
+        memcpy(s_hs->target_bssid, target_bssid, sizeof(s_hs->target_bssid));
     }
 
     for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_SESSION_MAX; i++)
@@ -387,6 +411,11 @@ static void poom_pcap_handshake_parse_beacon_(const uint8_t *frame, size_t len)
     }
 
     const uint8_t *bssid = &frame[16];
+    if((s_hs != NULL) && s_hs->target_filter &&
+       (memcmp(bssid, s_hs->target_bssid, sizeof(s_hs->target_bssid)) != 0))
+    {
+        return;
+    }
     size_t pos = 36U;
     while (pos + 2U <= len)
     {
@@ -455,6 +484,76 @@ static bool poom_pcap_handshake_get_addrs_(const uint8_t *frame,
     }
 
     return false;
+}
+
+static void poom_pcap_handshake_store_client_(const uint8_t sta[6])
+{
+    poom_pcap_handshake_client_t *free_slot = NULL;
+
+    if ((s_hs == NULL) || (sta == NULL) || ((sta[0] & 0x01U) != 0U) ||
+        !poom_pcap_mem_nonzero_(sta, 6U))
+    {
+        return;
+    }
+    for (size_t i = 0U; i < POOM_PCAP_HANDSHAKE_CLIENT_MAX; i++)
+    {
+        if (s_hs->clients[i].used && (memcmp(s_hs->clients[i].mac, sta, 6U) == 0))
+        {
+            return;
+        }
+        if (!s_hs->clients[i].used && (free_slot == NULL))
+        {
+            free_slot = &s_hs->clients[i];
+        }
+    }
+    if (free_slot == NULL)
+    {
+        return;
+    }
+    free_slot->used = true;
+    memcpy(free_slot->mac, sta, sizeof(free_slot->mac));
+    s_hs_status.client_count++;
+}
+
+static void poom_pcap_handshake_parse_client_(const uint8_t *frame, size_t len)
+{
+    uint16_t fc = 0U;
+    uint8_t ap[6] = {0};
+    uint8_t sta[6] = {0};
+    bool from_ap = false;
+
+    if ((s_hs == NULL) || !poom_pcap_wifi_get_frame_control_(frame, len, &fc) ||
+        (((fc >> 2) & 0x03U) != 2U) ||
+        !poom_pcap_handshake_get_addrs_(frame, len, ap, sta, &from_ap))
+    {
+        return;
+    }
+    if (s_hs->target_filter && (memcmp(ap, s_hs->target_bssid, sizeof(s_hs->target_bssid)) != 0))
+    {
+        return;
+    }
+    poom_pcap_handshake_store_client_(sta);
+}
+
+static void poom_pcap_handshake_parse_deauth_(const uint8_t *frame, size_t len)
+{
+    uint16_t fc = 0U;
+
+    if ((s_hs == NULL) || !poom_pcap_wifi_get_frame_control_(frame, len, &fc) || (len < 24U) ||
+        (((fc >> 2) & 0x03U) != 0U) || (((fc >> 4) & 0x0FU) != 12U))
+    {
+        return;
+    }
+    if (s_hs->target_filter &&
+        (memcmp(&frame[16], s_hs->target_bssid, sizeof(s_hs->target_bssid)) != 0))
+    {
+        return;
+    }
+    if (s_hs->deauth_count < UINT16_MAX)
+    {
+        s_hs->deauth_count++;
+        s_hs_status.deauth_count = s_hs->deauth_count;
+    }
 }
 
 static uint8_t poom_pcap_handshake_eapol_message_(uint16_t key_info, const uint8_t *nonce)
@@ -730,6 +829,11 @@ static void poom_pcap_handshake_parse_eapol_(const uint8_t *frame, size_t len)
     {
         return;
     }
+    if(s_hs->target_filter &&
+       (memcmp(ap, s_hs->target_bssid, sizeof(s_hs->target_bssid)) != 0))
+    {
+        return;
+    }
 
     const uint8_t *eapol = &frame[off];
     const size_t eapol_avail = len - off;
@@ -925,7 +1029,7 @@ static void poom_pcap_handshake_finalize_(void)
 
     if (poom_pcap_replace_ext_(pcap_path, ".22000", out_path, sizeof(out_path)))
     {
-        FILE *file = fopen(out_path, "w");
+        FILE *file = fopen(out_path, "a");
         if (file != NULL)
         {
             s_hs->hash22000_saved = poom_pcap_handshake_write_22000_(file);
@@ -1175,6 +1279,12 @@ static void poom_pcap_sniffer_wifi_promisc_cb_(void *buf, wifi_promiscuous_pkt_t
     if (len == 0U)
     {
         return;
+    }
+
+    if (s_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
+    {
+        poom_pcap_handshake_parse_client_(pkt->payload, len);
+        poom_pcap_handshake_parse_deauth_(pkt->payload, len);
     }
 
     if (!poom_pcap_wifi_should_capture_(pkt->payload, len))
@@ -1508,9 +1618,10 @@ static void poom_pcap_zb_isr_consumer_(uint8_t *frame,
 // Public API (manager-style wrappers)
 // =========================
 
-esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
-                                                       uint32_t filter_mask,
-                                                       poom_pcap_wifi_capture_t capture_mode)
+static esp_err_t poom_pcap_manager_sniffer_start_wifi_capture_(uint8_t channel,
+                                                               uint32_t filter_mask,
+                                                               poom_pcap_wifi_capture_t capture_mode,
+                                                               const uint8_t *target_bssid)
 {
     if (s_mode != POOM_PCAP_SNIFFER_MODE_NONE)
     {
@@ -1530,7 +1641,7 @@ esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
 
     if (capture_mode == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
     {
-        ret = poom_pcap_handshake_reset_();
+        ret = poom_pcap_handshake_reset_(target_bssid);
         if (ret == ESP_OK)
         {
             ret = poom_pcap_manager_start_file(POOM_PCAP_HANDSHAKE_BASE,
@@ -1582,6 +1693,69 @@ esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
     }
 
     return ESP_OK;
+}
+
+esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
+                                                       uint32_t filter_mask,
+                                                       poom_pcap_wifi_capture_t capture_mode)
+{
+    return poom_pcap_manager_sniffer_start_wifi_capture_(channel, filter_mask, capture_mode, NULL);
+}
+
+esp_err_t poom_pcap_manager_sniffer_start_wifi_capture_target(uint8_t channel,
+                                                              uint32_t filter_mask,
+                                                              const uint8_t target_bssid[6])
+{
+    if(target_bssid == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return poom_pcap_manager_sniffer_start_wifi_capture_(
+        channel, filter_mask, POOM_PCAP_WIFI_CAPTURE_HANDSHAKE, target_bssid);
+}
+
+esp_err_t poom_pcap_manager_sniffer_pause_wifi_handshake(void)
+{
+    if ((s_mode != POOM_PCAP_SNIFFER_MODE_WIFI) ||
+        (s_wifi_capture != POOM_PCAP_WIFI_CAPTURE_HANDSHAKE))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return poom_pcap_manager_wifi_stop_monitor_mode();
+}
+
+esp_err_t poom_pcap_manager_sniffer_retarget_wifi_handshake(uint8_t channel,
+                                                            uint32_t filter_mask,
+                                                            const uint8_t target_bssid[6])
+{
+    esp_err_t ret;
+
+    if ((target_bssid == NULL) || (s_mode != POOM_PCAP_SNIFFER_MODE_WIFI) ||
+        (s_wifi_capture != POOM_PCAP_WIFI_CAPTURE_HANDSHAKE) || !poom_pcap_manager_is_active())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ret = poom_pcap_manager_wifi_stop_monitor_mode();
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+    poom_pcap_handshake_finalize_();
+    ret = poom_pcap_handshake_reset_(target_bssid);
+    if ((ret == ESP_OK) && (channel != 0U))
+    {
+        ret = poom_wifi_ctrl_set_channel(channel);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = poom_pcap_manager_wifi_start_monitor_mode(poom_pcap_sniffer_wifi_promisc_cb_, filter_mask);
+    }
+    if (ret != ESP_OK)
+    {
+        (void)poom_pcap_manager_sniffer_stop();
+    }
+    return ret;
 }
 
 esp_err_t poom_pcap_manager_sniffer_start_wifi(uint8_t channel, uint32_t filter_mask)

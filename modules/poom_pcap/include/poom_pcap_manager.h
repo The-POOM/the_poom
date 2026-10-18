@@ -73,6 +73,8 @@ typedef struct
     uint8_t eapol_message_mask; /* aggregate bit0..bit3 = M1..M4 seen */
     uint8_t pmkid_count;
     uint8_t valid_pair_count;
+    uint8_t client_count; /* unique stations seen exchanging data with the target BSSID */
+    uint16_t deauth_count; /* deauthentication frames declaring the target BSSID */
     bool complete;
     bool hash22000_saved;
     bool has_beacon;
@@ -265,7 +267,7 @@ esp_err_t poom_pcap_manager_wifi_stop_monitor_mode(void);
  * This starts the PCAP manager in AUTO output mode and registers an internal
  * promiscuous callback that writes 802.11 frames into the capture buffer.
  *
- * @param[in] channel Primary WiFi channel (1..13). Pass 0 to keep current.
+ * @param[in] channel Primary WiFi channel supported by the active target. Pass 0 to keep current.
  * @param[in] filter_mask Hardware filter mask (e.g. `WIFI_PROMIS_FILTER_MASK_ALL`).
  * @return ESP_OK on success, otherwise an ESP error code.
  */
@@ -274,7 +276,7 @@ esp_err_t poom_pcap_manager_sniffer_start_wifi(uint8_t channel, uint32_t filter_
 /**
  * @brief Starts a WiFi PCAP sniffer session with a capture filter mode.
  *
- * @param[in] channel Primary WiFi channel (1..13). Pass 0 to keep current.
+ * @param[in] channel Primary WiFi channel supported by the active target. Pass 0 to keep current.
  * @param[in] filter_mask Hardware filter mask (e.g. `WIFI_PROMIS_FILTER_MASK_ALL`).
  * @param[in] capture_mode Software capture filter mode.
  * @return ESP_OK on success, otherwise an ESP error code.
@@ -282,6 +284,33 @@ esp_err_t poom_pcap_manager_sniffer_start_wifi(uint8_t channel, uint32_t filter_
 esp_err_t poom_pcap_manager_sniffer_start_wifi_capture(uint8_t channel,
                                                        uint32_t filter_mask,
                                                        poom_pcap_wifi_capture_t capture_mode);
+
+/**
+ * @brief Starts handshake capture locked to one AP BSSID.
+ *
+ * Frames from other APs on the same channel may still be stored in the PCAP,
+ * but only the selected BSSID contributes to handshake status and hash export.
+ */
+esp_err_t poom_pcap_manager_sniffer_start_wifi_capture_target(uint8_t channel,
+                                                              uint32_t filter_mask,
+                                                              const uint8_t target_bssid[6]);
+
+/**
+ * @brief Retarget an open handshake PCAP without creating another PCAP file.
+ *
+ * Finalizes the previous target's hash metadata, resets target-specific state,
+ * changes channel, and resumes the same PCAP session for @p target_bssid.
+ */
+esp_err_t poom_pcap_manager_sniffer_retarget_wifi_handshake(uint8_t channel,
+                                                            uint32_t filter_mask,
+                                                            const uint8_t target_bssid[6]);
+
+/**
+ * @brief Pause radio monitoring while preserving an open handshake PCAP.
+ *
+ * A later retarget call resumes monitor mode into the same file.
+ */
+esp_err_t poom_pcap_manager_sniffer_pause_wifi_handshake(void);
 
 /**
  * @brief Starts a BLE PCAP sniffer session (auto output) using `poom_ble_scan`.

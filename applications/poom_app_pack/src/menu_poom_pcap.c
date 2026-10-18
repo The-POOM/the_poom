@@ -28,9 +28,22 @@
 #define MENU_POOM_PCAP_ZB_CH_MAX (26U)
 #define MENU_POOM_PCAP_ZB_CH_DEFAULT (11U)
 #define MENU_POOM_PCAP_ZB_CH_HOP (0U)
-#define MENU_POOM_PCAP_WIFI_CH_MIN (POOM_WIFI_CTRL_WIFI_CHANNEL_MIN)
-#define MENU_POOM_PCAP_WIFI_CH_MAX (POOM_WIFI_CTRL_WIFI_CHANNEL_MAX)
 #define MENU_POOM_PCAP_WIFI_CH_DEFAULT (6U)
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+static const uint8_t s_menu_poom_pcap_wifi_channels[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165,
+};
+#else
+static const uint8_t s_menu_poom_pcap_wifi_channels[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+};
+#endif
+#define MENU_POOM_PCAP_WIFI_CH_COUNT \
+    (sizeof(s_menu_poom_pcap_wifi_channels) / sizeof(s_menu_poom_pcap_wifi_channels[0]))
 
 #define HEADER_H (11)
 #define BOX_Y (12)
@@ -99,6 +112,32 @@ static void menu_poom_pcap_request_render_from_input_(void)
  *
  * @return void
  */
+static uint8_t menu_poom_pcap_wifi_step_channel_(int direction)
+{
+    size_t index = 0U;
+
+    for(; index < MENU_POOM_PCAP_WIFI_CH_COUNT; ++index)
+    {
+        if(s_menu_poom_pcap_wifi_channels[index] == s_menu_poom_pcap_wifi_channel)
+        {
+            break;
+        }
+    }
+    if(index == MENU_POOM_PCAP_WIFI_CH_COUNT)
+    {
+        return MENU_POOM_PCAP_WIFI_CH_DEFAULT;
+    }
+    if(direction > 0)
+    {
+        index = (index + 1U) % MENU_POOM_PCAP_WIFI_CH_COUNT;
+    }
+    else
+    {
+        index = (index == 0U) ? (MENU_POOM_PCAP_WIFI_CH_COUNT - 1U) : (index - 1U);
+    }
+    return s_menu_poom_pcap_wifi_channels[index];
+}
+
 static void menu_poom_pcap_draw_header_(void)
 {
     poom_arduboy_set_cursor(26, 2);
@@ -537,7 +576,7 @@ static esp_err_t menu_poom_pcap_start_capture_(void)
             filter_mask = WIFI_PROMIS_FILTER_MASK_DATA;
         }
 
-        if ((s_menu_poom_pcap_wifi_channel < MENU_POOM_PCAP_WIFI_CH_MIN) || (s_menu_poom_pcap_wifi_channel > MENU_POOM_PCAP_WIFI_CH_MAX))
+        if(!poom_wifi_ctrl_channel_is_valid(s_menu_poom_pcap_wifi_channel))
         {
             s_menu_poom_pcap_wifi_channel = MENU_POOM_PCAP_WIFI_CH_DEFAULT;
         }
@@ -724,27 +763,13 @@ static void menu_poom_pcap_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx
         }
         if (button_msg.button == BUTTON_UP)
         {
-            if (s_menu_poom_pcap_wifi_channel <= MENU_POOM_PCAP_WIFI_CH_MIN)
-            {
-                s_menu_poom_pcap_wifi_channel = MENU_POOM_PCAP_WIFI_CH_MAX;
-            }
-            else
-            {
-                s_menu_poom_pcap_wifi_channel--;
-            }
+            s_menu_poom_pcap_wifi_channel = menu_poom_pcap_wifi_step_channel_(-1);
             menu_poom_pcap_request_render_from_input_();
             return;
         }
         if (button_msg.button == BUTTON_DOWN)
         {
-            if (s_menu_poom_pcap_wifi_channel >= MENU_POOM_PCAP_WIFI_CH_MAX)
-            {
-                s_menu_poom_pcap_wifi_channel = MENU_POOM_PCAP_WIFI_CH_MIN;
-            }
-            else
-            {
-                s_menu_poom_pcap_wifi_channel++;
-            }
+            s_menu_poom_pcap_wifi_channel = menu_poom_pcap_wifi_step_channel_(1);
             menu_poom_pcap_request_render_from_input_();
             return;
         }
