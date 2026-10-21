@@ -18,7 +18,8 @@ Community additions for POOM firmware 1.0.13 (ESP32-C5).
 - **OUI identification:** manufacturer/vendor lookup from the bundled OUI database for supported, globally assigned MAC addresses. Randomised/private MAC addresses cannot reliably identify a manufacturer.
 - **MAC/OUI display toggle:** LEFT switches detector list entries between a friendly name/vendor (OUI) view and the raw MAC/BSSID view, with on-screen hints such as `L:MAC` and `L:OUI`.
 - Device aliases and client actions from the detector interface.
-- Targeted and multi-client deauthentication controls for authorised testing. These may interrupt network connectivity.
+- **Select exactly which clients are included:** in **WiFi Detect → AP Clients**, use **RIGHT** to tag or untag individual clients, building a selected set instead of affecting every connected device. **LEFT** independently toggles the MAC/OUI display mode.
+- **Deliberate start control:** with clients tagged, **long-press A** on the client list to launch the selected-client deauthentication action; a normal A tap opens the selected client's details instead. Targeted and multi-client deauthentication can interrupt network connectivity and must only be used on authorised networks.
 
 ### BLE detection
 - Name/OUI versus raw MAC address list views (**LEFT** to toggle), aliases, and an entry point to BLE Fox Hunt.
