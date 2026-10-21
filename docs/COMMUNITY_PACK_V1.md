@@ -40,5 +40,4 @@ Community additions for POOM firmware 1.0.13 (ESP32-C5).
 
 - The manufacturer/OUI lookup table is large (~57,540 source lines), contributing significantly to code size and diff size. It may merit a separate data-generation or compression approach in future.
 - Deauthentication is disruptive; restrict use to authorised environments and applicable laws.
-- No personal Sony TV remote application, Net Guardian experiment, Wardrive experiment, or local development notes are included.
 - This is a combined community contribution; maintainers may prefer to split it into smaller PRs for review.
