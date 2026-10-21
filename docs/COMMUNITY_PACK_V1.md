@@ -31,7 +31,9 @@ Community additions for POOM firmware 1.0.13 (ESP32-C5).
 
 ### Interface and input
 - **Rearrange menu entries** separately within the POOM categories (Beast, Zen, Gamer, Maker and Settings). The custom order is saved in NVS and persists across restarts. Use RIGHT to enter move mode in a submenu, UP/DOWN to reposition an item, A to save or B to cancel. Settings also provides `MOVE MENU` to select a category and `RESET ORDER` to restore defaults (with confirmation).
-- Menu navigation, keyboard and buzzer improvements.
+- **Menu navigation:** per-category menu rearranging is available directly from a submenu with RIGHT to enter move mode; the Settings menu also exposes a category picker and a confirmed reset to default order.
+- **On-screen keyboard:** LEFT/RIGHT navigation wraps at the end of a row; UP/DOWN moves to the nearest key in the adjacent row. Press UP from the top keyboard row to focus the text field, then LEFT/RIGHT to position the insertion cursor and DOWN to return to the keys. Insert or backspace characters within existing text instead of only at the end. Long entries scroll horizontally to keep the cursor visible; the numeric/symbol layout also includes `:` for addresses and similar input.
+- **Buzzer/audio:** added a `buzzer_set_volume(percent)` PWM-duty control (0–100%, with 0 silent) so Fox Hunt can offer adjustable audible feedback. This is a driver-level capability used by Fox Hunt, **not** a new system-wide volume settings menu.
 - Contextual controls and more consistent detector-to-hunt navigation.
 
 ## Build and testing
