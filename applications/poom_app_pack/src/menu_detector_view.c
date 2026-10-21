@@ -189,9 +189,10 @@ void menu_detector_view_draw_list_actions(const char *title,
     poom_arduboy_display();
 }
 
-void menu_detector_view_draw_detail(const char *const lines[5],
-                                    int selected_index,
-                                    int count)
+void menu_detector_view_draw_detail_actions(const char *const lines[5],
+                                            int selected_index,
+                                            int count,
+                                            const char *action)
 {
     int i;
     char index_line[24];
@@ -212,8 +213,13 @@ void menu_detector_view_draw_detail(const char *const lines[5],
     }
 
     poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print(F("A:NAME"));
+    (void)poom_arduboy_print((action != NULL) ? action : "A:NAME");
     poom_arduboy_set_cursor(72, 56);
     (void)poom_arduboy_print(F("B:BACK"));
     poom_arduboy_display();
+}
+
+void menu_detector_view_draw_detail(const char *const lines[5], int selected_index, int count)
+{
+    menu_detector_view_draw_detail_actions(lines, selected_index, count, "A:NAME");
 }

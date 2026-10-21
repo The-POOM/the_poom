@@ -33,6 +33,7 @@ typedef struct
 } buzzer_state_t;
 
 static buzzer_state_t s_buzzer = {0};
+static uint32_t s_buzzer_duty = BUZZER_DUTY_HALF_SCALE;
 
 /**
  * @brief Disable PWM output for the configured buzzer channel.
@@ -64,6 +65,7 @@ void buzzer_init(uint8_t pin)
     s_buzzer.pin = pin;
     s_buzzer.enabled = true;
     s_buzzer.initialized = true;
+    s_buzzer_duty = BUZZER_DUTY_HALF_SCALE;
 
     (void)ledc_timer_config(&timer);
     (void)ledc_channel_config(&channel);
@@ -75,16 +77,25 @@ void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms)
     {
         return;
     }
-    if ((freq_hz == 0U) || (duration_ms == 0U))
+    if ((freq_hz == 0U) || (duration_ms == 0U) || (s_buzzer_duty == 0U))
     {
         buzzer_stop_();
         return;
     }
 
     (void)ledc_set_freq(BUZZER_LEDC_MODE, BUZZER_LEDC_TIMER, freq_hz);
-    (void)ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, BUZZER_DUTY_HALF_SCALE);
+    (void)ledc_set_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL, s_buzzer_duty);
     (void)ledc_update_duty(BUZZER_LEDC_MODE, BUZZER_LEDC_CHANNEL);
 
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
     buzzer_stop_();
+}
+
+void buzzer_set_volume(uint8_t percent)
+{
+    if (percent > 100U)
+    {
+        percent = 100U;
+    }
+    s_buzzer_duty = (BUZZER_DUTY_HALF_SCALE * (uint32_t)percent) / 100U;
 }

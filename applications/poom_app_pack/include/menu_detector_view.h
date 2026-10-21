@@ -44,6 +44,8 @@ void menu_detector_view_draw_list_actions(const char *title,
                                           int scroll,
                                           const char *select_action,
                                           const char *back_action);
+void menu_detector_view_draw_detail_actions(const char *const lines[5], int selected_index, int count, const char *action);
+
 void menu_detector_view_draw_detail(const char *const lines[5],
                                     int selected_index,
                                     int count);

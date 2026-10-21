@@ -2,6 +2,12 @@ file(GLOB POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/*.c"
 )
 
+list(REMOVE_ITEM POOM_APP_PACK_SRCS
+    "${COMPONENT_DIR}/src/menu_sony_tv.c"
+    "${COMPONENT_DIR}/src/menu_wardrive.c"
+    "${COMPONENT_DIR}/src/menu_netguard.c"
+)
+
 list(APPEND POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/menu_tv_off.c"
 )
@@ -22,6 +28,7 @@ list(REMOVE_DUPLICATES POOM_APP_PACK_SRCS)
 
 set(POOM_APP_PACK_REQUIRES
     app_update
+    nvs_flash
     button_driver
     buzzer
     cjson
@@ -38,6 +45,7 @@ set(POOM_APP_PACK_REQUIRES
     poom_motion_midi
     poom_ble_keyboard
     poom_ble_plot
+    poom_ble_gatt_client
     poom_ble_scan
     poom_ble_spam
     poom_ble_tracker
