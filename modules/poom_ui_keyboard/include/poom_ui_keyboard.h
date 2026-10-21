@@ -46,6 +46,12 @@ typedef struct
     /** @brief Current length of `text` not including the NUL terminator. */
     size_t text_len;
 
+    /** @brief Text-cursor / insertion index within `text` [0..text_len]. */
+    size_t cursor;
+    /** @brief When true, LEFT/RIGHT move the text cursor (address bar focused)
+     *         instead of navigating the on-screen keys; DOWN returns to keys. */
+    bool field_focused;
+
     /** @brief Alpha-mode caps toggle. */
     bool caps;
     /** @brief When true, use numeric/symbol layout. */

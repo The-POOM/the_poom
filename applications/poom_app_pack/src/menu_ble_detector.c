@@ -16,6 +16,8 @@
 #include "freertos/task.h"
 #include "input_events.h"
 #include "menu_detector_view.h"
+#include "menu_fox_hunt.h"
+#include "menu_wifi_detector_oui.h"
 #include "poom_ble_detector.h"
 #include "poom_sbus.h"
 #include "poom_secrets_store.h"
@@ -60,9 +62,14 @@ static int s_selected_index;
 static int s_scroll;
 static int s_filter_index;
 static int s_detail_index = -1;
+/* LEFT toggles the whole discovery list between labels and MAC addresses. */
+static bool s_show_mac_list;
 static menu_ble_detector_screen_t s_screen = MENU_BLE_DETECTOR_SCREEN_SELECT;
 static volatile bool s_active;
 static bool s_exit_requested;
+static bool s_hunt_launch;
+static uint8_t s_hunt_address[6];
+static char s_hunt_name[MENU_DETECTOR_VIEW_NAME_LEN];
 static bool s_start_requested;
 static bool s_scan_dirty;
 static bool s_input_dirty;
@@ -448,20 +455,52 @@ static void menu_ble_detector_render_scan_(void)
     portENTER_CRITICAL(&s_records_lock);
     for(i = 0; i < count; ++i)
     {
+        char mac_label[18];
+        const char *display_name = s_names[i];
+        const uint8_t *address = s_records[i]->mac_address;
+        if(!s_show_mac_list &&
+           ((display_name[0] == '\0') || (strcmp(display_name, "UNKNOWN") == 0)))
+        {
+            const char *vendor = NULL;
+            if(menu_wifi_detector_oui_is_random(address))
+            {
+                display_name = "PRIVATE";
+            }
+            else
+            {
+                vendor = menu_wifi_detector_oui_vendor(address);
+                if((vendor == NULL) && (s_records[i]->vendor[0] != '\0') &&
+                   (strcmp(s_records[i]->vendor, "UNKNOWN") != 0))
+                {
+                    vendor = s_records[i]->vendor;
+                }
+                display_name = (vendor != NULL) ? vendor : "UNKNOWN";
+            }
+        }
+        if(s_show_mac_list)
+        {
+            const uint8_t *mac = s_records[i]->mac_address;
+            (void)snprintf(mac_label, sizeof(mac_label),
+                           "%02X:%02X:%02X:%02X:%02X:%02X",
+                           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            display_name = mac_label;
+        }
         menu_ble_detector_format_row_(rows[i].name,
                                       sizeof(rows[i].name),
-                                      s_names[i],
+                                      display_name,
                                       i == s_selected_index);
         rows[i].rssi = s_records[i]->rssi;
         rows[i].rssi_known = true;
     }
     portEXIT_CRITICAL(&s_records_lock);
-    menu_detector_view_draw_list(poom_ble_detector_filter_label(
-                                     (poom_ble_detector_filter_t)s_filter_index),
-                                 rows,
-                                 count,
-                                 s_selected_index,
-                                 s_scroll);
+    menu_detector_view_draw_list_actions(
+        poom_ble_detector_filter_label((poom_ble_detector_filter_t)s_filter_index),
+        rows,
+        count,
+        s_selected_index,
+        s_scroll,
+        s_show_mac_list ? "A:SEL L:OUI" : "A:SEL L:MAC",
+        "B:EXIT");
 }
 
 static bool menu_ble_detector_record_snapshot_(int index,
@@ -510,11 +549,32 @@ static void menu_ble_detector_render_detail_(void)
                    poom_detect_confidence_label(record.confidence));
     (void)snprintf(line2, sizeof(line2), "d=%.2fm", (double)record.distance_m);
     (void)snprintf(line3, sizeof(line3), "RSSI=%ddBm", record.rssi);
-    (void)snprintf(line4,
-                   sizeof(line4),
-                   "MAC:%02X:%02X:%02X:%02X:%02X:%02X",
-                   record.mac_address[0], record.mac_address[1], record.mac_address[2],
-                   record.mac_address[3], record.mac_address[4], record.mac_address[5]);
+    if(s_show_mac_list)
+    {
+        (void)snprintf(line4, sizeof(line4),
+                       "MAC:%02X:%02X:%02X:%02X:%02X:%02X",
+                       record.mac_address[0], record.mac_address[1], record.mac_address[2],
+                       record.mac_address[3], record.mac_address[4], record.mac_address[5]);
+    }
+    else
+    {
+        const char *vendor = NULL;
+        if(menu_wifi_detector_oui_is_random(record.mac_address))
+        {
+            vendor = "PRIVATE";
+        }
+        else
+        {
+            vendor = menu_wifi_detector_oui_vendor(record.mac_address);
+            if((vendor == NULL) && (record.vendor[0] != '\0') &&
+               (strcmp(record.vendor, "UNKNOWN") != 0))
+            {
+                vendor = record.vendor;
+            }
+        }
+        (void)snprintf(line4, sizeof(line4), "OUI:%.17s",
+                       (vendor != NULL) ? vendor : "UNKNOWN");
+    }
     menu_detector_view_draw_detail(lines, s_detail_index, count);
 }
 
@@ -605,7 +665,18 @@ static void menu_ble_detector_cleanup_(void)
     }
     menu_ble_detector_free_();
     s_task = NULL;
-    (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    /* Let the detector task fully relinquish its BLE scan and callbacks
+     * before Fox Hunt registers its own scanner. */
+    if(s_hunt_launch)
+    {
+        s_hunt_launch = false;
+        vTaskDelay(pdMS_TO_TICKS(100U));
+        app_fox_hunt_ble_device(s_hunt_address, s_hunt_name);
+    }
+    else
+    {
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    }
 }
 
 static void menu_ble_detector_task_(void *arg)
@@ -752,6 +823,24 @@ static void menu_ble_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_
             menu_ble_detector_reset_text_scroll_();
             s_input_dirty = true;
         }
+        else if(event.button == BUTTON_LEFT)
+        {
+            s_show_mac_list = !s_show_mac_list;
+            s_input_dirty = true;
+        }
+        else if(event.button == BUTTON_RIGHT)
+        {
+            poom_ble_detector_record_t record;
+            char name[MENU_DETECTOR_VIEW_NAME_LEN];
+            int count;
+            if(menu_ble_detector_record_snapshot_(s_detail_index, &record, name, &count))
+            {
+                (void)memcpy(s_hunt_address, record.mac_address, sizeof(s_hunt_address));
+                (void)snprintf(s_hunt_name, sizeof(s_hunt_name), "%.23s", name);
+                s_hunt_launch = true;
+                s_exit_requested = true;
+            }
+        }
         else if(event.button == BUTTON_A)
         {
             menu_ble_detector_enter_alias_();
@@ -771,6 +860,12 @@ static void menu_ble_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_
     if(event.button == BUTTON_B)
     {
         s_exit_requested = true;
+    }
+    else if(event.button == BUTTON_LEFT)
+    {
+        s_show_mac_list = !s_show_mac_list;
+        menu_ble_detector_reset_text_scroll_();
+        s_input_dirty = true;
     }
     else if((event.button == BUTTON_UP) && (s_selected_index > 0))
     {
@@ -816,6 +911,7 @@ void menu_ble_detector_show(void)
     s_detail_index = -1;
     s_screen = MENU_BLE_DETECTOR_SCREEN_SELECT;
     s_exit_requested = false;
+    s_hunt_launch = false;
     s_start_requested = false;
     s_scan_dirty = false;
     s_input_dirty = true;

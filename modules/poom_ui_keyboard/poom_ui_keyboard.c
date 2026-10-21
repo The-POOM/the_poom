@@ -127,7 +127,7 @@ static const poom_ui_kb_key_t s_kb_num_row1[] = {
     {POOM_UI_KB_KEY_CHAR, '#', NULL, 1},
     {POOM_UI_KB_KEY_CHAR, '$', NULL, 1},
     {POOM_UI_KB_KEY_CHAR, '%', NULL, 1},
-    {POOM_UI_KB_KEY_CHAR, '^', NULL, 1},
+    {POOM_UI_KB_KEY_CHAR, ':', NULL, 1},
     {POOM_UI_KB_KEY_CHAR, '&', NULL, 1},
     {POOM_UI_KB_KEY_CHAR, '*', NULL, 1},
     {POOM_UI_KB_KEY_CHAR, '.', NULL, 1},
@@ -255,8 +255,19 @@ static void poom_ui_keyboard_insert_char_(poom_ui_keyboard_t *kb, char ch)
         return;
     }
 
-    kb->text[kb->text_len] = ch;
+    if(kb->cursor > kb->text_len)
+    {
+        kb->cursor = kb->text_len;
+    }
+
+    /* Insert at the cursor, shifting the tail right by one. */
+    for(size_t i = kb->text_len; i > kb->cursor; i--)
+    {
+        kb->text[i] = kb->text[i - 1U];
+    }
+    kb->text[kb->cursor] = ch;
     kb->text_len++;
+    kb->cursor++;
     kb->text[kb->text_len] = '\0';
 }
 
@@ -273,12 +284,18 @@ static void poom_ui_keyboard_backspace_(poom_ui_keyboard_t *kb)
         return;
     }
 
-    if(kb->text_len == 0U)
+    if((kb->text_len == 0U) || (kb->cursor == 0U))
     {
         return;
     }
 
+    /* Delete the character left of the cursor, shifting the tail left. */
+    for(size_t i = kb->cursor - 1U; i < (kb->text_len - 1U); i++)
+    {
+        kb->text[i] = kb->text[i + 1U];
+    }
     kb->text_len--;
+    kb->cursor--;
     kb->text[kb->text_len] = '\0';
 }
 
@@ -297,12 +314,14 @@ void poom_ui_keyboard_init(poom_ui_keyboard_t *kb, char *text, size_t text_cap, 
     kb->numeric = false;
     kb->sel_row = 0U;
     kb->sel_key = 0U;
+    kb->field_focused = false;
 
     if((kb->text != NULL) && (kb->text_cap > 0U))
     {
         kb->text[kb->text_cap - 1U] = '\0';
         kb->text_len = strnlen(kb->text, kb->text_cap - 1U);
     }
+    kb->cursor = kb->text_len;
 }
 
 void poom_ui_keyboard_set_target_label(poom_ui_keyboard_t *kb, const char *target_label)
@@ -324,6 +343,7 @@ void poom_ui_keyboard_clear_text(poom_ui_keyboard_t *kb)
 
     kb->text[0] = '\0';
     kb->text_len = 0U;
+    kb->cursor = 0U;
 }
 
 /**
@@ -376,22 +396,51 @@ poom_ui_keyboard_action_t poom_ui_keyboard_handle_button(poom_ui_keyboard_t *kb,
         kb->sel_key = (uint8_t)(row.key_count - 1U);
     }
 
+    if(kb->cursor > kb->text_len)
+    {
+        kb->cursor = kb->text_len;
+    }
+
+    /* Address-bar focus: LEFT/RIGHT move the text cursor, DOWN returns to keys. */
+    if(kb->field_focused)
+    {
+        if(button == BTN_LEFT)
+        {
+            if(kb->cursor > 0U)
+            {
+                kb->cursor--;
+            }
+        }
+        else if(button == BTN_RIGHT)
+        {
+            if(kb->cursor < kb->text_len)
+            {
+                kb->cursor++;
+            }
+        }
+        else if(button == BTN_DOWN)
+        {
+            kb->field_focused = false;
+        }
+        return action;
+    }
+
     if(button == BTN_LEFT)
     {
-        if(kb->sel_key > 0U)
-        {
-            kb->sel_key--;
-        }
+        kb->sel_key = (kb->sel_key == 0U) ? (uint8_t)(row.key_count - 1U) : (uint8_t)(kb->sel_key - 1U);
     }
     else if(button == BTN_RIGHT)
     {
-        if(kb->sel_key + 1U < row.key_count)
-        {
-            kb->sel_key++;
-        }
+        kb->sel_key = (uint8_t)((kb->sel_key + 1U) % row.key_count);
     }
     else if((button == BTN_UP) || (button == BTN_DOWN))
     {
+        if((button == BTN_UP) && (kb->sel_row == 0U))
+        {
+            kb->field_focused = true;   /* move focus up into the address bar */
+            return action;
+        }
+
         const uint16_t x_cols = poom_ui_keyboard_key_x_cols_(&row, kb->sel_key);
         const uint16_t w_cols = row.keys[kb->sel_key].w_cols;
         const uint16_t x_center_px =
@@ -433,8 +482,7 @@ poom_ui_keyboard_action_t poom_ui_keyboard_handle_button(poom_ui_keyboard_t *kb,
                 {
                     kb->caps = false;
                 }
-                kb->sel_row = 0U;
-                kb->sel_key = 0U;
+                /* ABC/123 occupies the same key position in either layout. */
                 break;
             case POOM_UI_KB_KEY_SPACE:
                 poom_ui_keyboard_insert_char_(kb, ' ');
@@ -537,26 +585,54 @@ void poom_ui_keyboard_draw(const poom_ui_keyboard_t *kb)
 
     poom_arduboy_draw_rect(4, 10, 120, 10, WHITE);
     (void)memset(pass_view, 0, sizeof(pass_view));
-    if((kb != NULL) && (kb->text != NULL))
     {
-        const size_t max_visible = 18U;
-        if(kb->text_len > max_visible)
+        const size_t win = 18U;
+        size_t len = ((kb != NULL) && (kb->text != NULL)) ? kb->text_len : 0U;
+        size_t cur = (kb != NULL) ? kb->cursor : 0U;
+        size_t start = 0U;
+        size_t shown;
+
+        if(cur > len)
         {
-            const size_t tail = max_visible - 3U;
-            const size_t start = kb->text_len - tail;
-            (void)snprintf(pass_view, sizeof(pass_view), "...%.*s_", (int)tail, &kb->text[start]);
+            cur = len;
         }
-        else
+        if(len > win)
         {
-            (void)snprintf(pass_view, sizeof(pass_view), "%s_", kb->text);
+            /* Scroll so the cursor stays visible within the window. */
+            if(cur > (win - 1U))
+            {
+                start = cur - (win - 1U);
+            }
+            if(start > (len - win))
+            {
+                start = len - win;
+            }
+        }
+        shown = len - start;
+        if(shown > win)
+        {
+            shown = win;
+        }
+
+        if((kb != NULL) && (kb->text != NULL))
+        {
+            (void)snprintf(pass_view, sizeof(pass_view), "%.*s", (int)shown, &kb->text[start]);
+        }
+        poom_arduboy_set_cursor(6, 12);
+        (void)poom_arduboy_print(pass_view);
+
+        /* Caret: 1px vertical bar at the insertion point. */
+        {
+            const int16_t caret_x = (int16_t)(6 + (int16_t)(cur - start) * 6);
+            poom_arduboy_fill_rect(caret_x, 11, 1, 8, WHITE);
+        }
+
+        /* Highlight the whole address bar while it is focused for editing. */
+        if((kb != NULL) && kb->field_focused)
+        {
+            poom_arduboy_fill_rect(4, 10, 120, 10, INVERT);
         }
     }
-    else
-    {
-        (void)snprintf(pass_view, sizeof(pass_view), "_");
-    }
-    poom_arduboy_set_cursor(6, 12);
-    (void)poom_arduboy_print(pass_view);
 
     const int16_t y0 = 22;
     poom_ui_keyboard_draw_key_row_(&layout.rows[0], y0, (kb != NULL && kb->sel_row == 0U) ? kb->sel_key : 255U,
@@ -573,9 +649,16 @@ void poom_ui_keyboard_draw(const poom_ui_keyboard_t *kb)
     poom_arduboy_draw_rect(0, 0, ARDUBOY_WIDTH, 55, WHITE);
 
     poom_arduboy_set_cursor(2, 56);
-    (void)poom_arduboy_print(F("A:SEL  B:BACK"));
-    poom_arduboy_set_cursor(92, 56);
-    (void)poom_arduboy_print(F("OK:GO"));
+    if((kb != NULL) && kb->field_focused)
+    {
+        (void)poom_arduboy_print(F("L/R:MOVE  DN:KEYS"));
+    }
+    else
+    {
+        (void)poom_arduboy_print(F("A:TYPE UP:EDIT"));
+        poom_arduboy_set_cursor(92, 56);
+        (void)poom_arduboy_print(F("OK:GO"));
+    }
 
     poom_arduboy_display();
 }

@@ -31,6 +31,17 @@ void buzzer_init(uint8_t pin);
  */
 void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms);
 
+/**
+ * @brief Set the output volume as a percentage of full drive.
+ *
+ * Scales the PWM duty cycle used by @ref buzzer_tone. 100 is the loudest
+ * (50%% duty); 0 is silent. Defaults to 100, and @ref buzzer_init resets
+ * it to 100, so callers that never touch volume are unaffected.
+ *
+ * @param percent Volume in the range 0..100 (values above 100 are clamped).
+ */
+void buzzer_set_volume(uint8_t percent);
+
 #ifdef __cplusplus
 }
 #endif
