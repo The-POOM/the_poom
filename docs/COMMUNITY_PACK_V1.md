@@ -13,6 +13,12 @@ Community additions for POOM firmware 1.0.13 (ESP32-C5).
 - **Wi-Fi client hunt controls (authorised testing only):** Hold A and press UP to toggle continuous deauthentication; hold A and press DOWN for a one-off burst. These controls do not apply to BLE hunting. In a BLE hunt, A is a modifier but its deauthentication combinations have no action.
 - Wi-Fi client hunting includes optional manual bursts and a continuous deauthentication option intended **only for networks and devices you own or are explicitly authorised to test**.
 
+### Why hunt a Wi-Fi client from Wi-Fi Detect?
+
+Wi-Fi Detect helps identify clients associated with an access point; Fox Hunt uses RSSI feedback to help physically locate a selected device. Launching a client hunt directly from its detector entry avoids searching for and selecting the same client again.
+
+Possible uses on networks you own or are authorised to investigate include locating misplaced devices, matching an identified client to a physical device, and troubleshooting wireless coverage or connectivity. Wi-Fi clients may transmit infrequently, so optional traffic-generation controls are provided for authorised testing; they are off by default and can interrupt connectivity.
+
 ### Wi-Fi detection and client inspection
 - Access-point client discovery and selection, with device detail and client-hunt hand-off.
 - **OUI identification:** manufacturer/vendor lookup from the bundled OUI database for supported, globally assigned MAC addresses. Randomised/private MAC addresses cannot reliably identify a manufacturer.
