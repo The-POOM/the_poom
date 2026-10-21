@@ -9,22 +9,27 @@ Community additions for POOM firmware 1.0.13 (ESP32-C5).
 - Signal-strength heat levels, trends, LED colour and audible feedback.
 - Adjustable LED brightness and audio volume, with preferences saved locally.
 - Target selection by discovered device; navigation into hunts from the Wi-Fi and BLE detector screens.
+- **Fox Hunt controls:** UP/DOWN navigate lists and A selects; B returns/back (or cancels an active Wi-Fi scan). On target lists LEFT toggles between device name/OUI identification and the raw MAC address. During an active hunt UP/DOWN adjust audio volume and LEFT/RIGHT adjust LED brightness in 20% increments. Audio/LED levels are also configurable from Fox Hunt > OPTIONS and saved locally.
+- **Wi-Fi client hunt controls (authorised testing only):** Hold A and press UP to toggle continuous deauthentication; hold A and press DOWN for a one-off burst. These controls do not apply to BLE hunting. In a BLE hunt, A is a modifier but its deauthentication combinations have no action.
 - Wi-Fi client hunting includes optional manual bursts and a continuous deauthentication option intended **only for networks and devices you own or are explicitly authorised to test**.
 
 ### Wi-Fi detection and client inspection
 - Access-point client discovery and selection, with device detail and client-hunt hand-off.
-- Device name/SSID versus MAC/BSSID display modes; manufacturer lookup via the bundled OUI database.
+- **OUI identification:** manufacturer/vendor lookup from the bundled OUI database for supported, globally assigned MAC addresses. Randomised/private MAC addresses cannot reliably identify a manufacturer.
+- **MAC/OUI display toggle:** LEFT switches detector list entries between a friendly name/vendor (OUI) view and the raw MAC/BSSID view, with on-screen hints such as `L:MAC` and `L:OUI`.
 - Device aliases and client actions from the detector interface.
 - Targeted and multi-client deauthentication controls for authorised testing. These may interrupt network connectivity.
 
 ### BLE detection
-- Name versus MAC address views, aliases, and an entry point to BLE Fox Hunt.
+- Name/OUI versus raw MAC address list views (**LEFT** to toggle), aliases, and an entry point to BLE Fox Hunt.
+- **BLE detector controls:** UP/DOWN select a device, A opens its details, RIGHT on the detail screen starts a hunt for that BLE target, and B goes back. In the BLE detail view, LEFT toggles the displayed identification mode and A opens alias editing.
 
 ### Wi-Fi profiles
 - Save, select, connect to and delete multiple locally stored Wi-Fi profiles, using the firmware's existing secrets-store facilities.
 - Wi-Fi credentials are not embedded in the contributed source files.
 
 ### Interface and input
+- **Rearrange menu entries** separately within the POOM categories (Beast, Zen, Gamer, Maker and Settings). The custom order is saved in NVS and persists across restarts. Use RIGHT to enter move mode in a submenu, UP/DOWN to reposition an item, A to save or B to cancel. Settings also provides `MOVE MENU` to select a category and `RESET ORDER` to restore defaults (with confirmation).
 - Menu navigation, keyboard and buzzer improvements.
 - Contextual controls and more consistent detector-to-hunt navigation.
 
