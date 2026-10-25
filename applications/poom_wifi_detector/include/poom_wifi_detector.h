@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "esp_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,11 @@ esp_err_t poom_wifi_detector_scan_channel(poom_wifi_detector_filter_t filter,
                                           poom_wifi_detector_record_t *const *out_records,
                                           size_t capacity,
                                           size_t *out_count);
+
+/** Classifies one already-scanned AP using the shared Flock/ALPR/camera rules.
+ * This copies only into caller storage and has no persistent allocation. */
+void poom_wifi_detector_classify_ap(const wifi_ap_record_t *ap,
+                                    poom_wifi_detector_record_t *out_record);
 
 /**
  * Starts passive promiscuous monitoring for a classified detector filter.

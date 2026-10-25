@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "Arduboy2.h"
@@ -13,6 +14,7 @@
 #include "button_driver.h"
 #include "buzzer.h"
 #include "esp_gap_ble_api.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -26,6 +28,7 @@
 #include "menu_ble_detector.h"
 #include "menu_wifi_detector_oui.h"
 #include "poom_ble_scan.h"
+#include "poom_ble_detector.h"
 #include "poom_led_rainbow.h"
 #include "poom_sbus.h"
 #include "poom_wifi_attacks.h"
@@ -125,6 +128,9 @@ static const char *const s_main_items[] = {
 
 #define FOX_VISIBLE_ROWS (4)
 #define FOX_LIST_MAX     (16)
+#define FOX_LIST_LABEL_CHARS (13U)
+#define FOX_LIST_SCROLL_MS   (350U)
+#define FOX_LIST_SCROLL_GAP  (3U)
 
 typedef struct
 {
@@ -165,7 +171,8 @@ static volatile bool s_back_pressed;
 static volatile bool s_reset_peak_requested;
 static volatile bool s_wifi_scanning;  /* true while a blocking AP scan runs. */
 static volatile bool s_scan_cancelled; /* B pressed during that scan. */
-static int64_t s_ignore_back_until_us; /* swallow stray B after a scan cancel. */
+/* Do not turn a double B used to cancel a scan into an app exit. */
+static int64_t s_cancel_back_ignore_until_us;
 
 static int s_sel;
 static int s_scroll;
@@ -197,8 +204,24 @@ static void fox_preferences_save_(void)
 static char s_hud[16];
 static int64_t s_hud_until_us;
 
-/* device list (BLE or WiFi, depending on screen) */
-static fox_item_t s_list[FOX_LIST_MAX];
+/* Lists are only needed while Fox Hunt is open. Keep them off permanent
+ * internal RAM and put them in PSRAM when it is available. */
+typedef struct
+{
+    fox_item_t list[FOX_LIST_MAX];
+    poom_wifi_detector_record_t cli_storage[FOX_CLI_CAP];
+    poom_wifi_detector_record_t *cli_ptrs[FOX_CLI_CAP];
+    fox_item_t cli_cache[FOX_LIST_MAX];
+    uint32_t list_selection_tick_ms;
+} fox_session_t;
+
+static fox_session_t *s_session = NULL;
+#define s_list        (s_session->list)
+#define s_cli_storage (s_session->cli_storage)
+#define s_cli_ptrs    (s_session->cli_ptrs)
+#define s_cli_cache   (s_session->cli_cache)
+#define s_list_selection_tick_ms (s_session->list_selection_tick_ms)
+
 static int s_list_count;
 
 /* hunt target */
@@ -220,12 +243,9 @@ static bool s_start_in_hunt;           /* launched straight into the hunt screen
 static bool s_return_to_detector;      /* launched from WIFI DETECT: B goes back there */
 static bool s_return_to_ble_detector;  /* launched from BLE DETECT */
 
-/* client discovery (AP -> clients) via the Wi-Fi detector passive monitor. */
-static poom_wifi_detector_record_t s_cli_storage[FOX_CLI_CAP];
-static poom_wifi_detector_record_t *s_cli_ptrs[FOX_CLI_CAP];
+/* Client discovery (AP -> clients) uses the session buffers above. */
 static bool s_monitor_on;
-/* cached client list so returning from a hunt is instant (no empty re-listen). */
-static fox_item_t s_cli_cache[FOX_LIST_MAX];
+/* Cached client list so returning from a hunt is instant (no empty re-listen). */
 static int s_cli_cache_count;
 static uint8_t s_cli_cache_ap[6];
 
@@ -245,6 +265,25 @@ static int s_led_level;
 static fox_radio_t s_radio;
 
 static void fox_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
+
+static bool fox_alloc_session_(void)
+{
+    if(s_session != NULL) return true;
+    s_session = heap_caps_calloc(1U, sizeof(*s_session),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(s_session == NULL) s_session = calloc(1U, sizeof(*s_session));
+    return (s_session != NULL);
+}
+
+static void fox_free_session_(void)
+{
+    if(s_session != NULL)
+    {
+        (void)memset(s_session, 0, sizeof(*s_session));
+        free(s_session);
+        s_session = NULL;
+    }
+}
 
 /* ======================================================================== */
 /* RSSI pipeline + hunt math                                                */
@@ -459,10 +498,31 @@ static void fox_ble_cb_(const esp_ble_gap_cb_param_t *scan_result)
         return;
     }
 
-    if (s_screen == SCR_BLE_LIST)
+    if(s_screen == SCR_BLE_LIST)
     {
         char name[20];
-        fox_ble_name_(scan_result, name, sizeof(name));
+        poom_ble_detector_record_t classified;
+        size_t adv_len = (size_t)scan_result->scan_rst.adv_data_len +
+                         (size_t)scan_result->scan_rst.scan_rsp_len;
+
+        if(adv_len > sizeof(scan_result->scan_rst.ble_adv))
+        {
+            adv_len = sizeof(scan_result->scan_rst.ble_adv);
+        }
+        if(poom_ble_detector_parse(scan_result->scan_rst.ble_adv,
+                                   adv_len,
+                                   scan_result->scan_rst.bda,
+                                   scan_result->scan_rst.rssi,
+                                   &classified) &&
+           (classified.device_class != POOM_BLE_DETECTOR_CLASS_UNKNOWN))
+        {
+            /* BLE DETECT owns the signatures; Fox Hunt only reuses its label. */
+            (void)snprintf(name, sizeof(name), "%.19s", classified.name);
+        }
+        else
+        {
+            fox_ble_name_(scan_result, name, sizeof(name));
+        }
         fox_list_add_ble_(scan_result->scan_rst.bda, scan_result->scan_rst.rssi, name);
     }
 }
@@ -699,7 +759,6 @@ static void fox_wifi_scan_list_(void)
         .show_hidden = true,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
     };
-    s_wifi_scanning = true;
     esp_err_t scan_rc = poom_wifi_scanner_scan_configured(&cfg);
     s_wifi_scanning = false;
     if (scan_rc != ESP_OK)
@@ -726,7 +785,17 @@ static void fox_wifi_scan_list_(void)
         it->rssi = recs->records[i].rssi;
         it->rssi_known = true;
         it->last_seen_us = esp_timer_get_time();
-        if (recs->records[i].ssid[0] != '\0')
+
+        /* Reuse WIFI DETECT's existing classification rules.  Manufacturer
+         * component OUIs are deliberately not presented as Flock devices. */
+        poom_wifi_detector_record_t classified;
+        poom_wifi_detector_classify_ap(&recs->records[i], &classified);
+        if((classified.device_class != POOM_WIFI_DETECTOR_CLASS_UNKNOWN) &&
+           (classified.device_class != POOM_WIFI_DETECTOR_CLASS_FLOCK_MANUFACTURER))
+        {
+            (void)snprintf(it->name, sizeof(it->name), "%.19s", classified.vendor);
+        }
+        else if(recs->records[i].ssid[0] != '\0')
         {
             (void)snprintf(it->name, sizeof(it->name), "%.19s",
                            (const char *)recs->records[i].ssid);
@@ -773,88 +842,116 @@ static void fox_wifi_hunt_poll_(void)
 /* Rendering                                                                */
 /* ======================================================================== */
 
+static int16_t fox_title_x_(const char *title)
+{
+    const size_t len = (title != NULL) ? strlen(title) : 0U;
+    const int width = (int)(len * 6U);
+    const int x = ((int)ARDUBOY_WIDTH - width) / 2;
+    return (int16_t)((x > 0) ? x : 0);
+}
+
+static void fox_draw_header_(const char *title)
+{
+    poom_arduboy_set_cursor(fox_title_x_(title), 2);
+    (void)poom_arduboy_print((title != NULL) ? title : "FOX HUNT");
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
+}
+
+static void fox_draw_footer_(const char *left, const char *right)
+{
+    if(left != NULL) { poom_arduboy_set_cursor(0, 56); (void)poom_arduboy_print(left); }
+    if(right != NULL) { poom_arduboy_set_cursor(72, 56); (void)poom_arduboy_print(right); }
+}
+
+static uint32_t fox_now_ms_(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000LL);
+}
+
+static void fox_format_list_label_(char *out, size_t out_len, const char *label,
+                                   bool selected)
+{
+    const size_t label_len = (label != NULL) ? strnlen(label, 19U) : 0U;
+    if((out == NULL) || (out_len == 0U)) return;
+    out[0] = '\0';
+    if(label == NULL) return;
+    if(!selected || (label_len <= FOX_LIST_LABEL_CHARS))
+    {
+        (void)snprintf(out, out_len, "%.*s", (int)FOX_LIST_LABEL_CHARS, label);
+        return;
+    }
+
+    const size_t cycle = label_len + FOX_LIST_SCROLL_GAP;
+    const size_t phase = (size_t)(((fox_now_ms_() - s_list_selection_tick_ms) /
+                                   FOX_LIST_SCROLL_MS) % cycle);
+    for(size_t i = 0U; (i < FOX_LIST_LABEL_CHARS) && (i + 1U < out_len); ++i)
+    {
+        const size_t src = (phase + i) % cycle;
+        out[i] = (src < label_len) ? label[src] : ' ';
+        out[i + 1U] = '\0';
+    }
+}
+
 static void fox_draw_list_(const char *title, const char *empty_hint)
 {
-    char row[22];
+    char title_line[22];
+    char name_line[16];
+    char rssi_line[10];
+    int max_scroll;
     int i;
 
+    (void)snprintf(title_line, sizeof(title_line), "%s%s", title, s_show_mac ? " [MAC]" : "");
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-    poom_arduboy_set_cursor(0, 0);
-    (void)poom_arduboy_print(title);
-    if (s_show_mac)
+    fox_draw_header_(title_line);
+    fox_draw_footer_("A:SELECT", s_wifi_scanning ? "B:CANCEL" : "B:BACK");
+    if(s_list_count == 0)
     {
-        /* Show the current label mode so LEFT's effect is discoverable. */
-        poom_arduboy_set_cursor(104, 0);
-        (void)poom_arduboy_print("MAC");
-    }
-    poom_arduboy_draw_fast_hline(0, 10, 128, WHITE);
-
-    if (s_list_count == 0)
-    {
-        poom_arduboy_set_cursor(4, 28);
+        poom_arduboy_set_cursor(22, 28);
         (void)poom_arduboy_print(empty_hint);
         poom_arduboy_display();
         return;
     }
+    if(s_sel < s_scroll) s_scroll = s_sel;
+    if(s_sel >= (s_scroll + FOX_VISIBLE_ROWS)) s_scroll = s_sel - FOX_VISIBLE_ROWS + 1;
+    max_scroll = s_list_count - FOX_VISIBLE_ROWS;
+    if(max_scroll < 0) max_scroll = 0;
 
-    if (s_sel < s_scroll)
+    for(i = 0; i < FOX_VISIBLE_ROWS; ++i)
     {
-        s_scroll = s_sel;
-    }
-    if (s_sel >= (s_scroll + FOX_VISIBLE_ROWS))
-    {
-        s_scroll = s_sel - FOX_VISIBLE_ROWS + 1;
-    }
-
-    for (i = 0; i < FOX_VISIBLE_ROWS; ++i)
-    {
-        int idx = s_scroll + i;
-        int y = 14 + i * 12;
-        if (idx >= s_list_count)
-        {
-            break;
-        }
-        if (s_show_mac)
+        const int idx = s_scroll + i;
+        const int16_t y = (int16_t)(14 + i * 10);
+        if(idx >= s_list_count) break;
+        if(s_show_mac)
         {
             const uint8_t *m = s_list[idx].addr;
-            (void)snprintf(row, sizeof(row), "%02X%02X%02X%02X%02X%02X %3d",
-                           m[0], m[1], m[2], m[3], m[4], m[5],
-                           s_list[idx].rssi_known ? s_list[idx].rssi : -99);
+            (void)snprintf(name_line, sizeof(name_line), "%02X%02X%02X%02X%02X%02X",
+                           m[0], m[1], m[2], m[3], m[4], m[5]);
         }
-        else
-        {
-            (void)snprintf(row, sizeof(row), "%-14.14s %3d",
-                           s_list[idx].name,
-                           s_list[idx].rssi_known ? s_list[idx].rssi : -99);
-        }
-        poom_arduboy_set_cursor(2, y);
-        (void)poom_arduboy_print(row);
-        if (idx == s_sel)
-        {
-            poom_arduboy_fill_rect(0, y - 1, 128, 11, INVERT);
-        }
+        else fox_format_list_label_(name_line, sizeof(name_line), s_list[idx].name,
+                                    idx == s_sel);
+        if(s_list[idx].rssi_known) (void)snprintf(rssi_line, sizeof(rssi_line), "%ddBm", s_list[idx].rssi);
+        else (void)snprintf(rssi_line, sizeof(rssi_line), "---");
+        poom_arduboy_set_cursor(2, y); (void)poom_arduboy_print(name_line);
+        poom_arduboy_set_cursor(83, y); (void)poom_arduboy_print(rssi_line);
+        if(idx == s_sel) poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, 9, INVERT);
     }
+    if(s_scroll > 0) poom_arduboy_fill_triangle(124, 11, 120, 15, 127, 15, WHITE);
+    if(s_scroll < max_scroll) poom_arduboy_fill_triangle(120, 50, 127, 50, 124, 54, WHITE);
     poom_arduboy_display();
 }
 
 static void fox_draw_menu_(const char *title, const char *const *items, int count)
 {
-    int i;
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-    poom_arduboy_set_cursor(0, 0);
-    (void)poom_arduboy_print(title);
-    poom_arduboy_draw_fast_hline(0, 10, 128, WHITE);
-    for (i = 0; i < count; ++i)
+    fox_draw_header_(title);
+    fox_draw_footer_("A:SELECT", "B:EXIT");
+    for(int i = 0; i < count; ++i)
     {
-        int y = 16 + i * 13;
-        poom_arduboy_set_cursor(10, y);
-        (void)poom_arduboy_print(items[i]);
-        if (i == s_sel)
-        {
-            poom_arduboy_fill_rect(0, y - 2, 128, 12, INVERT);
-        }
+        const int16_t y = (int16_t)(14 + i * 10);
+        poom_arduboy_set_cursor(2, y); (void)poom_arduboy_print(items[i]);
+        if(i == s_sel) poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, 9, INVERT);
     }
     poom_arduboy_display();
 }
@@ -862,27 +959,19 @@ static void fox_draw_menu_(const char *title, const char *const *items, int coun
 static void fox_draw_options_(void)
 {
     char line[22];
-    int i;
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-    poom_arduboy_set_cursor(0, 0);
-    (void)poom_arduboy_print("OPTIONS");
-    poom_arduboy_draw_fast_hline(0, 10, 128, WHITE);
-    for (i = 0; i < FOX_OPT_COUNT; ++i)
+    fox_draw_header_("OPTIONS");
+    fox_draw_footer_("L/R:SET", "B:BACK");
+    for(int i = 0; i < FOX_OPT_COUNT; ++i)
     {
-        int y = 16 + i * 13;
+        const int16_t y = (int16_t)(14 + i * 10);
         const char *name = (i == 0) ? "AUDIO" : "LEDS";
-        int pct = (i == 0) ? s_vol_pct : s_bright_pct;
-        (void)snprintf(line, sizeof(line), " %-6s < %3d%% >", name, pct);
-        poom_arduboy_set_cursor(4, y);
-        (void)poom_arduboy_print(line);
-        if (i == s_sel)
-        {
-            poom_arduboy_fill_rect(0, y - 2, 128, 12, INVERT);
-        }
+        const int pct = (i == 0) ? s_vol_pct : s_bright_pct;
+        (void)snprintf(line, sizeof(line), "%-7s %3d%%", name, pct);
+        poom_arduboy_set_cursor(2, y); (void)poom_arduboy_print(line);
+        if(i == s_sel) poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, 9, INVERT);
     }
-    poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print("UD:row LR:set B:back");
     poom_arduboy_display();
 }
 
@@ -968,6 +1057,7 @@ static void fox_enter_screen_(fox_screen_t scr)
     s_screen = scr;
     s_sel = 0;
     s_scroll = 0;
+    s_list_selection_tick_ms = fox_now_ms_();
 
     if (scr == SCR_BLE_LIST)
     {
@@ -990,22 +1080,22 @@ static void fox_enter_screen_(fox_screen_t scr)
         fox_radio_want_(FOX_RADIO_WIFI);
         s_list_count = 0;
         s_scan_cancelled = false;
+        s_wifi_scanning = true;
         fox_draw_list_(title, "scanning...");
         fox_wifi_scan_list_();
-        if (s_scan_cancelled)
+        if(s_scan_cancelled)
         {
-            /* Scan cancelled with B -> return to the Fox Hunt menu. The scan
-             * takes a moment to stop, so ignore any extra B taps that land
-             * just after we drop back to the menu (they'd otherwise exit). */
             s_scan_cancelled = false;
             portENTER_CRITICAL(&s_lock);
             s_back_pressed = false;
+            s_select_pressed = false;
             portEXIT_CRITICAL(&s_lock);
-            s_ignore_back_until_us = esp_timer_get_time() + 800000LL; /* 800 ms */
             s_screen = SCR_MAIN;
             s_sel = 0;
             s_scroll = 0;
             fox_radio_want_(FOX_RADIO_NONE);
+            s_cancel_back_ignore_until_us = esp_timer_get_time() + 1500000LL;
+            fox_draw_menu_("FOX HUNT", s_main_items, FOX_MAIN_COUNT);
         }
     }
     else if (scr == SCR_WIFI_CLIENT_LIST)
@@ -1143,13 +1233,9 @@ static void fox_task_(void *arg)
             {
                 s_sel = (s_sel + delta + FOX_MAIN_COUNT) % FOX_MAIN_COUNT;
             }
-            if (back)
+            if(back && (esp_timer_get_time() >= s_cancel_back_ignore_until_us))
             {
-                if (esp_timer_get_time() >= s_ignore_back_until_us)
-                {
-                    break; /* exit whole app */
-                }
-                /* else: stray B from a just-cancelled scan - ignore it. */
+                break; /* exit whole app */
             }
             if (sel)
             {
@@ -1203,9 +1289,10 @@ static void fox_task_(void *arg)
             {
                 s_show_mac = !s_show_mac; /* LEFT: toggle name <-> MAC */
             }
-            if (delta != 0 && s_list_count > 0)
+            if(delta != 0 && s_list_count > 0)
             {
                 s_sel = (s_sel + delta + s_list_count) % s_list_count;
+                s_list_selection_tick_ms = fox_now_ms_();
             }
             if (back)
             {
@@ -1303,6 +1390,12 @@ static void fox_task_(void *arg)
         {
             if (back)
             {
+                if (s_led_ok)
+                {
+                    ws2812_clear(&s_strip);
+                    (void)ws2812_show(&s_strip);
+                    s_led_level = -2;
+                }
                 if (s_return_to_detector || s_return_to_ble_detector)
                 {
                     /* Launched from a detector: exit and hand control back to
@@ -1492,6 +1585,7 @@ static void fox_task_(void *arg)
     ESP_LOGI(FOX_TAG, "fox hunt stopped");
     s_active = false;
     s_task = NULL;
+    fox_free_session_();
 
     if (s_return_to_ble_detector)
     {
@@ -1520,70 +1614,53 @@ static void fox_task_(void *arg)
 static void fox_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
 {
     button_event_msg_t ev;
+    bool stop_wifi_scan = false;
+
     (void)user_ctx;
-
-    if (!s_active || (msg == NULL) || (msg->len < sizeof(ev)))
-    {
-        return;
-    }
+    if(!s_active || (msg == NULL) || (msg->len < sizeof(ev))) return;
     (void)memcpy(&ev, msg->data, sizeof(ev));
-
-    /* Track A held as an FN modifier (chord) via raw press/release events. */
-    if (ev.button == BUTTON_A)
+    if(ev.button == BUTTON_A)
     {
-        if (ev.event == BUTTON_PRESS_DOWN) { s_a_held = true; }
-        else if (ev.event == BUTTON_PRESS_UP) { s_a_held = false; }
+        if(ev.event == BUTTON_PRESS_DOWN) s_a_held = true;
+        else if(ev.event == BUTTON_PRESS_UP) s_a_held = false;
     }
-
-    if (ev.event != BUTTON_SINGLE_CLICK)
-    {
-        return;
-    }
+    if(ev.event != BUTTON_SINGLE_CLICK) return;
 
     portENTER_CRITICAL(&s_lock);
-    switch (ev.button)
+    switch(ev.button)
     {
         case BUTTON_UP:
-            /* Hunt + A held = toggle constant deauth; otherwise volume up. */
-            if ((s_screen == SCR_HUNT) && s_a_held) { s_toggle_deauth = true; }
-            else { s_nav_delta -= 1; }
+            if((s_screen == SCR_HUNT) && s_a_held) s_toggle_deauth = true;
+            else s_nav_delta -= 1;
             break;
         case BUTTON_DOWN:
-            /* Hunt + A held = one manual deauth nudge; otherwise volume down. */
-            if ((s_screen == SCR_HUNT) && s_a_held) { s_burst_deauth = true; }
-            else { s_nav_delta += 1; }
+            if((s_screen == SCR_HUNT) && s_a_held) s_burst_deauth = true;
+            else s_nav_delta += 1;
             break;
         case BUTTON_LEFT:
-            /* Left/Right reserved while A is held (FN); otherwise brightness.
-             * On list screens LEFT is free, so it also toggles name<->MAC
-             * (the list-state handler reads s_toggle_label, ignores delta). */
-            if (!((s_screen == SCR_HUNT) && s_a_held)) { s_level_delta -= 1; s_toggle_label = true; }
+            if(!((s_screen == SCR_HUNT) && s_a_held)) { s_level_delta -= 1; s_toggle_label = true; }
             break;
         case BUTTON_RIGHT:
-            if (!((s_screen == SCR_HUNT) && s_a_held)) { s_level_delta += 1; }
+            if(!((s_screen == SCR_HUNT) && s_a_held)) s_level_delta += 1;
             break;
         case BUTTON_A:
-            /* In menus/lists A selects. In a hunt A is the FN modifier, so a
-             * plain A click does nothing on its own. */
-            if (s_screen != SCR_HUNT) { s_select_pressed = true; }
+            if(s_screen != SCR_HUNT) s_select_pressed = true;
             break;
         case BUTTON_B:
-            if (s_wifi_scanning)
+            if(s_wifi_scanning)
             {
-                /* Cancel the scan (not a generic "back") so we land on the
-                 * Fox Hunt menu, not out of the app. */
+                /* The Wi-Fi driver call must execute after leaving the spinlock. */
                 s_scan_cancelled = true;
-                (void)esp_wifi_scan_stop();
+                stop_wifi_scan = true;
             }
-            else
-            {
-                s_back_pressed = true;
-            }
+            else s_back_pressed = true;
             break;
         default:
             break;
     }
     portEXIT_CRITICAL(&s_lock);
+
+    if(stop_wifi_scan) (void)esp_wifi_scan_stop();
 }
 
 /* Shared reset of all run state before (re)starting the hunt task. */
@@ -1598,6 +1675,7 @@ static void fox_reset_state_(void)
     s_select_pressed = false;
     s_back_pressed = false;
     s_reset_peak_requested = false;
+    s_cancel_back_ignore_until_us = 0;
     s_toggle_deauth = false;
     s_burst_deauth = false;
     s_a_held = false;
@@ -1634,6 +1712,7 @@ static void fox_launch_task_(void)
         }
         s_active = false;
         s_task = NULL;
+        fox_free_session_();
         const uint8_t token = 1U;
         (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
     }
@@ -1646,6 +1725,12 @@ void app_fox_hunt(void)
         return;
     }
     fox_preferences_load_();
+    if(!fox_alloc_session_())
+    {
+        const uint8_t token = 1U;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+        return;
+    }
     fox_reset_state_();
     fox_launch_task_();
 }
@@ -1660,6 +1745,12 @@ void app_fox_hunt_wifi_client(const uint8_t ap_bssid[6],
         return;
     }
     fox_preferences_load_();
+    if(!fox_alloc_session_())
+    {
+        const uint8_t token = 1U;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+        return;
+    }
     fox_reset_state_();
 
     s_target_client = true;
@@ -1694,6 +1785,12 @@ void app_fox_hunt_ble_device(const uint8_t address[6], const char *name)
         return;
     }
     fox_preferences_load_();
+    if(!fox_alloc_session_())
+    {
+        const uint8_t token = 1U;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+        return;
+    }
     fox_reset_state_();
     s_target_wifi = false;
     s_target_client = false;

@@ -347,6 +347,16 @@ static void poom_wifi_detector_classify_(const wifi_ap_record_t *ap,
     }
 }
 
+void poom_wifi_detector_classify_ap(const wifi_ap_record_t *ap,
+                                    poom_wifi_detector_record_t *out_record)
+{
+    if((ap == NULL) || (out_record == NULL))
+    {
+        return;
+    }
+    poom_wifi_detector_classify_(ap, out_record);
+}
+
 static const poom_wifi_detector_oui_t *poom_wifi_detector_match_oui_(const uint8_t mac[6])
 {
     size_t i;

@@ -11,9 +11,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -61,6 +63,9 @@
 #define WIFI_PROF_PRIO           (4U)
 #define WIFI_PROF_CONNECT_TIMEOUT_MS (15000U)
 #define WIFI_PROF_INFO_HOLD_MS   (1400U)
+#define WIFI_PROF_AP_TEXT_CHARS  (19U)
+#define WIFI_PROF_SCROLL_STEP_MS (350U)
+#define WIFI_PROF_SCROLL_GAP     (3U)
 
 typedef poom_wifi_profile_t wifi_profile_t;
 
@@ -93,26 +98,40 @@ static char s_sbus_user[] = "menu_wifi_profiles";
 
 static wifi_prof_state_t s_state = WIFI_PROF_SCR_LIST;
 
-static wifi_profile_t s_profiles[WIFI_PROF_MAX];
+/* This menu is opened infrequently. Keep its profile and editor buffers out of
+ * permanent internal RAM and release them as soon as the menu closes. */
+typedef struct
+{
+    wifi_profile_t profiles[WIFI_PROF_MAX];
+    char edit_ssid[WIFI_PROF_SSID_CAP];
+    char edit_pass[WIFI_PROF_PASS_CAP];
+    poom_ui_keyboard_t keyboard;
+    char connect_ssid[WIFI_PROF_SSID_CAP];
+    char connect_pass[WIFI_PROF_PASS_CAP];
+    char connected_ssid[WIFI_PROF_SSID_CAP];
+    char status[22];
+    uint32_t scan_selection_tick_ms;
+} wifi_prof_session_t;
+
+static wifi_prof_session_t *s_session = NULL;
+#define s_profiles       (s_session->profiles)
+#define s_edit_ssid      (s_session->edit_ssid)
+#define s_edit_pass      (s_session->edit_pass)
+#define s_keyboard       (s_session->keyboard)
+#define s_connect_ssid   (s_session->connect_ssid)
+#define s_connect_pass   (s_session->connect_pass)
+#define s_connected_ssid (s_session->connected_ssid)
+#define s_status         (s_session->status)
+#define s_scan_selection_tick_ms (s_session->scan_selection_tick_ms)
+
 static uint16_t s_profile_count = 0U;
 static uint16_t s_sel = 0U;           /* 0..s_profile_count (last = "+ ADD") */
 static uint16_t s_window_start = 0U;
-
-/* scan/add */
 static uint16_t s_scan_sel = 0U;
 static uint16_t s_scan_window_start = 0U;
-static char s_edit_ssid[WIFI_PROF_SSID_CAP] = {0};
-static char s_edit_pass[WIFI_PROF_PASS_CAP] = {0};
-static poom_ui_keyboard_t s_keyboard;
-
-/* connect */
-static char s_connect_ssid[WIFI_PROF_SSID_CAP] = {0};
-static char s_connect_pass[WIFI_PROF_PASS_CAP] = {0};
-static char s_connected_ssid[WIFI_PROF_SSID_CAP] = {0};
 static uint32_t s_connect_start_ms = 0U;
-
-static char s_status[22] = "";
 static uint32_t s_info_until_ms = 0U;
+static volatile bool s_scan_cancel_requested = false;
 
 static esp_err_t wifi_prof_exit_(void);
 static void wifi_prof_task_(void *arg);
@@ -132,6 +151,31 @@ static void wifi_prof_wake_(void)
         (void)xTaskNotifyGive(s_task);
     }
     portEXIT_CRITICAL(&s_task_lock);
+}
+
+static bool wifi_prof_alloc_session_(void)
+{
+    if(s_session != NULL)
+    {
+        return true;
+    }
+    s_session = heap_caps_calloc(1U, sizeof(*s_session),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(s_session == NULL)
+    {
+        s_session = calloc(1U, sizeof(*s_session));
+    }
+    return (s_session != NULL);
+}
+
+static void wifi_prof_free_session_(void)
+{
+    if(s_session != NULL)
+    {
+        (void)memset(s_session, 0, sizeof(*s_session));
+        free(s_session);
+        s_session = NULL;
+    }
 }
 
 /* ---- persistence --------------------------------------------------------- */
@@ -242,6 +286,40 @@ static void wifi_prof_footer_(const char *left, const char *right)
     }
 }
 
+/* Match Settings > WIFI SCAN: only the highlighted long SSID scrolls. */
+static void wifi_prof_format_ap_row_(char *out, size_t out_len,
+                                     const char *ssid, bool selected)
+{
+    size_t ssid_len;
+
+    if((out == NULL) || (out_len == 0U))
+    {
+        return;
+    }
+    out[0] = '\0';
+    if(ssid == NULL)
+    {
+        return;
+    }
+
+    ssid_len = strlen(ssid);
+    if(!selected || (ssid_len <= WIFI_PROF_AP_TEXT_CHARS))
+    {
+        (void)snprintf(out, out_len, "%.*s", (int)WIFI_PROF_AP_TEXT_CHARS, ssid);
+        return;
+    }
+
+    const size_t cycle = ssid_len + WIFI_PROF_SCROLL_GAP;
+    const size_t phase = (size_t)(((wifi_prof_now_ms_() - s_scan_selection_tick_ms) /
+                                   WIFI_PROF_SCROLL_STEP_MS) % cycle);
+    for(size_t i = 0U; (i < WIFI_PROF_AP_TEXT_CHARS) && (i + 1U < out_len); ++i)
+    {
+        const size_t src = (phase + i) % cycle;
+        out[i] = (src < ssid_len) ? ssid[src] : ' ';
+        out[i + 1U] = '\0';
+    }
+}
+
 static void wifi_prof_draw_list_(void)
 {
     uint16_t total = (uint16_t)(s_profile_count + 1U); /* + "ADD" row */
@@ -346,7 +424,7 @@ static void wifi_prof_draw_select_ap_(void)
         {
             (void)snprintf(ssid, sizeof(ssid), "<hidden>");
         }
-        (void)snprintf(line, sizeof(line), "%.19s", ssid);
+        wifi_prof_format_ap_row_(line, sizeof(line), ssid, idx == s_scan_sel);
         y = (int16_t)(14 + (int16_t)row * 10);
         poom_arduboy_set_cursor(2, y);
         (void)poom_arduboy_print(line);
@@ -374,7 +452,7 @@ static void wifi_prof_draw_(void)
             wifi_prof_header_("ADD NETWORK");
             poom_arduboy_set_cursor(22, 28);
             (void)poom_arduboy_print(F("Scanning..."));
-            wifi_prof_footer_(NULL, "B:BACK");
+            wifi_prof_footer_(NULL, "B:EXIT");
             poom_arduboy_display();
             return;
 
@@ -424,17 +502,28 @@ static void wifi_prof_draw_(void)
 
 static void wifi_prof_run_scan_(void)
 {
+    esp_err_t status;
+
+    s_scan_cancel_requested = false;
     s_state = WIFI_PROF_SCR_SCAN;
     (void)wifi_prof_draw_();
 
     (void)poom_wifi_scanner_clear_ap_records();
-    if(poom_wifi_scanner_scan() != ESP_OK)
+    status = poom_wifi_scanner_scan();
+    if(s_scan_cancel_requested || s_exit_requested)
+    {
+        s_scan_cancel_requested = false;
+        s_state = WIFI_PROF_SCR_LIST;
+        return;
+    }
+    if(status != ESP_OK)
     {
         wifi_prof_begin_info_("Scan failed");
         return;
     }
     s_scan_sel = 0U;
     s_scan_window_start = 0U;
+    s_scan_selection_tick_ms = wifi_prof_now_ms_();
     s_state = WIFI_PROF_SCR_SELECT_AP;
 }
 
@@ -535,6 +624,11 @@ static void wifi_prof_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
     {
         switch(s_state)
         {
+            case WIFI_PROF_SCR_SCAN:
+                s_scan_cancel_requested = true;
+                s_exit_requested = true;
+                (void)esp_wifi_scan_stop();
+                break;
             case WIFI_PROF_SCR_LIST:
                 if(s_task == NULL)
                 {
@@ -574,11 +668,19 @@ static void wifi_prof_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
             }
             if(ev.button == BTN_UP)
             {
-                if(s_scan_sel > 0U) { s_scan_sel--; }
+                if(s_scan_sel > 0U)
+                {
+                    s_scan_sel--;
+                    s_scan_selection_tick_ms = wifi_prof_now_ms_();
+                }
             }
             else if(ev.button == BTN_DOWN)
             {
-                if(s_scan_sel < (uint16_t)(count - 1U)) { s_scan_sel++; }
+                if(s_scan_sel < (uint16_t)(count - 1U))
+                {
+                    s_scan_sel++;
+                    s_scan_selection_tick_ms = wifi_prof_now_ms_();
+                }
             }
             else if((ev.button == BTN_A) || (ev.button == BTN_RIGHT))
             {
@@ -643,6 +745,11 @@ static esp_err_t wifi_prof_exit_(void)
     s_exit_requested = false;
     s_scan_request_pending = false;
     s_connect_request_pending = false;
+    s_scan_cancel_requested = false;
+    if(s_state == WIFI_PROF_SCR_SCAN)
+    {
+        (void)esp_wifi_scan_stop();
+    }
 
     portENTER_CRITICAL(&s_task_lock);
     if((s_task != NULL) && (s_task != current))
@@ -664,6 +771,7 @@ static esp_err_t wifi_prof_exit_(void)
     }
 
     (void)poom_wifi_ctrl_unregister_cb();
+    wifi_prof_free_session_();
 
     const uint8_t token = 1;
     (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
@@ -738,6 +846,17 @@ static void wifi_prof_task_(void *arg)
 
 void menu_wifi_profiles_show(void)
 {
+    if(s_active)
+    {
+        return;
+    }
+    if(!wifi_prof_alloc_session_())
+    {
+        const uint8_t token = 1U;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+        return;
+    }
+
     s_active = true;
     s_exit_requested = false;
     s_scan_request_pending = false;
@@ -761,6 +880,7 @@ void menu_wifi_profiles_show(void)
         else
         {
             s_active = false;
+            wifi_prof_free_session_();
             const uint8_t token = 1;
             (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
             return;
@@ -793,6 +913,13 @@ void menu_wifi_profiles_show(void)
         else
         {
             s_active = false;
+            if(s_buttons_subscribed)
+            {
+                (void)poom_sbus_unsubscribe_cb("input/button", wifi_prof_button_cb_, s_sbus_user);
+                s_buttons_subscribed = false;
+            }
+            (void)poom_wifi_ctrl_unregister_cb();
+            wifi_prof_free_session_();
             const uint8_t token = 1;
             (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
         }
