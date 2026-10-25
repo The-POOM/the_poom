@@ -73,6 +73,32 @@ esp_ble_scan_params_t poom_ble_gatt_client_default_scan_params(void);
 void poom_ble_gatt_client_set_remote_device_name(const char *device_name);
 
 /**
+ * @brief Sets a target remote device address for scan matching.
+ *
+ * When set, the helper connects to the advertiser with this exact BLE address,
+ * taking priority over the name filter and ignoring the RSSI connect threshold.
+ * This is the robust way to reach a known device whose advertised name is
+ * absent, truncated, or carried only in a scan response. Pass NULL to clear and
+ * fall back to name-based matching.
+ *
+ * @param bda Six-byte BLE device address, or NULL to clear.
+ */
+void poom_ble_gatt_client_set_remote_bda(const uint8_t bda[6]);
+
+/**
+ * @brief Enables Just Works LE bonding/encryption for the connection.
+ *
+ * When enabled, the helper configures Just Works security parameters at start,
+ * initiates encryption on connect, and accepts the peer's security requests.
+ * Some peripherals only expose their real data (e.g. a GPS stream) over a
+ * bonded, encrypted link. Default (disabled) keeps the plain, unbonded
+ * behaviour used by scan/tracker consumers. Set before start().
+ *
+ * @param enable true to bond/encrypt on connect.
+ */
+void poom_ble_gatt_client_set_bonding(bool enable);
+
+/**
  * @brief Sets scan and UUID filter parameters.
  *
  * @param scan_params Scan/filter parameters.
@@ -93,6 +119,27 @@ void poom_ble_gatt_client_set_callbacks(poom_ble_gatt_client_event_cb_t event_cb
  * @param length Data length.
  */
 void poom_ble_gatt_client_send_data(uint8_t *data, int length);
+
+/**
+ * @brief Writes to a 16-bit-UUID characteristic within the attached service.
+ *
+ * Resolves the characteristic by UUID inside the currently attached service
+ * range and writes @p data to it. This lets a caller target a different
+ * characteristic than the notify one the helper tracks (e.g. a separate
+ * control/write characteristic on the same service). Additive: callers that
+ * only scan or use the single tracked characteristic are unaffected.
+ *
+ * @param char_uuid16   16-bit characteristic UUID to write.
+ * @param data          Payload buffer.
+ * @param length        Payload length in bytes.
+ * @param with_response true for write-with-response, false for write-no-response.
+ * @return ESP_OK on success; ESP_ERR_INVALID_STATE if not connected;
+ *         ESP_ERR_NOT_FOUND if the characteristic is not present; else an error.
+ */
+esp_err_t poom_ble_gatt_client_write_char16(uint16_t char_uuid16,
+                                            const uint8_t *data,
+                                            int length,
+                                            bool with_response);
 
 /**
  * @brief Starts BLE GATT client helper stack.

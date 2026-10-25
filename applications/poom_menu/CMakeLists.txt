@@ -9,6 +9,7 @@ idf_component_register(
     REQUIRES
         button_driver
         buzzer
+        nvs_flash
         poom_app_pack
         poom_breakout
         poom_arduboy_display

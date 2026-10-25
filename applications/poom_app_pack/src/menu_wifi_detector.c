@@ -17,9 +17,12 @@
 #include "freertos/task.h"
 #include "input_events.h"
 #include "menu_detector_view.h"
+#include "menu_fox_hunt.h"
+#include "menu_wifi_detector_oui.h"
 #include "poom_sbus.h"
 #include "poom_secrets_store.h"
 #include "poom_ui_keyboard.h"
+#include "poom_wifi_attacks.h"
 #include "poom_wifi_detector.h"
 
 #define POOM_MENU_RESUME_TOPIC          "poom/menu/resume"
@@ -40,13 +43,37 @@
 #define BUTTON_SINGLE_CLICK (4U)
 #endif
 
+/* iot_button long-press-start event (POOM publishes it as 7). Launching the
+ * tagged-set deauth now requires a deliberate long-press of A (a tap can't
+ * fire it), which also frees a LEFT tap for the name/MAC toggle. */
+#ifndef BUTTON_LONG_PRESS_START
+#define BUTTON_LONG_PRESS_START (7U)
+#endif
+
 typedef enum
 {
     MENU_WIFI_DETECTOR_SCREEN_SELECT = 0,
     MENU_WIFI_DETECTOR_SCREEN_SCAN,
     MENU_WIFI_DETECTOR_SCREEN_DETAIL,
     MENU_WIFI_DETECTOR_SCREEN_ALIAS,
+    MENU_WIFI_DETECTOR_SCREEN_OPTIONS,
+    MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM,
+    MENU_WIFI_DETECTOR_SCREEN_DEAUTH_RUNNING,
 } menu_wifi_detector_screen_t;
+
+typedef enum
+{
+    MENU_WIFI_DETECTOR_OPTION_DEAUTH = 0,
+    MENU_WIFI_DETECTOR_OPTION_HUNT,
+    MENU_WIFI_DETECTOR_OPTION_ALIAS,
+    MENU_WIFI_DETECTOR_OPTION_COUNT,
+} menu_wifi_detector_option_t;
+
+static const char *const s_option_labels[] = {
+    "DEAUTH CLIENT",
+    "HUNT CLIENT",
+    "SET ALIAS",
+};
 
 typedef struct
 {
@@ -74,6 +101,7 @@ static int s_scroll;
 static int s_filter_index;
 static int s_detail_index = -1;
 static menu_wifi_detector_screen_t s_screen = MENU_WIFI_DETECTOR_SCREEN_SELECT;
+static bool s_show_mac; /* list label mode: false = name/SSID, true = MAC/BSSID */
 static volatile bool s_active;
 static volatile bool s_exit_requested;
 static bool s_scan_requested;
@@ -95,6 +123,28 @@ static uint32_t s_last_scroll_slot;
 static TickType_t s_last_monitor_refresh;
 static uint8_t s_monitor_channel;
 static bool s_ap_clients_selected;
+static uint8_t s_selected_ap_bssid[6];
+static int s_options_index;
+static volatile bool s_deauth_active;
+static volatile bool s_deauth_start_requested;
+static volatile bool s_deauth_stop_requested;
+static uint8_t s_deauth_client[6];
+/* Multi-client (round-robin) selection set. */
+#define MENU_WIFI_DETECTOR_MAX_SEL (POOM_WIFI_ATTACKS_MAX_CLIENTS)
+static uint8_t s_deauth_set[MENU_WIFI_DETECTOR_MAX_SEL][6];
+static int s_deauth_set_count;
+static bool s_deauth_is_set;
+/* Hand-off to Fox Hunt: when set, cleanup launches a client hunt instead of
+ * returning to the menu. */
+static bool s_hunt_launch;
+static uint8_t s_hunt_client[6];
+static uint8_t s_hunt_ap_bssid[6];
+static uint8_t s_hunt_channel;
+static char s_hunt_name[20];
+/* Resume: open straight on an AP's client list (returning from a Fox Hunt). */
+static bool s_resume_ap_valid;
+static uint8_t s_resume_ap_bssid[6];
+static uint8_t s_resume_channel;
 static poom_ui_keyboard_t s_alias_keyboard;
 static char s_alias_buffer[MENU_WIFI_DETECTOR_ALIAS_LEN];
 
@@ -103,6 +153,9 @@ static void menu_wifi_detector_free_(void);
 static void menu_wifi_detector_scan_task_(void *arg);
 static void menu_wifi_detector_normalize_selection_(void);
 static void menu_wifi_detector_apply_names_(void);
+static int menu_wifi_detector_set_find_(const uint8_t mac[6]);
+static void menu_wifi_detector_set_toggle_(const uint8_t mac[6]);
+static void menu_wifi_detector_set_clear_(void);
 
 static bool menu_wifi_detector_uses_monitor_(void)
 {
@@ -640,7 +693,19 @@ static void menu_wifi_detector_apply_names_(void)
 
     for(i = 0; i < s_record_count; ++i)
     {
-        int cache_index = menu_wifi_detector_alias_cache_find_(s_records[i]->bssid);
+        int cache_index;
+
+        if(s_show_mac)
+        {
+            /* MAC/BSSID view (toggled with LEFT). */
+            const uint8_t *b = s_records[i]->bssid;
+            (void)snprintf(s_names[i], sizeof(s_names[i]),
+                           "%02X:%02X:%02X:%02X:%02X:%02X",
+                           b[0], b[1], b[2], b[3], b[4], b[5]);
+            continue;
+        }
+
+        cache_index = menu_wifi_detector_alias_cache_find_(s_records[i]->bssid);
         if(cache_index < 0)
         {
             char alias[MENU_WIFI_DETECTOR_ALIAS_LEN];
@@ -657,12 +722,43 @@ static void menu_wifi_detector_apply_names_(void)
 
         if((cache_index >= 0) && (s_alias_cache[cache_index].alias[0] != '\0'))
         {
+            /* 1) user-set alias wins. */
             (void)snprintf(s_names[i], sizeof(s_names[i]), "%.32s",
                            s_alias_cache[cache_index].alias);
         }
         else
         {
-            (void)snprintf(s_names[i], sizeof(s_names[i]), "%.32s", s_records[i]->ssid);
+            const char *vendor = NULL;
+            bool is_client = !s_records[i]->is_access_point;
+
+            if(is_client && menu_wifi_detector_oui_is_random(s_records[i]->bssid))
+            {
+                /* randomized/private MAC (e.g. a phone) - cannot be OUI-ID'd. */
+                (void)snprintf(s_names[i], sizeof(s_names[i]), "Private %02X%02X",
+                               s_records[i]->bssid[4], s_records[i]->bssid[5]);
+            }
+            else
+            {
+                /* clients: identify by OUI vendor; the short MAC suffix keeps
+                 * same-vendor devices distinct. Full MAC stays on Detail. */
+                if(is_client)
+                {
+                    vendor = menu_wifi_detector_oui_vendor(s_records[i]->bssid);
+                }
+                if(vendor != NULL)
+                {
+                    (void)snprintf(s_names[i], sizeof(s_names[i]), "%.26s %02X%02X",
+                                   vendor,
+                                   s_records[i]->bssid[4],
+                                   s_records[i]->bssid[5]);
+                }
+                else
+                {
+                    /* AP (keep SSID) or unknown real OUI: fall back to SSID/MAC. */
+                    (void)snprintf(s_names[i], sizeof(s_names[i]), "%.32s",
+                                   s_records[i]->ssid);
+                }
+            }
         }
     }
 }
@@ -690,27 +786,44 @@ static void menu_wifi_detector_render_scan_(void)
     menu_wifi_detector_normalize_selection_();
     for(i = 0; i < s_record_count; ++i)
     {
+        const char *name = s_names[i];
+        char marked[MENU_WIFI_DETECTOR_NAME_LEN];
+
+        if(ap_clients && s_ap_clients_selected &&
+           (menu_wifi_detector_set_find_(s_records[i]->bssid) >= 0))
+        {
+            (void)snprintf(marked, sizeof(marked), "*%.*s",
+                           (int)(MENU_WIFI_DETECTOR_NAME_LEN - 2), s_names[i]);
+            name = marked;
+        }
         menu_wifi_detector_format_row_(rows[i].name,
                                        sizeof(rows[i].name),
-                                       s_names[i],
+                                       name,
                                        i == s_selected_index);
         rows[i].rssi = s_records[i]->rssi;
         rows[i].rssi_known = s_records[i]->rssi_known;
     }
     if(ap_clients)
     {
-        menu_detector_view_draw_list_actions("AP CLIENTS",
+        menu_detector_view_draw_list_actions(s_show_mac ? "CLIENTS [MAC]" : "AP CLIENTS",
                                              rows,
                                              s_record_count,
                                              s_selected_index,
                                              s_scroll,
-                                             s_ap_clients_selected ? "A:DETAIL" : "A:SELECT",
-                                             s_ap_clients_selected ? "B:APS" : "B:EXIT");
+                                             s_ap_clients_selected
+                                                 ? ((s_deauth_set_count > 0) ? "holdA:GO" : "A:DET R:TAG")
+                                                 : (s_show_mac ? "A:SEL L:OUI" : "A:SEL L:MAC"),
+                                             s_ap_clients_selected ? (s_show_mac ? "L:OUI B:APS" : "L:MAC B:APS") : "B:EXIT");
     }
     else
     {
-        menu_detector_view_draw_list(poom_wifi_detector_filter_label(
-                                         (poom_wifi_detector_filter_t)s_filter_index),
+        const char *flabel = poom_wifi_detector_filter_label(
+            (poom_wifi_detector_filter_t)s_filter_index);
+        char title[24];
+
+        /* LEFT toggles name<->MAC on these lists too; show the mode. */
+        (void)snprintf(title, sizeof(title), "%s%s", flabel, s_show_mac ? " [MAC]" : "");
+        menu_detector_view_draw_list(title,
                                      rows,
                                      s_record_count,
                                      s_selected_index,
@@ -788,7 +901,147 @@ static void menu_wifi_detector_render_detail_(void)
         lines[3] = line3;
         lines[4] = line4;
     }
-    menu_detector_view_draw_detail(lines, s_detail_index, s_record_count);
+    menu_detector_view_draw_detail_actions(lines, s_detail_index, s_record_count,
+                                           menu_wifi_detector_is_ap_clients_() && s_ap_clients_selected
+                                               ? "A:OPTIONS" : "A:NAME");
+}
+
+static void menu_wifi_detector_format_client_mac_(char *out, size_t out_len)
+{
+    if((out == NULL) || (out_len == 0U))
+    {
+        return;
+    }
+    (void)snprintf(out,
+                   out_len,
+                   "%02X:%02X:%02X:%02X:%02X:%02X",
+                   s_deauth_client[0], s_deauth_client[1], s_deauth_client[2],
+                   s_deauth_client[3], s_deauth_client[4], s_deauth_client[5]);
+}
+
+static void menu_wifi_detector_render_options_(void)
+{
+    menu_detector_view_draw_selector("CLIENT OPTS",
+                                     s_option_labels,
+                                     MENU_WIFI_DETECTOR_OPTION_COUNT,
+                                     s_options_index);
+}
+
+static void menu_wifi_detector_render_deauth_confirm_(void)
+{
+    char mac[18];
+
+    if(s_deauth_is_set)
+    {
+        char msg[18];
+        (void)snprintf(msg, sizeof(msg), "%d CLIENTS", s_deauth_set_count);
+        menu_detector_view_draw_error("DEAUTH SET?", msg, "A:CONFIRM B:CANCEL");
+        return;
+    }
+    menu_wifi_detector_format_client_mac_(mac, sizeof(mac));
+    menu_detector_view_draw_error("DEAUTH CLIENT?", mac, "A:CONFIRM B:CANCEL");
+}
+
+static void menu_wifi_detector_render_deauth_running_(void)
+{
+    char mac[18];
+
+    if(s_deauth_is_set)
+    {
+        char msg[18];
+        (void)snprintf(msg, sizeof(msg), "%d CLIENTS", s_deauth_set_count);
+        menu_detector_view_draw_error("DEAUTHING SET", msg, "B:STOP");
+        return;
+    }
+    menu_wifi_detector_format_client_mac_(mac, sizeof(mac));
+    menu_detector_view_draw_error("DEAUTHING", mac, "B:STOP");
+}
+
+/* Returns the set index of a client MAC, or -1 if not currently selected. */
+static int menu_wifi_detector_set_find_(const uint8_t mac[6])
+{
+    for(int i = 0; i < s_deauth_set_count; ++i)
+    {
+        if(memcmp(s_deauth_set[i], mac, 6) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Adds or removes a client MAC from the multi-deauth selection set. */
+static void menu_wifi_detector_set_toggle_(const uint8_t mac[6])
+{
+    int idx = menu_wifi_detector_set_find_(mac);
+
+    if(idx >= 0)
+    {
+        for(int j = idx; (j + 1) < s_deauth_set_count; ++j)
+        {
+            (void)memcpy(s_deauth_set[j], s_deauth_set[j + 1], 6);
+        }
+        s_deauth_set_count--;
+    }
+    else if(s_deauth_set_count < MENU_WIFI_DETECTOR_MAX_SEL)
+    {
+        (void)memcpy(s_deauth_set[s_deauth_set_count], mac, 6);
+        s_deauth_set_count++;
+    }
+}
+
+static void menu_wifi_detector_set_clear_(void)
+{
+    s_deauth_set_count = 0;
+    s_deauth_is_set = false;
+}
+
+/* Runs in the menu task context: releases the detector monitor/radio and
+ * hands off to the targeted deauth attack (which re-inits Wi-Fi in apsta). */
+static void menu_wifi_detector_start_deauth_(void)
+{
+    wifi_ap_record_t ap;
+
+    (void)memset(&ap, 0, sizeof(ap));
+    (void)memcpy(ap.bssid, s_selected_ap_bssid, sizeof(ap.bssid));
+    ap.primary = s_monitor_channel;
+
+    (void)poom_wifi_detector_stop();
+    s_monitor_active = false;
+
+    if(s_deauth_is_set && (s_deauth_set_count > 0))
+    {
+        poom_wifi_attacks_deauth_clients_start(&ap, s_deauth_set,
+                                               (size_t)s_deauth_set_count);
+    }
+    else
+    {
+        poom_wifi_attacks_deauth_client_start(&ap, s_deauth_client);
+    }
+    s_deauth_active = true;
+    s_screen = MENU_WIFI_DETECTOR_SCREEN_DEAUTH_RUNNING;
+    s_input_dirty = true;
+}
+
+/* Runs in the menu task context: stops the attack and returns to the AP list,
+ * letting the main loop restart the client monitor from a clean radio state. */
+static void menu_wifi_detector_stop_deauth_(void)
+{
+    poom_wifi_attacks_stop_all();
+    s_deauth_active = false;
+    menu_wifi_detector_set_clear_();
+
+    s_ap_clients_selected = false;
+    s_monitor_active = false;
+    s_monitor_channel = 0U;
+    s_record_count = 0;
+    s_selected_index = 0;
+    s_scroll = 0;
+    s_detail_index = -1;
+    s_last_monitor_refresh = 0U;
+    s_screen = MENU_WIFI_DETECTOR_SCREEN_SCAN;
+    menu_wifi_detector_reset_text_scroll_();
+    s_input_dirty = true;
 }
 
 static void menu_wifi_detector_render_(void)
@@ -807,6 +1060,18 @@ static void menu_wifi_detector_render_(void)
     else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_DETAIL)
     {
         menu_wifi_detector_render_detail_();
+    }
+    else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_OPTIONS)
+    {
+        menu_wifi_detector_render_options_();
+    }
+    else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM)
+    {
+        menu_wifi_detector_render_deauth_confirm_();
+    }
+    else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_DEAUTH_RUNNING)
+    {
+        menu_wifi_detector_render_deauth_running_();
     }
     else
     {
@@ -900,6 +1165,7 @@ static void menu_wifi_detector_select_ap_(void)
     }
     channel = s_records[s_selected_index]->channel;
     (void)memcpy(bssid, s_records[s_selected_index]->bssid, sizeof(bssid));
+    (void)memcpy(s_selected_ap_bssid, bssid, sizeof(s_selected_ap_bssid));
     status = poom_wifi_detector_monitor_select_ap(channel, bssid);
     if(status != ESP_OK)
     {
@@ -910,6 +1176,7 @@ static void menu_wifi_detector_select_ap_(void)
     }
 
     s_ap_clients_selected = true;
+    menu_wifi_detector_set_clear_();
     s_monitor_channel = channel;
     s_record_count = 0;
     s_selected_index = 0;
@@ -928,6 +1195,11 @@ static void menu_wifi_detector_cleanup_(void)
     s_scan_requested = false;
     s_scan_complete = false;
     s_scan_task = NULL;
+    if(s_deauth_active || poom_wifi_attacks_deauth_client_is_running())
+    {
+        poom_wifi_attacks_stop_all();
+        s_deauth_active = false;
+    }
     (void)poom_wifi_detector_stop();
     s_monitor_active = false;
     if(s_buttons_subscribed)
@@ -939,7 +1211,18 @@ static void menu_wifi_detector_cleanup_(void)
     }
     menu_wifi_detector_free_();
     s_task = NULL;
-    (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    if(s_hunt_launch)
+    {
+        /* Radio is already released above; Fox Hunt takes over and will publish
+         * the resume token itself when it exits. */
+        s_hunt_launch = false;
+        app_fox_hunt_wifi_client(s_hunt_ap_bssid, s_hunt_channel, s_hunt_client,
+                                 s_hunt_name);
+    }
+    else
+    {
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    }
 }
 
 static void menu_wifi_detector_task_(void *arg)
@@ -958,6 +1241,17 @@ static void menu_wifi_detector_task_(void *arg)
                 continue;
             }
             break;
+        }
+
+        if(s_deauth_start_requested)
+        {
+            s_deauth_start_requested = false;
+            menu_wifi_detector_start_deauth_();
+        }
+        if(s_deauth_stop_requested)
+        {
+            s_deauth_stop_requested = false;
+            menu_wifi_detector_stop_deauth_();
         }
 
         if((s_screen == MENU_WIFI_DETECTOR_SCREEN_SCAN) ||
@@ -994,6 +1288,21 @@ static void menu_wifi_detector_task_(void *arg)
                 s_monitor_active = true;
                 s_monitor_channel = 0U;
                 s_last_monitor_refresh = 0U;
+
+                if(s_resume_ap_valid)
+                {
+                    /* Returning from a Fox Hunt: lock straight onto that AP's
+                     * clients instead of discovering APs first. */
+                    if(poom_wifi_detector_monitor_select_ap(s_resume_channel,
+                                                            s_resume_ap_bssid) == ESP_OK)
+                    {
+                        s_ap_clients_selected = true;
+                        s_monitor_channel = s_resume_channel;
+                        (void)memcpy(s_selected_ap_bssid, s_resume_ap_bssid,
+                                     sizeof(s_selected_ap_bssid));
+                    }
+                    s_resume_ap_valid = false;
+                }
             }
 
             if(use_monitor && s_monitor_active)
@@ -1167,6 +1476,21 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
         return;
     }
     (void)memcpy(&event, msg->data, sizeof(event));
+
+    /* Long-press A launches the tagged-set deauth (moved off a LEFT tap so a
+     * stray press can't fire frames, and so LEFT is free for the name/MAC
+     * toggle). Only in the client list, with at least one client tagged. */
+    if((event.event == BUTTON_LONG_PRESS_START) && (event.button == BUTTON_A) &&
+       (s_screen == MENU_WIFI_DETECTOR_SCREEN_SCAN) &&
+       menu_wifi_detector_is_ap_clients_() && s_ap_clients_selected &&
+       (s_deauth_set_count > 0))
+    {
+        s_deauth_is_set = true;
+        s_screen = MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM;
+        s_input_dirty = true;
+        return;
+    }
+
     if(event.event != BUTTON_SINGLE_CLICK)
     {
         return;
@@ -1189,6 +1513,89 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
         else
         {
             poom_ui_keyboard_draw(&s_alias_keyboard);
+        }
+        return;
+    }
+
+    if(s_screen == MENU_WIFI_DETECTOR_SCREEN_OPTIONS)
+    {
+        if(event.button == BUTTON_B)
+        {
+            s_screen = MENU_WIFI_DETECTOR_SCREEN_DETAIL;
+            s_input_dirty = true;
+        }
+        else if((event.button == BUTTON_UP) && (s_options_index > 0))
+        {
+            --s_options_index;
+            s_input_dirty = true;
+        }
+        else if((event.button == BUTTON_DOWN) &&
+                (s_options_index < (MENU_WIFI_DETECTOR_OPTION_COUNT - 1)))
+        {
+            ++s_options_index;
+            s_input_dirty = true;
+        }
+        else if(event.button == BUTTON_A)
+        {
+            if(s_options_index == MENU_WIFI_DETECTOR_OPTION_ALIAS)
+            {
+                menu_wifi_detector_enter_alias_();
+            }
+            else if((s_detail_index >= 0) && (s_detail_index < s_record_count))
+            {
+                if(s_options_index == MENU_WIFI_DETECTOR_OPTION_HUNT)
+                {
+                    /* Capture the target and hand off to Fox Hunt on exit. */
+                    (void)memcpy(s_hunt_client,
+                                 s_records[s_detail_index]->bssid,
+                                 sizeof(s_hunt_client));
+                    (void)memcpy(s_hunt_ap_bssid, s_selected_ap_bssid,
+                                 sizeof(s_hunt_ap_bssid));
+                    s_hunt_channel = s_monitor_channel;
+                    (void)snprintf(s_hunt_name, sizeof(s_hunt_name),
+                                   "%02X%02X%02X%02X%02X%02X",
+                                   s_hunt_client[0], s_hunt_client[1],
+                                   s_hunt_client[2], s_hunt_client[3],
+                                   s_hunt_client[4], s_hunt_client[5]);
+                    s_hunt_launch = true;
+                    s_exit_requested = true;
+                }
+                else
+                {
+                    (void)memcpy(s_deauth_client,
+                                 s_records[s_detail_index]->bssid,
+                                 sizeof(s_deauth_client));
+                    s_deauth_is_set = false;
+                    s_screen = MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM;
+                    s_input_dirty = true;
+                }
+            }
+        }
+        return;
+    }
+
+    if(s_screen == MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM)
+    {
+        if(event.button == BUTTON_A)
+        {
+            s_deauth_start_requested = true;
+            s_input_dirty = true;
+        }
+        else if(event.button == BUTTON_B)
+        {
+            s_screen = s_deauth_is_set ? MENU_WIFI_DETECTOR_SCREEN_SCAN
+                                       : MENU_WIFI_DETECTOR_SCREEN_OPTIONS;
+            s_input_dirty = true;
+        }
+        return;
+    }
+
+    if(s_screen == MENU_WIFI_DETECTOR_SCREEN_DEAUTH_RUNNING)
+    {
+        if(event.button == BUTTON_B)
+        {
+            s_deauth_stop_requested = true;
+            s_input_dirty = true;
         }
         return;
     }
@@ -1232,7 +1639,16 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
         }
         else if(event.button == BUTTON_A)
         {
-            menu_wifi_detector_enter_alias_();
+            if(menu_wifi_detector_is_ap_clients_() && s_ap_clients_selected)
+            {
+                s_options_index = 0;
+                s_screen = MENU_WIFI_DETECTOR_SCREEN_OPTIONS;
+                s_input_dirty = true;
+            }
+            else
+            {
+                menu_wifi_detector_enter_alias_();
+            }
         }
         return;
     }
@@ -1279,6 +1695,22 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
         menu_wifi_detector_reset_text_scroll_();
         s_input_dirty = true;
     }
+    else if((event.button == BUTTON_RIGHT) &&
+            menu_wifi_detector_is_ap_clients_() && s_ap_clients_selected &&
+            (s_selected_index >= 0) && (s_selected_index < s_record_count))
+    {
+        /* Tag / untag this client for a multi-client deauth. */
+        menu_wifi_detector_set_toggle_(s_records[s_selected_index]->bssid);
+        s_input_dirty = true;
+    }
+    else if(event.button == BUTTON_LEFT)
+    {
+        /* Toggle the list labels between name/SSID and MAC/BSSID. (Launching
+         * the tagged deauth moved to a long-press of A.) */
+        s_show_mac = !s_show_mac;
+        menu_wifi_detector_apply_names_();
+        s_input_dirty = true;
+    }
     else if(event.button == BUTTON_A)
     {
         if(menu_wifi_detector_is_ap_clients_() && !s_ap_clients_selected)
@@ -1294,7 +1726,9 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
     }
 }
 
-void menu_wifi_detector_show(void)
+static void menu_wifi_detector_boot_(bool resume_clients,
+                                     const uint8_t ap_bssid[6],
+                                     uint8_t channel)
 {
     if(s_active)
     {
@@ -1315,6 +1749,7 @@ void menu_wifi_detector_show(void)
     s_scroll = 0;
     s_filter_index = 0;
     s_detail_index = -1;
+    s_show_mac = false;
     s_screen = MENU_WIFI_DETECTOR_SCREEN_SELECT;
     s_exit_requested = false;
     s_scan_requested = false;
@@ -1329,9 +1764,33 @@ void menu_wifi_detector_show(void)
     s_last_monitor_refresh = 0U;
     s_monitor_channel = 0U;
     s_ap_clients_selected = false;
+    s_options_index = 0;
+    s_deauth_active = false;
+    s_deauth_start_requested = false;
+    s_deauth_stop_requested = false;
+    s_hunt_launch = false;
+    menu_wifi_detector_set_clear_();
+    (void)memset(s_selected_ap_bssid, 0, sizeof(s_selected_ap_bssid));
+    (void)memset(s_deauth_client, 0, sizeof(s_deauth_client));
     s_input_dirty = true;
     menu_wifi_detector_reset_text_scroll_();
     s_secrets_ready = (poom_secrets_init() == ESP_OK);
+
+    if(resume_clients && (ap_bssid != NULL) && (channel != 0U))
+    {
+        /* Jump straight into this AP's client list; the task's monitor bootstrap
+         * applies the AP selection once the monitor is up. */
+        s_filter_index = (int)POOM_WIFI_DETECTOR_FILTER_AP_CLIENTS;
+        s_screen = MENU_WIFI_DETECTOR_SCREEN_SCAN;
+        (void)memcpy(s_selected_ap_bssid, ap_bssid, sizeof(s_selected_ap_bssid));
+        (void)memcpy(s_resume_ap_bssid, ap_bssid, sizeof(s_resume_ap_bssid));
+        s_resume_channel = channel;
+        s_resume_ap_valid = true;
+    }
+    else
+    {
+        s_resume_ap_valid = false;
+    }
 
     if(!s_buttons_subscribed)
     {
@@ -1371,4 +1830,14 @@ void menu_wifi_detector_show(void)
         vTaskDelay(pdMS_TO_TICKS(1200U));
         (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
     }
+}
+
+void menu_wifi_detector_show(void)
+{
+    menu_wifi_detector_boot_(false, NULL, 0U);
+}
+
+void menu_wifi_detector_show_clients(const uint8_t ap_bssid[6], uint8_t channel)
+{
+    menu_wifi_detector_boot_(true, ap_bssid, channel);
 }

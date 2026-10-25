@@ -40,6 +40,7 @@
 #include "menu_deauth_detector.h"
 #include "menu_dfu.h"
 #include "menu_edge_impulse.h"
+#include "menu_fox_hunt.h"
 #include "menu_http_load_test.h"
 #include "menu_fw_info.h"
 #include "menu_i2c_scan.h"
@@ -63,6 +64,7 @@
 #include "menu_poom_drone_emul.h"
 #include "menu_poom_wifi_arp.h"
 #include "menu_poom_wifi_scan.h"
+#include "menu_wifi_profiles.h"
 #include "menu_scanner_core.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
@@ -77,6 +79,9 @@
 #include "freertos/task.h"
 
 #include "esp_system.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "esp_log.h"
 
 #ifndef BUTTON_SINGLE_CLICK
 #define BUTTON_SINGLE_CLICK 4
@@ -116,6 +121,8 @@ typedef enum
 {
     POOM_MENU_SCREEN_MAIN = 0,
     POOM_MENU_SCREEN_SUBMENU,
+    POOM_MENU_SCREEN_REORDER_PICK,
+    POOM_MENU_SCREEN_RESET_CONFIRM,
 } poom_menu_screen_t;
 
 typedef void (*poom_menu_action_fn)(void);
@@ -146,11 +153,15 @@ static volatile uint8_t s_flash_timer = 0;
 static volatile uint8_t s_sub_mode = 0;
 static volatile uint8_t s_sub_selected = 0;
 static volatile uint8_t s_sub_scroll = 0;
+static volatile uint8_t s_reorder_pick = 0;
+static bool s_reorder_from_settings = false;
 
 static void on_button_any_(const poom_sbus_msg_t *msg, void *user);
 static void on_menu_resume_(const poom_sbus_msg_t *msg, void *user);
 
 static char s_btn_sound_label[20] = "BTN SOUND OFF";
+static void action_open_reorder_picker_(void);
+static void action_confirm_reset_menu_order_(void);
 
 /**
  * @brief Returns the display label for the current state.
@@ -337,6 +348,20 @@ static void action_deauth_detector_(void)
     vTaskDelay(pdMS_TO_TICKS(180U));
     app_deauth_detector();
 }
+
+/**
+ * @brief Internal helper for `action_fox_hunt`.
+ *
+ * @return void
+ */
+static void action_fox_hunt_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    app_fox_hunt();
+}
+
+
 
 /**
  * @brief Internal helper for `action_karma`.
@@ -741,6 +766,7 @@ static void action_tv_off_(void)
     menu_tv_off_show();
 }
 
+
 /**
  * @brief Internal helper for `action_dfu`.
  *
@@ -775,6 +801,13 @@ static void action_wifi_scan_(void)
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
     menu_poom_wifi_scan_show();
+}
+
+static void action_wifi_profiles_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_profiles_show();
 }
 
 /**
@@ -913,6 +946,7 @@ static const poom_menu_item_t s_apps_beast[] = {
 #endif
     {"DEAUTH", action_deauth_},
     {"DEAUTH DET", action_deauth_detector_},
+    {"FOX HUNT", action_fox_hunt_},
     {"KARMA", action_karma_},
     {"SPAM WIFI", action_spam_wifi_},
     {"SPAM BLE", action_ble_spam_},
@@ -967,10 +1001,13 @@ static const poom_menu_item_t s_apps_settings[] = {
     {s_btn_sound_label, action_btn_sound_toggle_},
     {"DFU", action_dfu_},
     {"FW INFO", action_fw_info_},
+    {"MOVE MENU", action_open_reorder_picker_},
+    {"RESET ORDER", action_confirm_reset_menu_order_},
 //    {"IMU", action_imu_monitor_},
 //    {"LED RGB", action_led_rgb_},
     //{"BOOT", action_reboot_},
     {"WI-FI", action_wifi_scan_},
+    {"WIFI PROFILES", action_wifi_profiles_},
     //{"NFC TUNE", action_nfc_tune_},
     {"SD", action_files_},
 };
@@ -982,6 +1019,102 @@ static const poom_menu_submenu_t s_submenus[] = {
     {.header = "THE MAKER", .items = s_apps_maker, .count = (uint8_t)(sizeof(s_apps_maker) / sizeof(s_apps_maker[0]))},
     {.header = "SETTINGS", .items = s_apps_settings, .count = (uint8_t)(sizeof(s_apps_settings) / sizeof(s_apps_settings[0]))},
 };
+
+/* Persist independent permutations, never application data or targets. */
+#define MENU_MAX_ITEMS 32
+#define MENU_ORDER_MODES 5
+static uint8_t s_order[MENU_ORDER_MODES][MENU_MAX_ITEMS];
+static bool s_reordering = false;
+static uint8_t s_original[MENU_MAX_ITEMS];
+static const char *s_order_keys[MENU_ORDER_MODES] = {"beast", "zen", "gamer", "maker", "settings"};
+
+static void menu_order_defaults_(uint8_t mode)
+{
+    const uint8_t n = s_submenus[mode].count < MENU_MAX_ITEMS ? s_submenus[mode].count : MENU_MAX_ITEMS;
+    for (uint8_t i = 0; i < n; ++i) s_order[mode][i] = i;
+}
+static bool menu_order_valid_(uint8_t mode)
+{
+    uint32_t seen = 0;
+    const uint8_t n = s_submenus[mode].count;
+    if (n > MENU_MAX_ITEMS) return false;
+    for (uint8_t i = 0; i < n; ++i) {
+        uint8_t v = s_order[mode][i];
+        if (v >= n || (seen & (1UL << v))) return false;
+        seen |= 1UL << v;
+    }
+    return true;
+}
+static void menu_order_load_(void)
+{
+    const esp_err_t init_err = nvs_flash_init();
+    if (init_err != ESP_OK) {
+        ESP_LOGE("poom_menu", "Menu order NVS init failed: %s", esp_err_to_name(init_err));
+        for (uint8_t mode = 0; mode < MENU_ORDER_MODES; ++mode) menu_order_defaults_(mode);
+        return;
+    }
+    nvs_handle_t h;
+    esp_err_t open_err = nvs_open("menu_order", NVS_READONLY, &h);
+    bool ok = open_err == ESP_OK;
+    if (!ok && open_err != ESP_ERR_NVS_NOT_FOUND)
+        ESP_LOGW("poom_menu", "Menu order load unavailable: %s", esp_err_to_name(open_err));
+    for (uint8_t mode = 0; mode < MENU_ORDER_MODES; ++mode) {
+        menu_order_defaults_(mode);
+        if (ok && s_submenus[mode].count <= MENU_MAX_ITEMS) {
+            size_t n = s_submenus[mode].count;
+            if (nvs_get_blob(h, s_order_keys[mode], s_order[mode], &n) != ESP_OK ||
+                n != s_submenus[mode].count || !menu_order_valid_(mode))
+                menu_order_defaults_(mode);
+        }
+    }
+    if (ok) nvs_close(h);
+}
+static void menu_order_save_(uint8_t mode)
+{
+    nvs_handle_t h;
+    if (mode >= MENU_ORDER_MODES || !menu_order_valid_(mode)) return;
+    esp_err_t err = nvs_open("menu_order", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, s_order_keys[mode], s_order[mode], s_submenus[mode].count);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK)
+        ESP_LOGE("poom_menu", "Menu order save failed (%s): %s", s_order_keys[mode], esp_err_to_name(err));
+}
+static void action_open_reorder_picker_(void)
+{
+    s_reorder_pick = 0;
+    s_reorder_from_settings = false;
+    s_screen = POOM_MENU_SCREEN_REORDER_PICK;
+    s_flash_timer = 0;
+}
+/* Destructive reset occurs only after an explicit confirmation. */
+static void action_confirm_reset_menu_order_(void)
+{
+    s_screen = POOM_MENU_SCREEN_RESET_CONFIRM;
+    s_flash_timer = 0;
+}
+
+static void menu_order_reset_all_(void)
+{
+    for (uint8_t mode = 0; mode < MENU_ORDER_MODES; ++mode)
+    {
+        menu_order_defaults_(mode);
+        menu_order_save_(mode);
+    }
+}
+
+static uint8_t menu_order_index_(uint8_t mode, uint8_t position)
+{
+    return mode < MENU_ORDER_MODES && menu_order_valid_(mode) ? s_order[mode][position] : position;
+}
+static void menu_order_swap_(uint8_t mode, uint8_t from, uint8_t to)
+{
+    uint8_t v = s_order[mode][from];
+    s_order[mode][from] = s_order[mode][to];
+    s_order[mode][to] = v;
+}
 
 /**
  * @brief Internal helper for `submenu_for_mode`.
@@ -1180,10 +1313,11 @@ static void render_submenu_(void)
         const uint8_t fg = (sel && !pulse_off) ? BLACK : WHITE;
         const uint8_t bg = (sel && !pulse_off) ? WHITE : BLACK;
 
-        draw_text_(2, y, sub->items[idx].label, fg, bg);
+        if (sel && s_reordering) draw_text_(2, y, ">", fg, bg);
+        draw_text_((sel && s_reordering) ? 10 : 2, y, sub->items[menu_order_index_(s_sub_mode, idx)].label, fg, bg);
     }
 
-    draw_footer_("A SEL", "B BACK");
+    draw_footer_(s_reordering ? "A SAVE" : "A SEL", s_reordering ? "B CANCEL" : (s_sub_mode < MENU_ORDER_MODES ? "R MOVE" : "B BACK"));
     poom_arduboy_display();
 }
 
@@ -1192,8 +1326,36 @@ static void render_submenu_(void)
  *
  * @return void
  */
+static void render_reset_confirmation_(void)
+{
+    poom_arduboy_clear();
+    draw_header_("RESET ORDER?");
+    draw_text_(2, 15, "RESET ALL MENU", WHITE, BLACK);
+    draw_text_(2, 26, "ORDERS TO DEFAULT?", WHITE, BLACK);
+    draw_text_(2, 38, "CANNOT BE UNDONE", WHITE, BLACK);
+    draw_footer_("A YES", "B NO");
+    poom_arduboy_display();
+}
+
+static void render_reorder_picker_(void)
+{
+    static const char *const categories[4] = {"THE BEAST", "THE ZEN", "THE GAMER", "THE MAKER"};
+    poom_arduboy_clear();
+    draw_header_("MOVE MENU");
+    for (uint8_t i = 0; i < 4; ++i)
+    {
+        const int16_t y = (int16_t)(POOM_MENU_SUB_LIST_Y0 + i * POOM_MENU_SUB_ROW_STEP);
+        const bool selected = (i == s_reorder_pick);
+        if (selected) poom_arduboy_fill_rect(0, (int16_t)(y - 1), 128, POOM_MENU_SUB_HILITE_H, WHITE);
+        draw_text_(2, y, categories[i], selected ? BLACK : WHITE, selected ? WHITE : BLACK);
+    }
+    draw_footer_("A SEL", "B BACK");
+    poom_arduboy_display();
+}
+
 static void enter_submenu_(void)
 {
+    s_reordering = false;
     s_sub_mode = s_mode_index;
     s_sub_selected = 0;
     s_sub_scroll = 0;
@@ -1208,6 +1370,7 @@ static void enter_submenu_(void)
  */
 static void back_to_main_(void)
 {
+    s_reordering = false;
     s_screen = POOM_MENU_SCREEN_MAIN;
     s_flash_timer = 0;
 }
@@ -1271,7 +1434,15 @@ static void submenu_move_(int delta)
         return;
     }
 
-    s_sub_selected = wrap_index_(s_sub_selected, delta, total);
+    uint8_t previous = s_sub_selected;
+    if (s_reordering) {
+        /* Do not wrap a picked item from the first row to the last. */
+        if ((delta < 0 && previous == 0) || (delta > 0 && previous == total - 1u)) return;
+        s_sub_selected = (uint8_t)((int)previous + delta);
+        menu_order_swap_(s_sub_mode, previous, s_sub_selected);
+    } else {
+        s_sub_selected = wrap_index_(s_sub_selected, delta, total);
+    }
 }
 
 /**
@@ -1293,9 +1464,10 @@ static void submenu_select_(void)
         return;
     }
 
-    poom_menu_launch_app(s_sub_mode, idx);
+    const uint8_t app_index = menu_order_index_(s_sub_mode, idx);
+    poom_menu_launch_app(s_sub_mode, app_index);
 
-    poom_menu_action_fn fn = sub->items[idx].on_select;
+    poom_menu_action_fn fn = sub->items[app_index].on_select;
     if (fn != NULL)
     {
         fn();
@@ -1327,6 +1499,39 @@ static void on_button_any_(const poom_sbus_msg_t *msg, void *user)
         return;
     }
 
+    if (s_screen == POOM_MENU_SCREEN_RESET_CONFIRM)
+    {
+        if (ev.button == BUTTON_A)
+        {
+            menu_order_reset_all_();
+            s_screen = POOM_MENU_SCREEN_SUBMENU;
+        }
+        else if (ev.button == BUTTON_B)
+        {
+            s_screen = POOM_MENU_SCREEN_SUBMENU;
+        }
+        return;
+    }
+
+    if (s_screen == POOM_MENU_SCREEN_REORDER_PICK)
+    {
+        if (ev.button == BUTTON_B) { s_screen = POOM_MENU_SCREEN_SUBMENU; return; }
+        if (ev.button == BUTTON_UP) s_reorder_pick = (uint8_t)((s_reorder_pick + 3U) % 4U);
+        else if (ev.button == BUTTON_DOWN) s_reorder_pick = (uint8_t)((s_reorder_pick + 1U) % 4U);
+        else if (ev.button == BUTTON_A)
+        {
+            s_sub_mode = s_reorder_pick;
+            s_sub_selected = 0;
+            s_sub_scroll = 0;
+            s_flash_timer = 0;
+            memcpy(s_original, s_order[s_sub_mode], s_submenus[s_sub_mode].count);
+            s_reordering = true;
+            s_reorder_from_settings = true;
+            s_screen = POOM_MENU_SCREEN_SUBMENU;
+        }
+        return;
+    }
+
     if (s_screen == POOM_MENU_SCREEN_MAIN)
     {
         const uint8_t count = poom_menu_mode_count();
@@ -1353,6 +1558,21 @@ static void on_button_any_(const poom_sbus_msg_t *msg, void *user)
 
     if (ev.button == BUTTON_B)
     {
+        if (s_reordering) {
+            memcpy(s_order[s_sub_mode], s_original, s_submenus[s_sub_mode].count);
+            s_reordering = false;
+            if (s_reorder_from_settings) {
+                s_reorder_from_settings = false;
+                s_sub_mode = 4;
+                s_sub_selected = 0;
+                for (uint8_t pos = 0; pos < s_submenus[4].count; ++pos)
+                {
+                    if (menu_order_index_(4, pos) == 3U) { s_sub_selected = pos; break; }
+                }
+                s_sub_scroll = 0;
+            }
+            return;
+        }
         back_to_main_();
         return;
     }
@@ -1365,9 +1585,29 @@ static void on_button_any_(const poom_sbus_msg_t *msg, void *user)
     {
         submenu_move_(+1);
     }
+    else if (ev.button == BUTTON_RIGHT && s_sub_mode < MENU_ORDER_MODES)
+    {
+        if (!s_reordering) {
+            memcpy(s_original, s_order[s_sub_mode], s_submenus[s_sub_mode].count);
+            s_reordering = true;
+        }
+    }
     else if (ev.button == BUTTON_A)
     {
-        submenu_select_();
+        if (s_reordering) {
+            menu_order_save_(s_sub_mode);
+            s_reordering = false;
+            if (s_reorder_from_settings) {
+                s_reorder_from_settings = false;
+                s_sub_mode = 4;
+                s_sub_selected = 0;
+                for (uint8_t pos = 0; pos < s_submenus[4].count; ++pos)
+                {
+                    if (menu_order_index_(4, pos) == 3U) { s_sub_selected = pos; break; }
+                }
+                s_sub_scroll = 0;
+            }
+        } else submenu_select_();
     }
 }
 
@@ -1399,6 +1639,14 @@ static void menu_task_(void *arg)
         {
             render_submenu_();
         }
+        else if (s_screen == POOM_MENU_SCREEN_REORDER_PICK)
+        {
+            render_reorder_picker_();
+        }
+        else if (s_screen == POOM_MENU_SCREEN_RESET_CONFIRM)
+        {
+            render_reset_confirmation_();
+        }
         else
         {
             render_main_();
@@ -1427,6 +1675,7 @@ void app_poom_menu_principal(void)
     poom_led_rainbow_init();
 
     poom_button_sound_init();
+    menu_order_load_();
     update_btn_sound_label_();
 
     (void)xTaskCreate(menu_task_, "poom_menu", 4096, NULL, 5, &s_menu_task);

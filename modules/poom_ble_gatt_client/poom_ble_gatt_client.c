@@ -83,6 +83,9 @@ static poom_ble_gatt_client_profile_inst_t s_profile_tab[POOM_BLE_GATT_CLIENT_PR
 
 static char s_remote_device_name[POOM_BLE_GATT_CLIENT_REMOTE_NAME_MAX_LEN] = {0};
 static bool s_search_by_name = false;
+static bool s_match_by_bda = false;
+static esp_bd_addr_t s_remote_bda_target = {0};
+static bool s_bonding_enabled = false;
 static bool s_is_connected = false;
 static bool s_server_attached = false;
 static bool s_started = false;
@@ -265,7 +268,41 @@ void poom_ble_gatt_client_set_remote_device_name(const char *device_name)
 
     (void)strncpy(s_remote_device_name, device_name, sizeof(s_remote_device_name) - 1U);
     s_remote_device_name[sizeof(s_remote_device_name) - 1U] = '\0';
-    s_search_by_name = true;
+    s_search_by_name = (s_remote_device_name[0] != '\0');
+}
+
+void poom_ble_gatt_client_set_remote_bda(const uint8_t bda[6])
+{
+    if (bda == NULL)
+    {
+        s_match_by_bda = false;
+        (void)memset(s_remote_bda_target, 0, sizeof(s_remote_bda_target));
+        return;
+    }
+    (void)memcpy(s_remote_bda_target, bda, sizeof(s_remote_bda_target));
+    s_match_by_bda = true;
+}
+
+void poom_ble_gatt_client_set_bonding(bool enable)
+{
+    s_bonding_enabled = enable;
+}
+
+/* Configure Just Works bonding (no IO capability, bonding + encryption keys).
+ * Only called when bonding is enabled, so other consumers are unaffected. */
+static void poom_ble_gatt_client_apply_security_(void)
+{
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
+    esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
+    uint8_t key_size = 16U;
+    uint8_t init_key = (uint8_t)(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    uint8_t rsp_key = (uint8_t)(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+
+    (void)esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+    (void)esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+    (void)esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+    (void)esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+    (void)esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
 }
 
 void poom_ble_gatt_client_set_scan_params(const poom_ble_gatt_client_scan_params_t *scan_params)
@@ -311,6 +348,50 @@ void poom_ble_gatt_client_send_data(uint8_t *data, int length)
         ESP_GATT_AUTH_REQ_NONE);
 }
 
+esp_err_t poom_ble_gatt_client_write_char16(uint16_t char_uuid16,
+                                            const uint8_t *data,
+                                            int length,
+                                            bool with_response)
+{
+    poom_ble_gatt_client_profile_inst_t *inst =
+        &s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID];
+    esp_bt_uuid_t uuid = {0};
+    esp_gattc_char_elem_t elem = {0};
+    uint16_t count = 1U;
+    esp_gatt_status_t status;
+
+    if ((data == NULL) || (length <= 0))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_is_connected || !s_server_attached ||
+        (inst->gattc_if == ESP_GATT_IF_NONE))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uuid.len = ESP_UUID_LEN_16;
+    uuid.uuid.uuid16 = char_uuid16;
+
+    status = esp_ble_gattc_get_char_by_uuid(
+        inst->gattc_if, inst->conn_id,
+        inst->service_start_handle, inst->service_end_handle,
+        uuid, &elem, &count);
+    if ((status != ESP_GATT_OK) || (count == 0U))
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    return esp_ble_gattc_write_char(
+        inst->gattc_if,
+        inst->conn_id,
+        elem.char_handle,
+        length,
+        (uint8_t *)data,
+        with_response ? ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP,
+        ESP_GATT_AUTH_REQ_NONE);
+}
+
 /**
  * @brief Profile-level GATTC event handler.
  */
@@ -348,6 +429,13 @@ static void poom_ble_gatt_client_profile_event_handler_(esp_gattc_cb_event_t eve
 
             POOM_BLE_GATT_CLIENT_PRINTF_I("connected conn_id=%d if=%d", p->connect.conn_id, gattc_if);
             poom_ble_gatt_client_log_bda_(p->connect.remote_bda);
+
+            if (s_bonding_enabled)
+            {
+                /* Initiate Just Works bonding/encryption; some peripherals only
+                 * stream their real data over an encrypted link. */
+                (void)esp_ble_set_encryption(p->connect.remote_bda, ESP_BLE_SEC_ENCRYPT);
+            }
 
             ret = esp_ble_gattc_send_mtu_req(gattc_if, p->connect.conn_id);
             if (ret != ESP_OK)
@@ -617,6 +705,26 @@ static void poom_ble_gatt_client_gap_event_handler_(esp_gap_ble_cb_event_t event
             switch (scan_result->scan_rst.search_evt)
             {
                 case ESP_GAP_SEARCH_INQ_RES_EVT:
+                    if (s_match_by_bda)
+                    {
+                        /* Connect to a known address directly: robust when the
+                         * advertised name is absent/truncated, and not gated on
+                         * RSSI (the caller controls proximity). */
+                        if ((memcmp(scan_result->scan_rst.bda, s_remote_bda_target,
+                                    sizeof(esp_bd_addr_t)) == 0) && !s_is_connected)
+                        {
+                            s_is_connected = true;
+                            POOM_BLE_GATT_CLIENT_PRINTF_I("connecting by bda (rssi=%d)",
+                                                   scan_result->scan_rst.rssi);
+                            (void)esp_ble_gap_stop_scanning();
+                            (void)esp_ble_gattc_open(
+                                s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].gattc_if,
+                                scan_result->scan_rst.bda,
+                                scan_result->scan_rst.ble_addr_type,
+                                true);
+                        }
+                        break;
+                    }
                     if (!s_search_by_name)
                     {
                         break;
@@ -683,6 +791,19 @@ static void poom_ble_gatt_client_gap_event_handler_(esp_gap_ble_cb_event_t event
                                    param->update_conn_params.conn_int,
                                    param->update_conn_params.latency,
                                    param->update_conn_params.timeout);
+            break;
+
+        case ESP_GAP_BLE_SEC_REQ_EVT:
+            /* Peer asked to bond: accept (Just Works) when bonding is enabled. */
+            if (s_bonding_enabled)
+            {
+                (void)esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+            }
+            break;
+
+        case ESP_GAP_BLE_AUTH_CMPL_EVT:
+            POOM_BLE_GATT_CLIENT_PRINTF_I("bonding %s",
+                                   param->ble_security.auth_cmpl.success ? "ok" : "FAILED");
             break;
 
         default:
@@ -822,6 +943,11 @@ esp_err_t poom_ble_gatt_client_start(void)
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("set local mtu failed: 0x%x", ret);
+    }
+
+    if (s_bonding_enabled)
+    {
+        poom_ble_gatt_client_apply_security_();
     }
 
     s_started = true;

