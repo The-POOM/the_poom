@@ -74,6 +74,7 @@ typedef struct
     uint8_t pmkid_count;
     uint8_t valid_pair_count;
     uint8_t client_count; /* unique stations seen exchanging data with the target BSSID */
+    uint16_t eapol_frame_count; /* EAPOL frames seen for the selected BSSID */
     uint16_t deauth_count; /* deauthentication frames declaring the target BSSID */
     bool complete;
     bool hash22000_saved;

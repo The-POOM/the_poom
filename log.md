@@ -1,3 +1,47 @@
+## POOM 1.0.14
+
+### FOX HUNT
+- Added **Fox Hunt** to locate BLE devices, Wi-Fi access points and connected clients using RSSI.
+- Added real-time signal strength feedback with adjustable LED brightness and audio volume.
+- Added direct access to Fox Hunt from Wi-Fi and BLE detection screens.
+- Added optional targeted deauthentication controls for authorised Wi-Fi client testing.
+- Added persistent settings for audio and LED preferences.
+
+### WIFI DETECT
+- Added **AP ACTIONS** menu with `VIEW CLIENTS` and `CAPTURE HS`.
+- Added targeted handshake capture locked to the selected AP's **BSSID and channel**.
+- Added a dedicated **HANDSHAKE** screen displaying EAPOL activity, clients, PMKID, deauthentication frames and capture status.
+- Added real-time EAPOL frame counting during PCAP capture.
+- Added selective client tagging and targeted deauthentication.
+- Added **OUI/vendor identification**, MAC address display toggle and device aliases.
+- Improved AP monitoring, client discovery and sniffer cleanup.
+
+### BLE DETECT
+- Improved BLE device identification with aliases and OUI information.
+- Added MAC/OUI display switching.
+- Added direct navigation from BLE device details to Fox Hunt.
+
+### WI-FI PROFILES
+- Added support for saving, selecting, connecting to and deleting multiple Wi-Fi profiles.
+- Added persistent credential storage using the existing secrets store.
+
+### INTERFACE & SYSTEM IMPROVEMENTS
+- Added **custom menu rearrangement** with persistent ordering in NVS.
+- Improved the on-screen keyboard with cursor positioning, text editing and navigation.
+- Added adjustable buzzer volume control.
+- Standardised menu layouts, navigation and contextual controls.
+- Fixed issues with blocked scanning, LED states and menu behaviour.
+- Optimised memory usage and fixed memory leaks.
+
+### Community Contributions
+
+Special thanks to **l3allzh4ck** for the **POOM Community Pack** pull request, bringing new features and improvements, and to **thenrglabs** for testing, reporting issues and sharing valuable feedback.
+
+A big thanks to **jaychugstein** for creating **Pocket Rocket**, a 100-level rocket lander game developed especially for POOM! The game is being added to our online catalog for everyone to enjoy.
+
+**POOM keeps growing thanks to this amazing community. Thank you all for your creativity, support and contributions!**
+
+
 ## POOM 1.0.13
 
 ### IR UNIVERSAL

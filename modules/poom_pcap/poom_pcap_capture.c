@@ -126,6 +126,7 @@ typedef struct
     poom_pcap_handshake_client_t clients[POOM_PCAP_HANDSHAKE_CLIENT_MAX];
     uint8_t pmkid_count;
     uint8_t valid_pair_count;
+    uint16_t eapol_frame_count;
     uint16_t deauth_count;
     bool has_beacon;
     bool hash22000_saved;
@@ -215,6 +216,7 @@ static void poom_pcap_handshake_status_update_(void)
     }
 
     s_hs_status.pmkid_count = s_hs->pmkid_count;
+    s_hs_status.eapol_frame_count = s_hs->eapol_frame_count;
     s_hs_status.deauth_count = s_hs->deauth_count;
     s_hs_status.has_beacon = s_hs->has_beacon;
     s_hs_status.hash22000_saved = s_hs->hash22000_saved;
@@ -834,6 +836,12 @@ static void poom_pcap_handshake_parse_eapol_(const uint8_t *frame, size_t len)
     {
         return;
     }
+
+    if(s_hs->eapol_frame_count < UINT16_MAX)
+    {
+        s_hs->eapol_frame_count++;
+    }
+    poom_pcap_handshake_status_update_();
 
     const uint8_t *eapol = &frame[off];
     const size_t eapol_avail = len - off;
