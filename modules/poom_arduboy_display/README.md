@@ -39,7 +39,12 @@ From `include/Arduboy2.h` (C API):
 - `poom_arduboy_clear`
   - Clears the framebuffer and resets cursor/text size.
 - `poom_arduboy_display`
-  - Flushes the framebuffer to the OLED (page-by-page).
+  - Flushes the framebuffer to the OLED. The first frame is complete; later
+    frames send only changed page spans, as in `poom-arduino`.
+- `poom_arduboy_invert`, `poom_arduboy_set_contrast`,
+  `poom_arduboy_set_display_enabled`
+  - Direct SH1106 panel controls. The `Arduboy2` wrapper exposes these as
+    `invert`, `setContrast`, and `setDisplayEnabled`.
 - `poom_arduboy_set_cursor`, `poom_arduboy_set_text_size`, `poom_arduboy_print`
   - Basic text rendering (5x7 font, fixed advance).
 - `poom_arduboy_delay_short`
@@ -93,3 +98,6 @@ void render(void)
 
 ## Notes
 - This component is **display-only** (no button/audio helpers like the full Arduboy2 library).
+- The incremental-transfer shadow uses external PSRAM, never HP SRAM. Calling
+  `poom_arduboy_set_x_shift()` invalidates it so the following present redraws
+  the complete panel with the new alignment.

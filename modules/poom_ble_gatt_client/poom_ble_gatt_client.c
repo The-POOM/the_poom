@@ -5,6 +5,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_bt.h"
@@ -74,29 +75,73 @@ static void poom_ble_gatt_client_gattc_event_handler_(esp_gattc_cb_event_t event
                                                 esp_gatt_if_t gattc_if,
                                                 esp_ble_gattc_cb_param_t *param);
 
-static poom_ble_gatt_client_profile_inst_t s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_COUNT] = {
-    [POOM_BLE_GATT_CLIENT_PROFILE_ID] = {
-        .gattc_cb = poom_ble_gatt_client_profile_event_handler_,
-        .gattc_if = ESP_GATT_IF_NONE,
+/**
+ * Runtime state is deliberately allocated only for an active/configured GATT
+ * session. Keeping it static costs internal SRAM even when POOM is only
+ * scanning BLE advertisements.
+ */
+typedef struct
+{
+    poom_ble_gatt_client_profile_inst_t profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_COUNT];
+    char remote_device_name[POOM_BLE_GATT_CLIENT_REMOTE_NAME_MAX_LEN];
+    bool search_by_name;
+    bool match_by_bda;
+    esp_bd_addr_t remote_bda_target;
+    bool bonding_enabled;
+    bool is_connected;
+    bool server_attached;
+    bool started;
+    bool scan_params_set;
+    esp_bt_uuid_t remote_filter_service_uuid;
+    esp_bt_uuid_t remote_filter_char_uuid;
+    esp_bt_uuid_t notify_descr_uuid;
+    esp_ble_scan_params_t ble_scan_params;
+    poom_ble_gatt_client_event_cb_t event_cb;
+} poom_ble_gatt_client_state_t;
+
+static poom_ble_gatt_client_state_t *s_state = NULL;
+
+#define s_profile_tab                 (s_state->profile_tab)
+#define s_remote_device_name          (s_state->remote_device_name)
+#define s_search_by_name              (s_state->search_by_name)
+#define s_match_by_bda                (s_state->match_by_bda)
+#define s_remote_bda_target           (s_state->remote_bda_target)
+#define s_bonding_enabled             (s_state->bonding_enabled)
+#define s_is_connected                (s_state->is_connected)
+#define s_server_attached             (s_state->server_attached)
+#define s_started                     (s_state->started)
+#define s_scan_params_set             (s_state->scan_params_set)
+#define s_remote_filter_service_uuid  (s_state->remote_filter_service_uuid)
+#define s_remote_filter_char_uuid     (s_state->remote_filter_char_uuid)
+#define s_notify_descr_uuid           (s_state->notify_descr_uuid)
+#define s_ble_scan_params             (s_state->ble_scan_params)
+#define s_event_cb                    (s_state->event_cb)
+
+static bool poom_ble_gatt_client_state_ensure_(void)
+{
+    if(s_state != NULL)
+    {
+        return true;
     }
-};
 
-static char s_remote_device_name[POOM_BLE_GATT_CLIENT_REMOTE_NAME_MAX_LEN] = {0};
-static bool s_search_by_name = false;
-static bool s_match_by_bda = false;
-static esp_bd_addr_t s_remote_bda_target = {0};
-static bool s_bonding_enabled = false;
-static bool s_is_connected = false;
-static bool s_server_attached = false;
-static bool s_started = false;
+    s_state = calloc(1U, sizeof(*s_state));
+    if(s_state == NULL)
+    {
+        POOM_BLE_GATT_CLIENT_PRINTF_E("no memory for client state");
+        return false;
+    }
 
-static bool s_scan_params_set = false;
-static esp_bt_uuid_t s_remote_filter_service_uuid;
-static esp_bt_uuid_t s_remote_filter_char_uuid;
-static esp_bt_uuid_t s_notify_descr_uuid;
-static esp_ble_scan_params_t s_ble_scan_params;
+    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].gattc_cb =
+        poom_ble_gatt_client_profile_event_handler_;
+    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].gattc_if = ESP_GATT_IF_NONE;
+    return true;
+}
 
-static poom_ble_gatt_client_event_cb_t s_event_cb = {0};
+static void poom_ble_gatt_client_state_free_(void)
+{
+    free(s_state);
+    s_state = NULL;
+}
 
 /**
  * @brief Dumps a BLE address in canonical format.
@@ -165,7 +210,7 @@ static void poom_ble_gatt_client_log_ascii_(const uint8_t *data, size_t len)
  */
 static bool poom_ble_gatt_client_service_match_(const esp_gatt_id_t *service_id)
 {
-    if (service_id == NULL)
+    if ((s_state == NULL) || (service_id == NULL))
     {
         return false;
     }
@@ -200,6 +245,11 @@ static bool poom_ble_gatt_client_service_match_(const esp_gatt_id_t *service_id)
  */
 static void poom_ble_gatt_client_set_defaults_(void)
 {
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
+        return;
+    }
+
     s_remote_filter_service_uuid = poom_ble_gatt_client_default_service_uuid();
     s_remote_filter_char_uuid = poom_ble_gatt_client_default_char_uuid();
     s_notify_descr_uuid = poom_ble_gatt_client_default_notify_descr_uuid();
@@ -259,10 +309,17 @@ esp_ble_scan_params_t poom_ble_gatt_client_default_scan_params(void)
 
 void poom_ble_gatt_client_set_remote_device_name(const char *device_name)
 {
-    if ((device_name == NULL) || (device_name[0] == '\0'))
+    if((device_name == NULL) || (device_name[0] == '\0'))
     {
-        s_remote_device_name[0] = '\0';
-        s_search_by_name = false;
+        if(s_state != NULL)
+        {
+            s_remote_device_name[0] = '\0';
+            s_search_by_name = false;
+        }
+        return;
+    }
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
         return;
     }
 
@@ -275,8 +332,15 @@ void poom_ble_gatt_client_set_remote_bda(const uint8_t bda[6])
 {
     if (bda == NULL)
     {
-        s_match_by_bda = false;
-        (void)memset(s_remote_bda_target, 0, sizeof(s_remote_bda_target));
+        if(s_state != NULL)
+        {
+            s_match_by_bda = false;
+            (void)memset(s_remote_bda_target, 0, sizeof(s_remote_bda_target));
+        }
+        return;
+    }
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
         return;
     }
     (void)memcpy(s_remote_bda_target, bda, sizeof(s_remote_bda_target));
@@ -285,7 +349,35 @@ void poom_ble_gatt_client_set_remote_bda(const uint8_t bda[6])
 
 void poom_ble_gatt_client_set_bonding(bool enable)
 {
+    if(!enable && (s_state == NULL))
+    {
+        return;
+    }
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
+        return;
+    }
     s_bonding_enabled = enable;
+}
+
+void poom_ble_gatt_client_set_recon_mode(bool enable)
+{
+    if(!enable && (s_state == NULL))
+    {
+        return;
+    }
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
+        return;
+    }
+    if(enable)
+    {
+        (void)memset(&s_remote_filter_service_uuid, 0, sizeof(s_remote_filter_service_uuid));
+    }
+    else if(s_remote_filter_service_uuid.len == 0U)
+    {
+        s_remote_filter_service_uuid = poom_ble_gatt_client_default_service_uuid();
+    }
 }
 
 /* Configure Just Works bonding (no IO capability, bonding + encryption keys).
@@ -309,7 +401,14 @@ void poom_ble_gatt_client_set_scan_params(const poom_ble_gatt_client_scan_params
 {
     if (scan_params == NULL)
     {
-        poom_ble_gatt_client_set_defaults_();
+        if(s_state != NULL)
+        {
+            poom_ble_gatt_client_set_defaults_();
+        }
+        return;
+    }
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
         return;
     }
 
@@ -322,6 +421,15 @@ void poom_ble_gatt_client_set_scan_params(const poom_ble_gatt_client_scan_params
 
 void poom_ble_gatt_client_set_callbacks(poom_ble_gatt_client_event_cb_t event_cb)
 {
+    if((event_cb.handler_client_cb == NULL) && (event_cb.handler_gap_cb == NULL) &&
+       (s_state == NULL))
+    {
+        return;
+    }
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
+        return;
+    }
     s_event_cb = event_cb;
 }
 
@@ -332,7 +440,7 @@ void poom_ble_gatt_client_send_data(uint8_t *data, int length)
         return;
     }
 
-    if (!s_is_connected)
+    if ((s_state == NULL) || !s_is_connected)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_W("send ignored: not connected");
         return;
@@ -353,8 +461,7 @@ esp_err_t poom_ble_gatt_client_write_char16(uint16_t char_uuid16,
                                             int length,
                                             bool with_response)
 {
-    poom_ble_gatt_client_profile_inst_t *inst =
-        &s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID];
+    poom_ble_gatt_client_profile_inst_t *inst;
     esp_bt_uuid_t uuid = {0};
     esp_gattc_char_elem_t elem = {0};
     uint16_t count = 1U;
@@ -364,6 +471,11 @@ esp_err_t poom_ble_gatt_client_write_char16(uint16_t char_uuid16,
     {
         return ESP_ERR_INVALID_ARG;
     }
+    if(s_state == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    inst = &s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID];
     if (!s_is_connected || !s_server_attached ||
         (inst->gattc_if == ESP_GATT_IF_NONE))
     {
@@ -392,6 +504,27 @@ esp_err_t poom_ble_gatt_client_write_char16(uint16_t char_uuid16,
         ESP_GATT_AUTH_REQ_NONE);
 }
 
+esp_err_t poom_ble_gatt_client_read_char(uint16_t char_handle)
+{
+    const poom_ble_gatt_client_profile_inst_t *inst;
+
+    if((s_state == NULL) || (char_handle == POOM_BLE_GATT_CLIENT_INVALID_HANDLE) || !s_is_connected)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    inst = &s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID];
+    if(
+       (inst->gattc_if == ESP_GATT_IF_NONE))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return esp_ble_gattc_read_char(inst->gattc_if,
+                                   inst->conn_id,
+                                   char_handle,
+                                   ESP_GATT_AUTH_REQ_NONE);
+}
+
 /**
  * @brief Profile-level GATTC event handler.
  */
@@ -401,7 +534,7 @@ static void poom_ble_gatt_client_profile_event_handler_(esp_gattc_cb_event_t eve
 {
     esp_ble_gattc_cb_param_t *p = param;
 
-    if (p == NULL)
+    if ((s_state == NULL) || (p == NULL))
     {
         return;
     }
@@ -465,7 +598,8 @@ static void poom_ble_gatt_client_profile_event_handler_(esp_gattc_cb_event_t eve
 
             (void)esp_ble_gattc_search_service(gattc_if,
                                                p->dis_srvc_cmpl.conn_id,
-                                               &s_remote_filter_service_uuid);
+                                               (s_remote_filter_service_uuid.len == 0U) ? NULL :
+                                                   &s_remote_filter_service_uuid);
             break;
 
         case ESP_GATTC_CFG_MTU_EVT:
@@ -667,7 +801,7 @@ static void poom_ble_gatt_client_profile_event_handler_(esp_gattc_cb_event_t eve
 
     if (s_event_cb.handler_client_cb != NULL)
     {
-        s_event_cb.handler_client_cb(event, param);
+        s_event_cb.handler_client_cb(event, gattc_if, param);
     }
 }
 
@@ -680,7 +814,7 @@ static void poom_ble_gatt_client_gap_event_handler_(esp_gap_ble_cb_event_t event
     uint8_t *adv_name = NULL;
     uint8_t adv_name_len = 0U;
 
-    if (param == NULL)
+    if ((s_state == NULL) || (param == NULL))
     {
         return;
     }
@@ -823,6 +957,11 @@ static void poom_ble_gatt_client_gattc_event_handler_(esp_gattc_cb_event_t event
                                                 esp_gatt_if_t gattc_if,
                                                 esp_ble_gattc_cb_param_t *param)
 {
+    if(s_state == NULL)
+    {
+        return;
+    }
+
     if ((event == ESP_GATTC_REG_EVT) && (param != NULL))
     {
         if (param->reg.status == ESP_GATT_OK)
@@ -856,6 +995,11 @@ esp_err_t poom_ble_gatt_client_start(void)
     esp_bt_controller_status_t ctrl_status;
     esp_bluedroid_status_t bluedroid_status;
 
+    if(!poom_ble_gatt_client_state_ensure_())
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
     if (s_started)
     {
         return ESP_OK;
@@ -880,7 +1024,7 @@ esp_err_t poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("controller init failed: %s", esp_err_to_name(ret));
-            return ret;
+            goto start_failed;
         }
     }
 
@@ -891,7 +1035,7 @@ esp_err_t poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("controller enable failed: %s", esp_err_to_name(ret));
-            return ret;
+            goto start_failed;
         }
     }
 
@@ -903,7 +1047,7 @@ esp_err_t poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("bluedroid init failed: %s", esp_err_to_name(ret));
-            return ret;
+            goto start_failed;
         }
     }
 
@@ -914,7 +1058,7 @@ esp_err_t poom_ble_gatt_client_start(void)
         if (ret != ESP_OK)
         {
             POOM_BLE_GATT_CLIENT_PRINTF_E("bluedroid enable failed: %s", esp_err_to_name(ret));
-            return ret;
+            goto start_failed;
         }
     }
 
@@ -922,21 +1066,21 @@ esp_err_t poom_ble_gatt_client_start(void)
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("gap register failed: 0x%x", ret);
-        return ret;
+        goto start_failed;
     }
 
     ret = esp_ble_gattc_register_callback(poom_ble_gatt_client_gattc_event_handler_);
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("gattc register failed: 0x%x", ret);
-        return ret;
+        goto start_failed;
     }
 
     ret = esp_ble_gattc_app_register(POOM_BLE_GATT_CLIENT_PROFILE_ID);
     if (ret != ESP_OK)
     {
         POOM_BLE_GATT_CLIENT_PRINTF_E("gattc app register failed: 0x%x", ret);
-        return ret;
+        goto start_failed;
     }
 
     ret = esp_ble_gatt_set_local_mtu(POOM_BLE_GATT_CLIENT_LOCAL_MTU);
@@ -953,6 +1097,10 @@ esp_err_t poom_ble_gatt_client_start(void)
     s_started = true;
     POOM_BLE_GATT_CLIENT_PRINTF_I("started");
     return ESP_OK;
+
+start_failed:
+    (void)poom_ble_gatt_client_stop();
+    return ret;
 }
 
 esp_err_t poom_ble_gatt_client_stop(void)
@@ -961,6 +1109,11 @@ esp_err_t poom_ble_gatt_client_stop(void)
     esp_err_t ret;
     esp_bt_controller_status_t ctrl_status;
     esp_bluedroid_status_t bluedroid_status;
+
+    if(s_state == NULL)
+    {
+        return ESP_OK;
+    }
 
     s_is_connected = false;
     s_server_attached = false;
@@ -1021,14 +1174,7 @@ esp_err_t poom_ble_gatt_client_stop(void)
         }
     }
 
-    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].gattc_if = ESP_GATT_IF_NONE;
-    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].conn_id = 0U;
-    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].service_start_handle = 0U;
-    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].service_end_handle = 0U;
-    s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].char_handle = 0U;
-    memset(s_profile_tab[POOM_BLE_GATT_CLIENT_PROFILE_ID].remote_bda, 0, sizeof(esp_bd_addr_t));
-
-    s_started = false;
+    poom_ble_gatt_client_state_free_();
     POOM_BLE_GATT_CLIENT_PRINTF_I("stopped");
     return result;
 }

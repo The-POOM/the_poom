@@ -181,3 +181,20 @@ void oled_transport_display_image(oled_driver_t *dev,
     i2c_unlock();
     free(tx_buf);
 }
+
+void oled_transport_send_commands(oled_driver_t *dev,
+                                  const uint8_t *commands,
+                                  uint16_t command_count)
+{
+    uint8_t *tx_buf;
+
+    if((dev == NULL) || (commands == NULL) || (command_count == 0U)) return;
+    tx_buf = (uint8_t *)malloc((size_t)command_count + 1U);
+    if(tx_buf == NULL) return;
+    tx_buf[0] = OLED_CONTROL_BYTE_CMD_STREAM;
+    (void)memcpy(&tx_buf[1], commands, command_count);
+    i2c_lock();
+    (void)i2c_tx_dev((uint8_t)dev->_address, tx_buf, (uint16_t)(command_count + 1U), true, true);
+    i2c_unlock();
+    free(tx_buf);
+}

@@ -21,6 +21,7 @@
 #define OLED_CMD_SET_CONTRAST         (0x81U)
 #define OLED_CMD_DISPLAY_RAM          (0xA4U)
 #define OLED_CMD_DISPLAY_NORMAL       (0xA6U)
+#define OLED_CMD_DISPLAY_INVERT       (0xA7U)
 #define OLED_CMD_DISPLAY_OFF          (0xAEU)
 #define OLED_CMD_DISPLAY_ON           (0xAFU)
 /** @} */

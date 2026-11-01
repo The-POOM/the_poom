@@ -1,110 +1,109 @@
 # poom_app_pack
 
-## Guía del menú (español)
+## Menu guide
 
-Este componente contiene las pantallas que se abren desde el menú de POOM.
-La organización del proyecto es:
+This component contains the screens launched from the POOM menu. The project is organised as follows:
 
-- [`applications/`](../): contiene los componentes de aplicación, incluidos el menú, este paquete y las implementaciones de funciones como NFC, detección Wi-Fi o control BLE.
-- [`poom_menu`](../poom_menu/): dibuja las categorías, gestiona la navegación y decide qué aplicación abrir.
-- **`poom_app_pack`**: implementa las pantallas `src/menu_*.c`, procesa sus botones y conecta cada pantalla con los componentes que realizan la función.
+- [`applications/`](../): application components, including the launcher, this package, and feature implementations such as NFC, Wi-Fi detection, and BLE control.
+- [`poom_menu`](../poom_menu/): draws categories, handles navigation, and selects which app to launch.
+- **`poom_app_pack`**: implements `src/menu_*.c` screens, handles their buttons, and connects each screen to its feature component.
 
-Las siguientes tablas siguen el orden de las listas `s_apps_*` de
-[`poom_menu.c`](../poom_menu/src/poom_menu.c). Conservan los nombres que aparecen en la pantalla.
+The following tables follow the `s_apps_*` list order in
+[`poom_menu.c`](../poom_menu/src/poom_menu.c). They retain the labels shown on the device.
 
-### Cómo navegar
+### Navigation
 
-- En la pantalla principal: **LEFT/RIGHT** cambia de categoría y **A** la abre.
-- Dentro de una categoría: **UP/DOWN** selecciona una opción, **A** la ejecuta y **B** vuelve a las categorías.
-- Dentro de una aplicación: los controles dependen de su pantalla. Generalmente **B** vuelve o sale; `TINY CONTROL` usa **LEFT+RIGHT** para salir.
+- On the main screen: **LEFT/RIGHT** changes category and **A** opens it.
+- Inside a category: **UP/DOWN** selects an option, **A** runs it, and **B** returns to the categories.
+- Inside an app: controls depend on its screen. Usually **B** returns or exits; `TINY CONTROL` uses **LEFT+RIGHT** to exit.
 
-### THE BEAST — Herramientas inalámbricas
+### THE BEAST — Wireless tools
 
-| Opción del menú | Qué hace | Pantalla |
+| Menu option | Function | Screen |
 | --- | --- | --- |
-| `CLI` | Abre la consola de POOM para comandos de aplicaciones, NFC, configuración y drones. Se utiliza desde la consola USB; la OLED muestra las indicaciones de acceso. | [menu_cli_nfc.c](src/menu_cli_nfc.c) |
-| `OPENTHREAD CLI` | Abre la consola de OpenThread para configurar y consultar una red Thread. Solo aparece con `CONFIG_OPENTHREAD_ENABLED` y `CONFIG_OPENTHREAD_CLI` habilitados. | [menu_cli_ot.c](src/menu_cli_ot.c) |
-| `DEAUTH` | Escanea puntos de acceso Wi-Fi, permite seleccionar uno y ejecutar modos de prueba activos, incluida la desautenticación. | [menu_deauth.c](src/menu_deauth.c) |
-| `DEAUTH DET` | Detecta pasivamente tramas de desautenticación y muestra alertas, correlación de eventos y ajustes del detector. | [menu_deauth_detector.c](src/menu_deauth_detector.c) |
-| `KARMA` | Ejecuta pruebas de respuesta a solicitudes de búsqueda de redes Wi-Fi y muestra el SSID activo y el estado de la sesión. | [menu_karma.c](src/menu_karma.c) |
-| `SPAM WIFI` | Emite anuncios Wi-Fi con distintos SSID para pruebas de detección y carga de anuncios. | [menu_ssid_spam.c](src/menu_ssid_spam.c) |
-| `SPAM BLE` | Emite anuncios BLE de los perfiles disponibles y permite cambiar el modo de emisión. | [menu_ble_spam.c](src/menu_ble_spam.c) |
-| `CAPTIVE PORTAL` | Configura y ejecuta un punto de acceso con portal cautivo; permite preparar los parámetros de la red desde la pantalla. | [menu_captive.c](src/menu_captive.c) |
-| `BLE DETECT` | Lista dispositivos BLE cercanos con intensidad de señal, detalles y alias. Incluye filtros `BLE DEVICES`, `TRACKERS` y `WEARABLES`; las coincidencias de firmas son indicios de tipo de dispositivo. | [menu_ble_detector.c](src/menu_ble_detector.c) |
-| `WIFI DETECT` | Lista dispositivos Wi-Fi y permite filtrar `WIFI DEVICES`, `AP CLIENTS`, `FLOCK/ALPR` e `IP CAMERAS`. Muestra señal, detalles y alias; infiere clientes de un AP mediante observación pasiva. | [menu_wifi_detector.c](src/menu_wifi_detector.c) |
-| `SNIFFER` | Captura tráfico Wi-Fi, BLE o IEEE 802.15.4/Zigbee en formato PCAP. Permite elegir modo y canal; muestra si la salida es SD o UART. | [menu_poom_pcap.c](src/menu_poom_pcap.c) |
-| `SNNIFER RT` | Selecciona captura BLE o IEEE 802.15.4 para análisis en tiempo real desde un equipo conectado. En IEEE 802.15.4 permite seleccionar el canal. | [menu_sniffer_rt.c](src/menu_sniffer_rt.c) |
-| `SCAN CHANNELS` | Muestra actividad por canal en Wi-Fi o IEEE 802.15.4. En Wi-Fi puede fijar un canal y mostrar tramas por segundo, reintentos, desautenticaciones y distribución por tipo de trama. | [menu_scanner_core.c](src/menu_scanner_core.c) |
-| `SCAN NET` | Descubre equipos de la red local mediante ARP y muestra los parámetros de red y los resultados. | [menu_poom_wifi_arp.c](src/menu_poom_wifi_arp.c) |
-| `CLI ZIGBEE` | Abre la consola de Zigbee para interactuar con sus comandos. Solo aparece con `CONFIG_ZB_ENABLED` habilitado. | [menu_cli_zigbee.c](src/menu_cli_zigbee.c) |
-| `HTTP LOAD` | Genera peticiones HTTP hacia un servidor configurado para medir su comportamiento bajo carga; permite editar parámetros y ver contadores. | [menu_http_load_test.c](src/menu_http_load_test.c) |
-| `PROBE REQ` | Monitoriza solicitudes de búsqueda de redes Wi-Fi (probe requests) y muestra una lista de observaciones con sus detalles. | [menu_sniffer_device.c](src/menu_sniffer_device.c) |
+| `CLI` | Opens the POOM console for application, NFC, configuration, and drone commands. It is used through the USB console; the OLED shows access instructions. | [menu_cli_nfc.c](src/menu_cli_nfc.c) |
+| `OPENTHREAD CLI` | Opens the OpenThread console to configure and inspect a Thread network. Shown only when `CONFIG_OPENTHREAD_ENABLED` and `CONFIG_OPENTHREAD_CLI` are enabled. | [menu_cli_ot.c](src/menu_cli_ot.c) |
+| `DEAUTH` | Scans Wi-Fi access points, lets the user select one, and runs active test modes, including deauthentication. | [menu_deauth.c](src/menu_deauth.c) |
+| `DEAUTH DET` | Passively detects deauthentication frames and shows alerts, event correlation, and detector settings. | [menu_deauth_detector.c](src/menu_deauth_detector.c) |
+| `KARMA` | Runs Wi-Fi probe-request response tests and shows the active SSID and session state. | [menu_karma.c](src/menu_karma.c) |
+| `SPAM WIFI` | Transmits Wi-Fi advertisements with different SSIDs for detection and advertisement-load testing. | [menu_ssid_spam.c](src/menu_ssid_spam.c) |
+| `SPAM BLE` | Transmits BLE advertisements from available profiles and lets the user change the transmit mode. | [menu_ble_spam.c](src/menu_ble_spam.c) |
+| `CAPTIVE PORTAL` | Configures and runs an access point with a captive portal; network settings are prepared on the device. | [menu_captive.c](src/menu_captive.c) |
+| `BLE DETECT` | Lists nearby BLE devices with signal strength, details, and aliases. Includes `BLE DEVICES`, `TRACKERS`, and `WEARABLES` filters; signature matches are device-type indicators. | [menu_ble_detector.c](src/menu_ble_detector.c) |
+| `WIFI DETECT` | Lists Wi-Fi devices and filters `WIFI DEVICES`, `AP CLIENTS`, `FLOCK/ALPR`, and `IP CAMERAS`. Shows signal, details, and aliases; AP clients are inferred through passive observation. | [menu_wifi_detector.c](src/menu_wifi_detector.c) |
+| `SNIFFER` | Captures Wi-Fi, BLE, or IEEE 802.15.4/Zigbee traffic in PCAP format. Selects mode and channel, then shows whether output uses SD or UART. | [menu_poom_pcap.c](src/menu_poom_pcap.c) |
+| `SNNIFER RT` | Selects BLE or IEEE 802.15.4 capture for real-time analysis from a connected computer. IEEE 802.15.4 allows channel selection. | [menu_sniffer_rt.c](src/menu_sniffer_rt.c) |
+| `SCAN CHANNELS` | Shows per-channel activity for Wi-Fi or IEEE 802.15.4. Wi-Fi mode can lock a channel and show frames per second, retries, deauth frames, and frame-type distribution. | [menu_scanner_core.c](src/menu_scanner_core.c) |
+| `SPECTRUM` | Live Wi-Fi instrument: draws an RSSI trace with grid, peak hold, and cursor. LEFT/RIGHT switches to waterfall; UP/DOWN changes between 2.4 GHz and C5 5 GHz ranges; A pauses and B exits. | [menu_spectrum.c](src/menu_spectrum.c) |
+| `SCAN NET` | Discovers local-network devices through ARP and shows network parameters and results. | [menu_poom_wifi_arp.c](src/menu_poom_wifi_arp.c) |
+| `CLI ZIGBEE` | Opens the Zigbee console. Shown only when `CONFIG_ZB_ENABLED` is enabled. | [menu_cli_zigbee.c](src/menu_cli_zigbee.c) |
+| `HTTP LOAD` | Sends HTTP requests to a configured server to measure behaviour under load; parameters and counters are available on the device. | [menu_http_load_test.c](src/menu_http_load_test.c) |
+| `PROBE REQ` | Monitors Wi-Fi probe requests and shows an observation list with details. | [menu_sniffer_device.c](src/menu_sniffer_device.c) |
 
-`SNNIFER RT` reproduce la etiqueta actual del firmware. Las dos consolas condicionales
-también se incluyen o excluyen de la compilación en [CMakeLists.txt](CMakeLists.txt).
+`SNNIFER RT` reproduces the current firmware label. The two conditional consoles are also included or excluded from the build in [CMakeLists.txt](CMakeLists.txt).
 
-### THE ZEN — Música, NFC y control
+### THE ZEN — Music, NFC, and control
 
-| Opción del menú | Qué hace | Pantalla |
+| Menu option | Function | Screen |
 | --- | --- | --- |
-| `MIDI` | Convierte movimiento en mensajes MIDI por BLE. Permite ajustar la nota, el umbral de golpe y el modo de percusión o melodía con escala mayor/menor. | [menu_midi.c](src/menu_midi.c) |
-| `CONTROL` | Usa POOM como control multimedia BLE: envía acciones como reproducción/pausa y cambio de pista. | [menu_control_music.c](src/menu_control_music.c) |
-| `NFC` | Abre las funciones `SCAN`, `AMIIBO`, `EMULATE`, `RESTORE MFC` y `STORAGE`: lectura de tarjetas, gestión de Amiibo, emulación compatible, restauración de MIFARE Classic y archivos guardados. | [menu_nfc.c](src/menu_nfc.c) |
-| `PICOPASS` | Lee e inspecciona tarjetas PicoPass/iCLASS compatibles, muestra datos de la credencial y permite guardarlos en SD. | [menu_picopass.c](src/menu_picopass.c) |
-| `IR UNIV` | Funciona como control remoto infrarrojo: aprende, guarda y transmite señales, y permite cargar archivos `.ir` desde la SD. | [menu_ir_universal.c](src/menu_ir_universal.c) |
-| `POOM WEB` | Inicia la interfaz web local de POOM y muestra el estado de acceso para utilizar sus herramientas desde un navegador. | [menu_cli_web.c](src/menu_cli_web.c) |
+| `MIDI` | Converts movement into BLE MIDI messages. Note, strike threshold, and percussion or melody mode with major/minor scale can be adjusted. | [menu_midi.c](src/menu_midi.c) |
+| `CONTROL` | Uses POOM as a BLE media remote for play/pause and track-change actions. | [menu_control_music.c](src/menu_control_music.c) |
+| `NFC` | Opens `SCAN`, `AMIIBO`, `EMULATE`, `RESTORE MFC`, and `STORAGE`: card reading, Amiibo management, compatible emulation, MIFARE Classic restore, and saved files. | [menu_nfc.c](src/menu_nfc.c) |
+| `PICOPASS` | Reads and inspects compatible PicoPass/iCLASS cards, shows credential data, and can save it to SD. | [menu_picopass.c](src/menu_picopass.c) |
+| `IR UNIV` | Infrared universal remote: learns, saves, and transmits signals, and loads `.ir` files from SD. | [menu_ir_universal.c](src/menu_ir_universal.c) |
+| `POOM WEB` | Starts POOM's local web interface and shows access status for browser-based tools. | [menu_cli_web.c](src/menu_cli_web.c) |
 
-### THE GAMER — Juegos y controles
+### THE GAMER — Games and controls
 
-| Opción del menú | Qué hace | Pantalla |
+| Menu option | Function | Screen |
 | --- | --- | --- |
-| `GAME SLOT` | Ofrece `PLAY CURRENT GAME` para arrancar el juego instalado y `LOAD NEW BIN` para instalar un juego compatible desde un archivo `.bin` de la SD. Arrancar el juego reinicia el dispositivo. | [menu_poom_boot_policy.c](src/menu_poom_boot_policy.c) |
-| `GAME STORE` | Navega por un catálogo de juegos y sus categorías, descarga juegos a la SD y permite instalarlos o ejecutar el instalado. Incluye descarga de todo el catálogo y consulta sin conexión de contenido guardado. | [menu_poom_game_store.c](src/menu_poom_game_store.c) |
-| `TINY CONTROL` | Envía los botones de POOM como teclas de un controlador BLE HID para juegos. Muestra el estado de conexión; se sale con **LEFT+RIGHT**. | [menu_ble_control.c](src/menu_ble_control.c) |
-| `WII` | Activa el controlador POOM WII mediante `poom_wii` y envía las pulsaciones de los botones al dispositivo conectado. | [menu_air_ble.c](src/menu_air_ble.c) |
+| `GAME SLOT` | Offers `PLAY CURRENT GAME` to boot the installed game and `LOAD NEW BIN` to install a compatible SD `.bin` file. Starting a game restarts the device. | [menu_poom_boot_policy.c](src/menu_poom_boot_policy.c) |
+| `GAME STORE` | Browses game categories and a catalogue, downloads games to SD, then installs or runs the installed game. Includes full-catalogue download and offline access to saved content. | [menu_poom_game_store.c](src/menu_poom_game_store.c) |
+| `TINY CONTROL` | Sends POOM buttons as BLE HID controller keys for games. Shows connection state; **LEFT+RIGHT** exits. | [menu_ble_control.c](src/menu_ble_control.c) |
+| `WII` | Enables the POOM WII controller through `poom_wii` and sends button presses to the connected device. | [menu_air_ble.c](src/menu_air_ble.c) |
 
-### THE MAKER — Sensores y desarrollo
+### THE MAKER — Sensors and development
 
-| Opción del menú | Qué hace | Pantalla |
+| Menu option | Function | Screen |
 | --- | --- | --- |
-| `PLOT` | Visualiza y transmite datos de la IMU mediante las herramientas de gráficos/BLE. Permite seleccionar acelerómetro (`ACC`), giroscopio (`GYR`) o los seis ejes (`6AX`). | [menu_plot.c](src/menu_plot.c) |
-| `DRONE SCAN` | Busca emisiones Remote ID de drones y muestra una lista con sus detalles. La captura PCAP en SD depende de la configuración del escáner. | [menu_poom_drone_scan.c](src/menu_poom_drone_scan.c) |
-| `DRONE EMUL` | Emite mensajes Remote ID de prueba para comprobar el funcionamiento de receptores o del escáner. | [menu_poom_drone_emul.c](src/menu_poom_drone_emul.c) |
-| `I2C` | Escanea el bus I2C y muestra las direcciones de los dispositivos que responden. | [menu_i2c_scan.c](src/menu_i2c_scan.c) |
-| `LUA` | Selecciona y ejecuta scripts `.lua` desde la SD. La ruta inicial es `/sdcard/main.lua`. | [menu_lua.c](src/menu_lua.c) |
-| `EDGE AI` | Ejecuta la integración de Edge Impulse y muestra el estado y los resultados del modelo incorporado. | [menu_edge_impulse.c](src/menu_edge_impulse.c) |
+| `PLOT` | Visualises and streams IMU data through graphing/BLE tools. Selects accelerometer (`ACC`), gyroscope (`GYR`), or all six axes (`6AX`). | [menu_plot.c](src/menu_plot.c) |
+| `DRONE SCAN` | Searches for drone Remote ID transmissions and shows a detail list. SD PCAP capture depends on scanner configuration. | [menu_poom_drone_scan.c](src/menu_poom_drone_scan.c) |
+| `DRONE EMUL` | Transmits test Remote ID messages to verify a receiver or scanner. | [menu_poom_drone_emul.c](src/menu_poom_drone_emul.c) |
+| `I2C` | Scans the I2C bus and shows addresses of responding devices. | [menu_i2c_scan.c](src/menu_i2c_scan.c) |
+| `LUA` | Selects and runs `.lua` scripts from SD. The initial path is `/sdcard/main.lua`. | [menu_lua.c](src/menu_lua.c) |
+| `EDGE AI` | Runs the Edge Impulse integration and shows embedded-model status and results. | [menu_edge_impulse.c](src/menu_edge_impulse.c) |
 
-### SETTINGS — Configuración y archivos
+### SETTINGS — Configuration and files
 
-| Opción del menú | Qué hace | Pantalla |
+| Menu option | Function | Screen |
 | --- | --- | --- |
-| `BTN SOUND ON/OFF` | Activa o desactiva el sonido de los botones y guarda la preferencia. La etiqueta cambia según el estado; la acción se realiza en el propio menú. | [poom_menu.c](../poom_menu/src/poom_menu.c) |
-| `DFU` | Inicia la actualización de firmware, muestra los datos de conexión y el progreso. Una actualización correcta reinicia el dispositivo. | [menu_dfu.c](src/menu_dfu.c) |
-| `FW INFO` | Muestra la versión y los datos de compilación del firmware, junto con información de las particiones OTA. | [menu_fw_info.c](src/menu_fw_info.c) |
-| `WI-FI` | Escanea redes, permite introducir credenciales, conectarse y guardar la configuración de conexión. | [menu_poom_wifi_scan.c](src/menu_poom_wifi_scan.c) |
-| `SD` | Abre el explorador de archivos y carpetas de la tarjeta SD. | [menu_sd_browser.c](src/menu_sd_browser.c) |
+| `BTN SOUND ON/OFF` | Enables or disables button sound and stores the preference. Its label follows the current state; the action happens in the launcher itself. | [poom_menu.c](../poom_menu/src/poom_menu.c) |
+| `DFU` | Starts firmware update, shows connection information and progress. A successful update restarts the device. | [menu_dfu.c](src/menu_dfu.c) |
+| `FW INFO` | Shows firmware version and build data, together with OTA partition information. | [menu_fw_info.c](src/menu_fw_info.c) |
+| `WI-FI` | Scans networks, accepts credentials, connects, and saves connection settings. | [menu_poom_wifi_scan.c](src/menu_poom_wifi_scan.c) |
+| `SD` | Opens the SD card file and folder browser. | [menu_sd_browser.c](src/menu_sd_browser.c) |
+| `SLEEP` | Configures an automatic 1, 5, 15, or 30 minute deep-sleep timeout, or enters deep sleep immediately. The timeout is saved in NVS. | [poom_menu.c](../poom_menu/src/poom_menu.c) |
 
-### Opciones presentes en el código pero desactivadas en el menú
+### Implemented but disabled menu options
 
-Estas entradas están comentadas en `poom_menu.c`, por lo que no aparecen al navegar:
+These entries are commented out in `poom_menu.c`, so they are not shown while navigating:
 
-| Categoría | Opción | Función implementada |
+| Category | Option | Implemented function |
 | --- | --- | --- |
-| THE ZEN | `HARMONY` | Reproduce secuencias musicales desde archivos JSON de la SD y envía MIDI por BLE; incluye repetición. Véase [menu_midi_harmony.c](src/menu_midi_harmony.c). |
-| THE ZEN | `TONE` | Reproduce tonos predefinidos o cargados desde SD en el buzzer. Véase [menu_tone.c](src/menu_tone.c). |
-| THE GAMER | `BREAKOUT` | Abre el juego Breakout de [poom_breakout](../poom_breakout/). |
-| THE MAKER | `BLE SCAN` | Abre el escáner de dispositivos BLE de [menu_ble_scan.c](src/menu_ble_scan.c). |
-| THE MAKER | `DRONE ID` | Abre la pantalla de Remote ID de [menu_poom_droneid.c](src/menu_poom_droneid.c). |
-| SETTINGS | `IMU` | Muestra lecturas del sensor de movimiento. Véase [menu_imu_monitor.c](src/menu_imu_monitor.c). |
-| SETTINGS | `LED RGB` | Ajusta los canales rojo, verde y azul del LED WS2812. Véase [menu_ws2812_color.c](src/menu_ws2812_color.c). |
-| SETTINGS | `BOOT` | Reinicia el dispositivo mediante la acción del lanzador. |
-| SETTINGS | `NFC TUNE` | Consulta y ajusta la sintonización del lector NFC. Véase [menu_nfc_tuning.c](src/menu_nfc_tuning.c). |
+| THE ZEN | `HARMONY` | Plays music sequences from SD JSON files and sends BLE MIDI; includes repeat. See [menu_midi_harmony.c](src/menu_midi_harmony.c). |
+| THE ZEN | `TONE` | Plays predefined or SD-loaded buzzer tones. See [menu_tone.c](src/menu_tone.c). |
+| THE GAMER | `BREAKOUT` | Opens the [poom_breakout](../poom_breakout/) game. |
+| THE MAKER | `BLE SCAN` | Opens the BLE device scanner in [menu_ble_scan.c](src/menu_ble_scan.c). |
+| THE MAKER | `DRONE ID` | Opens the Remote ID screen in [menu_poom_droneid.c](src/menu_poom_droneid.c). |
+| SETTINGS | `IMU` | Shows motion-sensor readings. See [menu_imu_monitor.c](src/menu_imu_monitor.c). |
+| SETTINGS | `LED RGB` | Adjusts red, green, and blue channels of the WS2812 LED. See [menu_ws2812_color.c](src/menu_ws2812_color.c). |
+| SETTINGS | `BOOT` | Restarts the device through the launcher action. |
+| SETTINGS | `NFC TUNE` | Inspects and adjusts NFC reader tuning. See [menu_nfc_tuning.c](src/menu_nfc_tuning.c). |
 
-Tener un archivo en `src/` no implica que exista una entrada visible: por ejemplo,
-`menu_tracker.c` no tiene una entrada propia en las listas actuales y
-`menu_detector_view.c` contiene utilidades compartidas de presentación.
+Having a file in `src/` does not imply a visible menu entry. For example,
+`menu_tracker.c` has no current list entry and `menu_detector_view.c` contains shared presentation utilities.
 
-## Technical reference (English)
+## Technical reference
 
 `poom_app_pack` is the **application pack** behind the POOM on-device UI: a set of small OLED-first apps
 that are launched from the top-level menu (`applications/poom_menu/`).
@@ -337,7 +336,7 @@ This section expands each app with:
 #### BLE DETECT (`menu_ble_detector.c`, `menu_ble_detector_show()`)
 - What it is: passive BLE inventory and local detector with `BLE DEVICES`, `TRACKERS`, and `WEARABLES` filters.
 - Subsystems: `poom_ble_detector`, `poom_ble_scan`, `poom_ui_keyboard`, `poom_secrets_store`.
-- UI: up to 12 records with live RSSI, scrolling selected names, detail view, and persistent aliases.
+- UI: up to 12 records with live RSSI, scrolling selected names, detail view, persistent aliases, and `BLE ACTIONS` (`GATT RECON` / `RENAME`). `GATT RECON` connects to the selected device, lists services/characteristics and reads characteristics that explicitly advertise `READ`.
 - Detection: recognizes supported AirTag, SmartTag, Tile, Find My-style, smart-glasses, and body-camera signatures. Matches are candidates rather than proof of identity.
 - Exit/return: exits to launcher and publishes `poom/menu/resume`.
 

@@ -66,6 +66,7 @@
 #include "menu_poom_wifi_scan.h"
 #include "menu_wifi_profiles.h"
 #include "menu_scanner_core.h"
+#include "menu_spectrum.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
 #include "menu_sniffer_device.h"
@@ -79,9 +80,13 @@
 #include "freertos/task.h"
 
 #include "esp_system.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "sd_card.h"
 
 #ifndef BUTTON_SINGLE_CLICK
 #define BUTTON_SINGLE_CLICK 4
@@ -123,6 +128,8 @@ typedef enum
     POOM_MENU_SCREEN_SUBMENU,
     POOM_MENU_SCREEN_REORDER_PICK,
     POOM_MENU_SCREEN_RESET_CONFIRM,
+    POOM_MENU_SCREEN_POWER_ERROR,
+    POOM_MENU_SCREEN_SLEEP_TIME,
 } poom_menu_screen_t;
 
 typedef void (*poom_menu_action_fn)(void);
@@ -156,12 +163,22 @@ static volatile uint8_t s_sub_scroll = 0;
 static volatile uint8_t s_reorder_pick = 0;
 static bool s_reorder_from_settings = false;
 
+#if CONFIG_IDF_TARGET_ESP32C5
+#define POOM_MENU_SLEEP_NVS_NAMESPACE "poom_power"
+#define POOM_MENU_SLEEP_NVS_KEY       "sleep_secs"
+static uint32_t s_sleep_timeout_seconds = 0U;
+static uint32_t s_last_menu_activity_ms = 0U;
+#endif
+
 static void on_button_any_(const poom_sbus_msg_t *msg, void *user);
 static void on_menu_resume_(const poom_sbus_msg_t *msg, void *user);
 
 static char s_btn_sound_label[20] = "BTN SOUND OFF";
 static void action_open_reorder_picker_(void);
 static void action_confirm_reset_menu_order_(void);
+#if CONFIG_IDF_TARGET_ESP32C5
+static void action_sleep_(void);
+#endif
 
 /**
  * @brief Returns the display label for the current state.
@@ -173,6 +190,87 @@ static void update_btn_sound_label_(void)
     const bool enabled = poom_button_sound_get_enabled_setting();
     (void)snprintf(s_btn_sound_label, sizeof(s_btn_sound_label), "BTN SOUND %s", enabled ? "ON" : "OFF");
 }
+
+#if CONFIG_IDF_TARGET_ESP32C5
+static uint32_t power_now_ms_(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000LL);
+}
+
+static void power_reset_idle_(void)
+{
+    s_last_menu_activity_ms = power_now_ms_();
+}
+
+static void power_load_timeout_(void)
+{
+    nvs_handle_t handle = 0;
+    uint32_t timeout = 0U;
+
+    if((nvs_open(POOM_MENU_SLEEP_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) &&
+       (nvs_get_u32(handle, POOM_MENU_SLEEP_NVS_KEY, &timeout) == ESP_OK))
+    {
+        /* Only supported choices are accepted if stale NVS data is present. */
+        if((timeout == 60U) || (timeout == 300U) || (timeout == 900U) ||
+           (timeout == 1800U))
+        {
+            s_sleep_timeout_seconds = timeout;
+        }
+    }
+    if(handle != 0)
+    {
+        nvs_close(handle);
+    }
+    power_reset_idle_();
+}
+
+static void power_save_timeout_(void)
+{
+    nvs_handle_t handle;
+    if(nvs_open(POOM_MENU_SLEEP_NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK)
+    {
+        (void)nvs_set_u32(handle, POOM_MENU_SLEEP_NVS_KEY, s_sleep_timeout_seconds);
+        (void)nvs_commit(handle);
+        nvs_close(handle);
+    }
+    power_reset_idle_();
+}
+
+static const char *power_timeout_label_(uint32_t timeout_seconds)
+{
+    switch(timeout_seconds)
+    {
+        case 60U: return "1 MIN";
+        case 300U: return "5 MIN";
+        case 900U: return "15 MIN";
+        case 1800U: return "30 MIN";
+        default: return "OFF";
+    }
+}
+
+static uint8_t power_timeout_index_(uint32_t timeout_seconds)
+{
+    static const uint32_t choices[] = {0U, 60U, 300U, 900U, 1800U};
+    uint8_t index = 0U;
+
+    while((index + 1U < (sizeof(choices) / sizeof(choices[0]))) &&
+          (choices[index] != timeout_seconds))
+    {
+        ++index;
+    }
+    return (choices[index] == timeout_seconds) ? index : 0U;
+}
+
+static uint32_t power_timeout_from_index_(uint8_t index)
+{
+    static const uint32_t choices[] = {0U, 60U, 300U, 900U, 1800U};
+    if(index >= (sizeof(choices) / sizeof(choices[0])))
+    {
+        return 0U;
+    }
+    return choices[index];
+}
+#endif
 
 /**
  * @brief Internal helper for `detach_menu`.
@@ -221,6 +319,9 @@ static void on_menu_resume_(const poom_sbus_msg_t *msg, void *user)
     }
 
     poom_button_sound_resume();
+#if CONFIG_IDF_TARGET_ESP32C5
+    power_reset_idle_();
+#endif
 }
 
 /**
@@ -605,6 +706,63 @@ static void action_btn_sound_toggle_(void)
     update_btn_sound_label_();
 }
 
+#if CONFIG_IDF_TARGET_ESP32C5
+/** Opens the combined timeout and manual deep-sleep controls. */
+static void action_sleep_(void)
+{
+    power_reset_idle_();
+    s_reorder_pick = 0U;
+    s_sub_selected = power_timeout_index_(s_sleep_timeout_seconds);
+    s_screen = POOM_MENU_SCREEN_SLEEP_TIME;
+}
+
+/**
+ * @brief Stops local peripherals and enters C5 deep sleep.
+ *
+ * This runs only from Settings, after applications have returned to the main
+ * menu. Deep sleep resets POOM on wake; it does not preserve an app session.
+ */
+static void power_off_enter_deep_sleep_(void)
+{
+    const gpio_num_t wake_pin = (gpio_num_t)LEFT_BUTTON_PIN;
+    const uint64_t wake_mask = (1ULL << (uint32_t)wake_pin);
+    gpio_config_t wake_cfg = {
+        .pin_bit_mask = wake_mask,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    /* Leave no visible or audible peripheral active while the CPU is off. */
+    poom_button_sound_suspend();
+    poom_led_rainbow_deinit();
+    buzzer_tone(0U, 0U);
+    poom_arduboy_set_display_enabled(false);
+
+    /* Flush FAT state and release the SD SPI bus when a card is in use. */
+    if (sd_card_is_mounted())
+    {
+        (void)sd_card_unmount();
+    }
+
+    if ((gpio_config(&wake_cfg) != ESP_OK) ||
+        (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) != ESP_OK) ||
+        (esp_deep_sleep_enable_gpio_wakeup(wake_mask, ESP_GPIO_WAKEUP_GPIO_LOW) != ESP_OK))
+    {
+        /* Re-enable the screen so a configuration failure is visible. */
+        poom_arduboy_set_display_enabled(true);
+        poom_led_rainbow_init();
+        poom_button_sound_resume();
+        power_reset_idle_();
+        s_screen = POOM_MENU_SCREEN_POWER_ERROR;
+        return;
+    }
+
+    esp_deep_sleep_start();
+}
+#endif
+
 /**
  * @brief Internal helper for `action_control_music`.
  *
@@ -834,6 +992,16 @@ static void action_scanner_core_(void)
     menu_scanner_core_show();
 }
 
+/** Opens the live Wi-Fi channel spectrum instrument. */
+static void action_spectrum_(void)
+{
+    printf("[SPECTRUM] menu action\n");
+    ESP_LOGI("poom_menu", "Opening BEAST > SPECTRUM");
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_spectrum_show();
+}
+
 /**
  * @brief Internal helper for `action_imu_monitor`.
  *
@@ -958,6 +1126,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SNIFFER", action_pcap_snf_},
     {"SNNIFER RT", action_sniffer_rt_},
     {"SCAN CHANNELS", action_scanner_core_},
+    {"SPECTRUM", action_spectrum_},
     {"SCAN NET", action_arp_},
 
 #if CONFIG_ZB_ENABLED
@@ -1010,6 +1179,9 @@ static const poom_menu_item_t s_apps_settings[] = {
     {"WIFI PROFILES", action_wifi_profiles_},
     //{"NFC TUNE", action_nfc_tune_},
     {"SD", action_files_},
+#if CONFIG_IDF_TARGET_ESP32C5
+    {"SLEEP", action_sleep_},
+#endif
 };
 
 static const poom_menu_submenu_t s_submenus[] = {
@@ -1337,6 +1509,55 @@ static void render_reset_confirmation_(void)
     poom_arduboy_display();
 }
 
+#if CONFIG_IDF_TARGET_ESP32C5
+/** Shows the only possible failure before returning to Settings. */
+static void render_power_error_(void)
+{
+    poom_arduboy_clear();
+    draw_header_("DEEP SLEEP");
+    draw_text_(2, 20, "WAKE PIN ERROR", WHITE, BLACK);
+    draw_text_(2, 31, "COULD NOT SLEEP", WHITE, BLACK);
+    draw_footer_("", "B BACK");
+    poom_arduboy_display();
+}
+
+/** Draws the combined deep-sleep settings screen. */
+static void render_sleep_time_(void)
+{
+    char time_line[22];
+    const bool time_selected = (s_reorder_pick == 0U);
+    const bool sleep_selected = !time_selected;
+
+    if(s_sub_selected > 4U)
+    {
+        s_sub_selected = 0U;
+    }
+    if(s_reorder_pick > 1U)
+    {
+        s_reorder_pick = 0U;
+    }
+    (void)snprintf(time_line, sizeof(time_line), "TIME  %s",
+                   power_timeout_label_(power_timeout_from_index_(s_sub_selected)));
+
+    poom_arduboy_clear();
+    draw_header_("SLEEP");
+    if(time_selected)
+    {
+        poom_arduboy_fill_rect(0, 15, ARDUBOY_WIDTH, POOM_MENU_SUB_HILITE_H, WHITE);
+    }
+    draw_text_(2, 16, time_line, time_selected ? BLACK : WHITE,
+               time_selected ? WHITE : BLACK);
+    if(sleep_selected)
+    {
+        poom_arduboy_fill_rect(0, 25, ARDUBOY_WIDTH, POOM_MENU_SUB_HILITE_H, WHITE);
+    }
+    draw_text_(2, 26, "SLEEP NOW", sleep_selected ? BLACK : WHITE,
+               sleep_selected ? WHITE : BLACK);
+    draw_footer_("A SELECT", "B BACK");
+    poom_arduboy_display();
+}
+#endif
+
 static void render_reorder_picker_(void)
 {
     static const char *const categories[4] = {"THE BEAST", "THE ZEN", "THE GAMER", "THE MAKER"};
@@ -1499,6 +1720,46 @@ static void on_button_any_(const poom_sbus_msg_t *msg, void *user)
         return;
     }
 
+#if CONFIG_IDF_TARGET_ESP32C5
+    power_reset_idle_();
+
+    if (s_screen == POOM_MENU_SCREEN_SLEEP_TIME)
+    {
+        if (ev.button == BUTTON_B)
+        {
+            s_screen = POOM_MENU_SCREEN_SUBMENU;
+        }
+        else if (ev.button == BUTTON_UP)
+        {
+            s_reorder_pick = 0U;
+        }
+        else if (ev.button == BUTTON_DOWN)
+        {
+            s_reorder_pick = 1U;
+        }
+        else if((ev.button == BUTTON_A) && (s_reorder_pick == 1U))
+        {
+            power_off_enter_deep_sleep_();
+        }
+        else if((ev.button == BUTTON_A) && (s_reorder_pick == 0U))
+        {
+            s_sub_selected = (uint8_t)((s_sub_selected + 1U) % 5U);
+            s_sleep_timeout_seconds = power_timeout_from_index_(s_sub_selected);
+            power_save_timeout_();
+        }
+        return;
+    }
+
+    if (s_screen == POOM_MENU_SCREEN_POWER_ERROR)
+    {
+        if (ev.button == BUTTON_B)
+        {
+            s_screen = POOM_MENU_SCREEN_SLEEP_TIME;
+        }
+        return;
+    }
+#endif
+
     if (s_screen == POOM_MENU_SCREEN_RESET_CONFIRM)
     {
         if (ev.button == BUTTON_A)
@@ -1635,6 +1896,15 @@ static void menu_task_(void *arg)
             continue;
         }
 
+#if CONFIG_IDF_TARGET_ESP32C5
+        if((s_sleep_timeout_seconds != 0U) &&
+           ((uint32_t)(power_now_ms_() - s_last_menu_activity_ms) >=
+            (s_sleep_timeout_seconds * 1000U)))
+        {
+            power_off_enter_deep_sleep_();
+        }
+#endif
+
         if (s_screen == POOM_MENU_SCREEN_SUBMENU)
         {
             render_submenu_();
@@ -1647,6 +1917,16 @@ static void menu_task_(void *arg)
         {
             render_reset_confirmation_();
         }
+#if CONFIG_IDF_TARGET_ESP32C5
+        else if (s_screen == POOM_MENU_SCREEN_POWER_ERROR)
+        {
+            render_power_error_();
+        }
+        else if (s_screen == POOM_MENU_SCREEN_SLEEP_TIME)
+        {
+            render_sleep_time_();
+        }
+#endif
         else
         {
             render_main_();
@@ -1677,6 +1957,9 @@ void app_poom_menu_principal(void)
     poom_button_sound_init();
     menu_order_load_();
     update_btn_sound_label_();
+#if CONFIG_IDF_TARGET_ESP32C5
+    power_load_timeout_();
+#endif
 
     (void)xTaskCreate(menu_task_, "poom_menu", 4096, NULL, 5, &s_menu_task);
 

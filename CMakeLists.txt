@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.16)
 #
 set(POOM_FIRMWARE_VERSION "")
 set(POOM_FW_VERSION "1.0")
-set(POOM_FW_RELEASE "14")
+set(POOM_FW_RELEASE "15")
 
 if(DEFINED ENV{POOM_FIRMWARE_VERSION} AND NOT "$ENV{POOM_FIRMWARE_VERSION}" STREQUAL "")
     set(POOM_FIRMWARE_VERSION "$ENV{POOM_FIRMWARE_VERSION}")
@@ -94,6 +94,7 @@ set(MODULES
     poom_fw_update
     poom_game_store
     poom_arduboy_display
+    poom_gfx
     poom_ui_keyboard
     poom_sbus
     poom_host_sniffer_transport
@@ -167,6 +168,7 @@ set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_fw_update
     ${CMAKE_SOURCE_DIR}/modules/poom_game_store
     ${CMAKE_SOURCE_DIR}/modules/poom_arduboy_display
+    ${CMAKE_SOURCE_DIR}/modules/poom_gfx
     ${CMAKE_SOURCE_DIR}/modules/poom_ui_keyboard
     ${CMAKE_SOURCE_DIR}/modules/poom_sbus
     ${CMAKE_SOURCE_DIR}/modules/poom_host_sniffer_transport

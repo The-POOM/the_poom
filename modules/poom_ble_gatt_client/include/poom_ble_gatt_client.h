@@ -40,6 +40,7 @@ typedef struct
 typedef struct
 {
     void (*handler_client_cb)(esp_gattc_cb_event_t event_type,
+                             esp_gatt_if_t gattc_if,
                              esp_ble_gattc_cb_param_t *param);
     void (*handler_gap_cb)(esp_gap_ble_cb_event_t event_type,
                             esp_ble_gap_cb_param_t *param);
@@ -99,6 +100,15 @@ void poom_ble_gatt_client_set_remote_bda(const uint8_t bda[6]);
 void poom_ble_gatt_client_set_bonding(bool enable);
 
 /**
+ * @brief Selects complete service discovery instead of the configured UUID.
+ *
+ * Reconnaissance consumers enable this before start() to receive every
+ * service through their GATTC event callback. Normal scanner users leave it
+ * disabled and retain the original filtered behaviour.
+ */
+void poom_ble_gatt_client_set_recon_mode(bool enable);
+
+/**
  * @brief Sets scan and UUID filter parameters.
  *
  * @param scan_params Scan/filter parameters.
@@ -140,6 +150,14 @@ esp_err_t poom_ble_gatt_client_write_char16(uint16_t char_uuid16,
                                             const uint8_t *data,
                                             int length,
                                             bool with_response);
+
+/**
+ * @brief Reads a characteristic by its discovered handle.
+ *
+ * Completion is delivered through ESP_GATTC_READ_CHAR_EVT to the configured
+ * client callback.
+ */
+esp_err_t poom_ble_gatt_client_read_char(uint16_t char_handle);
 
 /**
  * @brief Starts BLE GATT client helper stack.

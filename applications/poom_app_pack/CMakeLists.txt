@@ -10,6 +10,7 @@ list(REMOVE_ITEM POOM_APP_PACK_SRCS
 
 list(APPEND POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/menu_tv_off.c"
+    "${COMPONENT_DIR}/src/menu_spectrum.c"
 )
 
 if(NOT CONFIG_ZB_ENABLED)
@@ -65,6 +66,7 @@ set(POOM_APP_PACK_REQUIRES
 	    poom_led_rainbow
 	    poom_midi
 	    poom_arduboy_display
+	    poom_gfx
 	    poom_sbus
 	    poom_sd_browser
     poom_secrets_store

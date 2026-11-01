@@ -37,6 +37,11 @@ void oled_transport_display_image(oled_driver_t *dev,
                                   const uint8_t *images,
                                   int width);
 
+/** Send one or more controller commands as a single I2C command stream. */
+void oled_transport_send_commands(oled_driver_t *dev,
+                                  const uint8_t *commands,
+                                  uint16_t command_count);
+
 #ifdef __cplusplus
 }
 #endif

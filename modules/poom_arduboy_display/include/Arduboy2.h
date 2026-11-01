@@ -37,11 +37,24 @@ extern "C" {
 void poom_arduboy_begin(void);
 void poom_arduboy_clear(void);
 void poom_arduboy_display(void);
+void poom_arduboy_invert(bool inverted);
+void poom_arduboy_set_contrast(uint8_t contrast);
+void poom_arduboy_set_display_enabled(bool enabled);
 
 void poom_arduboy_set_cursor(int16_t x, int16_t y);
 void poom_arduboy_set_text_size(uint8_t size);
 size_t poom_arduboy_print(const char *s);
 void poom_arduboy_delay_short(uint16_t ms);
+
+/* Compact 3x5 technical font and a deterministic 1bpp shade.  These use the
+ * existing Arduboy framebuffer, so graphs do not need a second surface. */
+int16_t poom_arduboy_tiny_text_width(const char *s);
+void poom_arduboy_draw_tiny_text(int16_t x, int16_t y, const char *s, uint8_t color);
+void poom_arduboy_draw_dither_vline(int16_t x,
+                                    int16_t y0,
+                                    int16_t y1,
+                                    uint8_t density,
+                                    uint8_t color);
 
 void poom_arduboy_draw_pixel(int16_t x, int16_t y, uint8_t color);
 void poom_arduboy_draw_line(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t color);
@@ -93,6 +106,9 @@ public:
     void begin() { poom_arduboy_begin(); }
     void clear() { poom_arduboy_clear(); }
     void display() { poom_arduboy_display(); }
+    void invert(bool inverted) { poom_arduboy_invert(inverted); }
+    void setContrast(uint8_t contrast) { poom_arduboy_set_contrast(contrast); }
+    void setDisplayEnabled(bool enabled) { poom_arduboy_set_display_enabled(enabled); }
 
     void setCursor(int16_t x, int16_t y) { poom_arduboy_set_cursor(x, y); }
     void setTextSize(uint8_t size) { poom_arduboy_set_text_size(size); }

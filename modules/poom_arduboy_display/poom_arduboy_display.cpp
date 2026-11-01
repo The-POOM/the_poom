@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -16,10 +17,45 @@ extern const uint8_t poom_arduboy_font5x7[];
 
 static oled_driver_t s_dev;
 static uint8_t s_buffer[(ARDUBOY_WIDTH * ARDUBOY_HEIGHT) / 8];
+/* Ported from poom-arduino: this page-layout shadow makes idle OLED frames
+ * zero-transfer and sends only changed spans.  It is not HP SRAM. */
+EXT_RAM_BSS_ATTR static uint8_t s_display_shadow[(ARDUBOY_WIDTH * ARDUBOY_HEIGHT) / 8];
+EXT_RAM_BSS_ATTR static bool s_display_shadow_valid;
 static int16_t s_cursor_x = 0;
 static int16_t s_cursor_y = 0;
 static uint8_t s_text_size = 1;
 static int8_t s_x_shift = (int8_t)POOM_ARDUBOY_OLED_X_SHIFT;
+
+/* 3x5 font: digits, upper-case ASCII letters and the punctuation used by
+ * instrument views.  Keeping it here gives every app the same compact text
+ * primitive as Flipper-style technical screens without another framebuffer. */
+#define T(a,b,c,d,e) ((uint16_t)(((uint16_t)(a) << 12) | ((uint16_t)(b) << 9) | \
+                                  ((uint16_t)(c) << 6) | ((uint16_t)(d) << 3) | (uint16_t)(e)))
+static const uint16_t s_tiny_glyphs[41] = {
+    T(0,0,0,0,0), T(2,5,5,5,2), T(2,6,2,2,7), T(6,1,2,4,7),
+    T(5,5,7,1,1), T(7,4,6,1,6), T(3,4,6,5,2), T(7,1,2,2,2),
+    T(2,5,2,5,2), T(2,5,3,1,6), T(0,2,0,2,0), T(0,0,7,0,0),
+    T(0,0,0,0,2), T(1,1,2,4,4), T(2,5,7,5,5), T(6,5,6,5,6),
+    T(3,4,4,4,3), T(6,5,5,5,6), T(7,4,6,4,7), T(7,4,6,4,4),
+    T(3,4,5,5,3), T(5,5,7,5,5), T(7,2,2,2,7), T(1,1,1,5,2),
+    T(5,5,6,5,5), T(4,4,4,4,7), T(5,7,7,5,5), T(5,7,7,7,5),
+    T(2,5,5,5,2), T(6,5,6,4,4), T(2,5,5,7,3), T(6,5,6,5,5),
+    T(3,4,2,1,6), T(7,2,2,2,2), T(5,5,5,5,7), T(5,5,5,5,2),
+    T(5,5,7,7,5), T(5,5,2,5,5), T(5,5,2,2,2), T(7,1,2,4,7),
+};
+#undef T
+
+static uint16_t tiny_glyph_(char c)
+{
+    if((c >= 'a') && (c <= 'z')) c = (char)(c - ('a' - 'A'));
+    if((c >= '0') && (c <= '9')) return s_tiny_glyphs[1 + (uint8_t)(c - '0')];
+    if(c == ':') return s_tiny_glyphs[11];
+    if(c == '-') return s_tiny_glyphs[12];
+    if(c == '.') return s_tiny_glyphs[13];
+    if(c == '/') return s_tiny_glyphs[14];
+    if((c >= 'A') && (c <= 'Z')) return s_tiny_glyphs[15 + (uint8_t)(c - 'A')];
+    return s_tiny_glyphs[0];
+}
 
 /**
  * @brief Internal helper for `in_bounds`.
@@ -119,14 +155,13 @@ static void draw_char5x7_(int16_t x, int16_t y, char c)
  * @param[in] page Parameter passed to the function.
  * @return void
  */
-static void flush_page_shifted_(int page)
+static const uint8_t *flush_page_shifted_(int page, uint8_t *shifted)
 {
     const uint8_t *src = &s_buffer[(size_t)page * (size_t)ARDUBOY_WIDTH];
 
-    uint8_t shifted[ARDUBOY_WIDTH];
     if (s_x_shift == 0)
     {
-        (void)memcpy(shifted, src, sizeof(shifted));
+        return src;
     }
     else
     {
@@ -141,8 +176,35 @@ static void flush_page_shifted_(int page)
             shifted[(x + shift) & (ARDUBOY_WIDTH - 1)] = src[x];
         }
     }
+    return shifted;
+}
 
-    oled_transport_display_image(&s_dev, page, 0, shifted, ARDUBOY_WIDTH);
+static void flush_changed_page_(int page, const uint8_t *page_data)
+{
+    /* Reopening an I2C range costs a command transaction.  Matching the
+     * Arduino implementation, include short unchanged gaps in the range. */
+    const uint8_t merge_gap = 7U;
+    uint8_t *shadow = &s_display_shadow[(size_t)page * ARDUBOY_WIDTH];
+    if(!s_display_shadow_valid) {
+        oled_transport_display_image(&s_dev, page, 0, page_data, ARDUBOY_WIDTH);
+        (void)memcpy(shadow, page_data, ARDUBOY_WIDTH);
+        return;
+    }
+    uint8_t column = 0U;
+    while(column < ARDUBOY_WIDTH) {
+        while((column < ARDUBOY_WIDTH) && (page_data[column] == shadow[column])) ++column;
+        if(column >= ARDUBOY_WIDTH) break;
+        const uint8_t start = column;
+        uint8_t last_changed = column++;
+        while(column < ARDUBOY_WIDTH) {
+            if(page_data[column] != shadow[column]) last_changed = column;
+            else if((uint8_t)(column - last_changed) > merge_gap) break;
+            ++column;
+        }
+        const uint8_t width = (uint8_t)(last_changed - start + 1U);
+        oled_transport_display_image(&s_dev, page, start, &page_data[start], width);
+        (void)memcpy(&shadow[start], &page_data[start], width);
+    }
 }
 
 extern "C" {
@@ -150,6 +212,7 @@ extern "C" {
 void poom_arduboy_set_x_shift(int8_t shift)
 {
     s_x_shift = shift;
+    s_display_shadow_valid = false;
 }
 
 uint8_t *poom_arduboy_get_buffer(void)
@@ -168,6 +231,7 @@ void poom_arduboy_begin(void)
     (void)i2c_register_device((uint8_t)OLED_I2C_ADDRESS_DEFAULT);
 
     oled_driver_init(&s_dev, ARDUBOY_WIDTH, ARDUBOY_HEIGHT);
+    s_display_shadow_valid = false;
     poom_arduboy_clear();
     poom_arduboy_display();
 }
@@ -182,11 +246,31 @@ void poom_arduboy_clear(void)
 
 void poom_arduboy_display(void)
 {
+    uint8_t shifted[ARDUBOY_WIDTH];
     const int pages = (ARDUBOY_HEIGHT / 8);
     for (int page = 0; page < pages; page++)
     {
-        flush_page_shifted_(page);
+        flush_changed_page_(page, flush_page_shifted_(page, shifted));
     }
+    s_display_shadow_valid = true;
+}
+
+void poom_arduboy_invert(bool inverted)
+{
+    const uint8_t command = inverted ? OLED_CMD_DISPLAY_INVERT : OLED_CMD_DISPLAY_NORMAL;
+    oled_transport_send_commands(&s_dev, &command, 1U);
+}
+
+void poom_arduboy_set_contrast(uint8_t contrast)
+{
+    const uint8_t commands[] = {OLED_CMD_SET_CONTRAST, contrast};
+    oled_transport_send_commands(&s_dev, commands, sizeof(commands));
+}
+
+void poom_arduboy_set_display_enabled(bool enabled)
+{
+    const uint8_t command = enabled ? OLED_CMD_DISPLAY_ON : OLED_CMD_DISPLAY_OFF;
+    oled_transport_send_commands(&s_dev, &command, 1U);
 }
 
 void poom_arduboy_set_cursor(int16_t x, int16_t y)
@@ -252,6 +336,74 @@ void poom_arduboy_delay_short(uint16_t ms)
 void poom_arduboy_draw_pixel(int16_t x, int16_t y, uint8_t color)
 {
     put_pixel_(x, y, color);
+}
+
+int16_t poom_arduboy_tiny_text_width(const char *s)
+{
+    if(s == NULL || *s == '\0')
+    {
+        return 0;
+    }
+    int16_t width = 0;
+    while(*s++ != '\0')
+    {
+        width = (int16_t)(width + 4);
+    }
+    return (int16_t)(width - 1);
+}
+
+void poom_arduboy_draw_tiny_text(int16_t x, int16_t y, const char *s, uint8_t color)
+{
+    if(s == NULL)
+    {
+        return;
+    }
+
+    while(*s != '\0')
+    {
+        const uint16_t glyph = tiny_glyph_(*s++);
+        for(int16_t row = 0; row < 5; ++row)
+        {
+            const uint8_t bits = (uint8_t)((glyph >> (12 - row * 3)) & 0x07U);
+            for(int16_t col = 0; col < 3; ++col)
+            {
+                if((bits & (uint8_t)(4U >> col)) != 0U)
+                {
+                    put_pixel_((int16_t)(x + col), (int16_t)(y + row), color);
+                }
+            }
+        }
+        x = (int16_t)(x + 4);
+    }
+}
+
+void poom_arduboy_draw_dither_vline(int16_t x,
+                                    int16_t y0,
+                                    int16_t y1,
+                                    uint8_t density,
+                                    uint8_t color)
+{
+    if(y0 > y1)
+    {
+        const int16_t tmp = y0;
+        y0 = y1;
+        y1 = tmp;
+    }
+    if(density > 3U)
+    {
+        density = 3U;
+    }
+    for(int16_t y = y0; y <= y1; ++y)
+    {
+        const uint8_t phase = (uint8_t)(((uint16_t)x + (uint16_t)y * 3U) & 0x03U);
+        const bool set = (density == 3U) ||
+                         ((density == 2U) && ((phase & 1U) == 0U)) ||
+                         ((density == 1U) && (phase == 0U));
+        if(set)
+        {
+            put_pixel_(x, y, color);
+        }
+    }
 }
 
 void poom_arduboy_draw_fast_vline(int16_t x, int16_t y, int16_t h, uint8_t color)

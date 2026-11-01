@@ -9,6 +9,8 @@ idf_component_register(
     REQUIRES
         button_driver
         buzzer
+        esp_driver_gpio
+        esp_hw_support
         nvs_flash
         poom_app_pack
         poom_breakout
@@ -17,4 +19,5 @@ idf_component_register(
         poom_ble_keyboard
         poom_led_rainbow
         poom_sbus
+        sd_card
 )

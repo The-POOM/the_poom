@@ -1,3 +1,48 @@
+## POOM 1.0.15
+
+### BLE DETECT
+- Added **GATT RECON** to `THE BEAST → BLE DETECT → device detail → BLE ACTIONS`.
+- Added GATT service and characteristic discovery for selected BLE devices.
+- Added UUID and characteristic permission display (`READ`, `WRITE`, `NOTIFY`, `INDICATE`).
+- Added support for reading GATT characteristics and displaying returned data in hexadecimal.
+- Improved GATT navigation with full-width text and horizontal scrolling for long service and characteristic names.
+- Optimised memory usage by reusing detector buffers and preserving HP SRAM.
+
+### WIFI SPECTRUM
+- Added **SPECTRUM** to `THE BEAST`, providing real-time Wi-Fi signal activity monitoring.
+- Added support for **2.4 GHz and 5 GHz** channel scanning on ESP32-C5.
+- Added **Spectrum View** with RSSI signal graphs, intensity visualization and strongest-channel detection.
+- Added **Waterfall View** to visualize Wi-Fi activity over time, including signal bursts, busy channels and short transmissions.
+- Added channel group switching for `2G`, `5G-A`, `5G-B` and `5G-C`.
+- Added frequency labels, RSSI indicators and signal history visualization.
+- Added interactive controls:
+  - **UP / DOWN:** Switch between Wi-Fi channel groups.
+  - **LEFT / RIGHT:** Switch between Spectrum and Waterfall views.
+  - **A:** Pause or resume live scanning display.
+  - **B:** Stop scanning, release memory and return to THE BEAST.
+- Improved signal activity visualization using intensity patterns, RSSI reference levels and strongest-channel indicators.
+
+### POWER MANAGEMENT
+- Added **SLEEP** to the `CONFIG` menu for ESP32-C5 devices.
+- Added configurable automatic deep-sleep timeout options: `OFF`, `1 MIN`, `5 MIN`, `15 MIN` and `30 MIN`.
+- Added **SLEEP NOW** for manually entering deep sleep.
+- Added persistent sleep settings stored in NVS.
+- Added automatic idle timer reset on menu button activity.
+- Added sleep menu controls:
+  - **UP / DOWN:** Select `TIME` or `SLEEP NOW`.
+  - **A (TIME):** Cycle through available sleep timeout options.
+  - **A (SLEEP NOW):** Immediately enter deep sleep.
+  - **B:** Return to the Config menu.
+- Improved power management by turning off the OLED, LEDs and buzzer, and unmounting the SD card before sleep.
+- Added wake-up support using the **Left button**, restarting POOM from deep sleep without restoring the previous application.
+
+### Community Contributions
+
+Special thanks to **THNRGLABS** for helping identify and investigate issues, providing valuable feedback, and contributing to the continuous improvement of POOM.
+
+**Thank you for your support and dedication to the POOM community!**
+
+
 ## POOM 1.0.14
 
 ### FOX HUNT
