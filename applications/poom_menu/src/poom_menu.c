@@ -83,6 +83,7 @@
 #include "esp_system.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "soc/soc_caps.h"
 #include "driver/gpio.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -754,9 +755,17 @@ static void power_off_enter_deep_sleep_(void)
         (void)sd_card_unmount();
     }
 
-    if ((gpio_config(&wake_cfg) != ESP_OK) ||
-        (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) != ESP_OK) ||
-        (esp_deep_sleep_enable_gpio_wakeup(wake_mask, ESP_GPIO_WAKEUP_GPIO_LOW) != ESP_OK))
+    bool wake_ok = (gpio_config(&wake_cfg) == ESP_OK) &&
+                   (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) == ESP_OK);
+    /* 1.0.15 used esp_deep_sleep_enable_gpio_wakeup(), which ESP-IDF v6.1.0
+     * (the version 1.0.15 targets) does not expose for the esp32c5. Use the
+     * GPIO-wakeup API that v6.1.0 does have. On this chip/IDF that may only
+     * wake from light sleep; from deep sleep the device wakes on reset. */
+    (void)wake_mask;
+    wake_ok = wake_ok &&
+              (gpio_wakeup_enable(wake_pin, GPIO_INTR_LOW_LEVEL) == ESP_OK) &&
+              (esp_sleep_enable_gpio_wakeup() == ESP_OK);
+    if (!wake_ok)
     {
         /* Re-enable the screen so a configuration failure is visible. */
         poom_arduboy_set_display_enabled(true);
