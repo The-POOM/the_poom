@@ -100,5 +100,7 @@ run in full on-device; extract a top-N from them instead.
 - ESP-IDF v6.1, target `esp32c5` (also builds `esp32c6`). Run `idf.py fullclean`
   once after adding the new source files (the app-pack `CMakeLists.txt` globs
   sources at configure time), then `idf.py build flash monitor`.
-- The crypto hot loop is pinned to `-O2` in `applications/poom_app_pack/
-  CMakeLists.txt` so it stays optimised regardless of the global build type.
+- The crypto hot loop (`poom_handshake_crack.c`) is compiled at `-O2` —
+  overriding the project's default optimization level for just that file — so
+  cracking speed stays up regardless of the global build type. Set via
+  `set_source_files_properties` in `applications/poom_app_pack/CMakeLists.txt`.
