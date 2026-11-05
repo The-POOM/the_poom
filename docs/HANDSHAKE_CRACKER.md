@@ -29,11 +29,23 @@ It recovers only weak or default pre-shared keys; it is not a brute-forcer (see
   just the built-in list) — see [Bring your own wordlist](#bring-your-own-wordlist-sd-card).
 
 ### Modes (confirm screen, cycle with LEFT/RIGHT, A to start)
-- **QUICK** — the 230 keys with as-is / Capitalize / `+!` / Capitalize+`!`
-  rules (~606 candidates, roughly 70 s). After a QUICK miss, **A:MORE** runs the
-  remaining rules without repeating anything already tried.
-- **SMART** — all rules plus ESSID-derived candidates (~1140, roughly 2 min).
-- **SD LIST** — pick one of your own wordlist files and stream it (see below).
+QUICK and SMART both run the built-in 230-key list — the difference is how many
+rule variations each key is tried with.
+
+- **QUICK** — each key four ways: **as-is**, **Capitalized**, **+`!`**, and
+  **Capitalized +`!`** (e.g. `password` → `password`, `Password`, `password!`,
+  `Password!`). ~606 candidates, roughly 70 s. The most common weak transforms,
+  fast.
+- **SMART** — everything QUICK does, **plus** three more suffix rules (**+`1`**,
+  **+`123`**, **Capitalized +`1`**), **and** it also runs the network's own name
+  (**ESSID**) through all of those rules. ~1140 candidates, roughly 2 min —
+  about double the coverage.
+- **SD LIST** — run one of your own wordlist files from the SD card (see below).
+
+After a QUICK miss, **A:MORE** runs *only* the extra SMART rules (never what
+QUICK already tried), so QUICK → A:MORE equals a full SMART run with no repeated
+work. Capitalize applies only to keys that contain a real word (a run of ≥2
+letters), so it's skipped for all-digit or keyboard-walk keys like `12345678`.
 
 ### Bring your own wordlist (SD card)
 You are not limited to the built-in 230-key list — put your own dictionary
