@@ -35,6 +35,7 @@
 #include "menu_cli_ot.h"
 #endif
 #include "menu_cli_web.h"
+#include "menu_net_scanner.h"
 #include "menu_control_music.h"
 #include "menu_deauth.h"
 #include "menu_deauth_detector.h"
@@ -565,6 +566,18 @@ static void action_sniffer_rt_(void)
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
     menu_sniffer_rt_show();
+}
+
+/**
+ * @brief Internal helper for `action_net_scanner`.
+ *
+ * @return void
+ */
+static void action_net_scanner_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_net_scanner_show();
 }
 
 /**
@@ -1128,6 +1141,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SCAN CHANNELS", action_scanner_core_},
     {"SPECTRUM", action_spectrum_},
     {"SCAN NET", action_arp_},
+    {"NET SCANNER", action_net_scanner_},
 
 #if CONFIG_ZB_ENABLED
     {"CLI ZIGBEE", action_cli_zigbee_},

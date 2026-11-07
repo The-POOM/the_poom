@@ -182,6 +182,8 @@ set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_mac
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_scanner
     ${CMAKE_SOURCE_DIR}/modules/poom_pcap
+    ${CMAKE_SOURCE_DIR}/modules/poom_net_scanner
+    ${CMAKE_SOURCE_DIR}/modules/poom_net_audit
 # zigbee jonathan
 #    ${CMAKE_SOURCE_DIR}/modules/open_thread
 # -----------------------------------
