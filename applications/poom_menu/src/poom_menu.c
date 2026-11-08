@@ -67,6 +67,8 @@
 #include "menu_wifi_profiles.h"
 #include "menu_scanner_core.h"
 #include "menu_spectrum.h"
+#include "menu_device_inspector.h"
+#include "menu_wifi_guard.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
 #include "menu_sniffer_device.h"
@@ -1002,6 +1004,22 @@ static void action_spectrum_(void)
     menu_spectrum_show();
 }
 
+/** Opens the passive multi-radio IoT observation summary. */
+static void action_device_inspector_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_device_inspector_show();
+}
+
+/** Opens the passive Wi-Fi beacon consistency monitor. */
+static void action_wifi_guard_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_guard_show();
+}
+
 /**
  * @brief Internal helper for `action_imu_monitor`.
  *
@@ -1127,6 +1145,8 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SNNIFER RT", action_sniffer_rt_},
     {"SCAN CHANNELS", action_scanner_core_},
     {"SPECTRUM", action_spectrum_},
+    {"DEVICE INSPECTOR", action_device_inspector_},
+    {"WIFI GUARD", action_wifi_guard_},
     {"SCAN NET", action_arp_},
 
 #if CONFIG_ZB_ENABLED

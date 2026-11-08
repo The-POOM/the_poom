@@ -35,6 +35,8 @@ The following tables follow the `s_apps_*` list order in
 | `SNNIFER RT` | Selects BLE or IEEE 802.15.4 capture for real-time analysis from a connected computer. IEEE 802.15.4 allows channel selection. | [menu_sniffer_rt.c](src/menu_sniffer_rt.c) |
 | `SCAN CHANNELS` | Shows per-channel activity for Wi-Fi or IEEE 802.15.4. Wi-Fi mode can lock a channel and show frames per second, retries, deauth frames, and frame-type distribution. | [menu_scanner_core.c](src/menu_scanner_core.c) |
 | `SPECTRUM` | Live Wi-Fi instrument: draws an RSSI trace with grid, peak hold, and cursor. LEFT/RIGHT switches to waterfall; UP/DOWN changes between 2.4 GHz and C5 5 GHz ranges; A pauses and B exits. | [menu_spectrum.c](src/menu_spectrum.c) |
+| `DEVICE INSPECTOR` | Passive, time-sliced observation summary. Alternates Wi-Fi, BLE, and IEEE 802.15.4 reception and shows unique Wi-Fi APs, unique BLE devices, and active IEEE 802.15.4 channels. It does not create SD files or PCAP captures. | [menu_device_inspector.c](src/menu_device_inspector.c) · [guide](README_DEVICE_INSPECTOR_WIFI_GUARD.md#device-inspector) |
+| `WIFI GUARD` | Passive Wi-Fi beacon-consistency and activity monitor. Warns about conflicting beacon identities and unusual AUTH, PROBE, CSA, EAPOL Logoff, or SAE frame bursts. It works without SD; reports are saved only when requested. | [menu_wifi_guard.c](src/menu_wifi_guard.c) · [guide](README_DEVICE_INSPECTOR_WIFI_GUARD.md#wifi-guard) |
 | `SCAN NET` | Discovers local-network devices through ARP and shows network parameters and results. | [menu_poom_wifi_arp.c](src/menu_poom_wifi_arp.c) |
 | `CLI ZIGBEE` | Opens the Zigbee console. Shown only when `CONFIG_ZB_ENABLED` is enabled. | [menu_cli_zigbee.c](src/menu_cli_zigbee.c) |
 | `HTTP LOAD` | Sends HTTP requests to a configured server to measure behaviour under load; parameters and counters are available on the device. | [menu_http_load_test.c](src/menu_http_load_test.c) |
@@ -227,7 +229,7 @@ applications/poom_app_pack/
 ## Menu Structure
 
 The launcher (`applications/poom_menu/`) exposes these apps in 5 main categories.
-The Spanish tables above preserve menu order and describe conditional entries.
+The tables above preserve menu order and describe conditional entries.
 
 ```mermaid
 graph TD
@@ -248,12 +250,14 @@ graph TD
     B --> B9[SNIFFER]
     B --> B10[SNNIFER RT]
     B --> B11[SCAN CHANNELS]
-    B --> B12[SCAN NET]
-    B --> B13[CLI]
-    B --> B14[HTTP LOAD]
-    B --> B15[PROBE REQ]
-    B --> B16[OPENTHREAD CLI - conditional]
-    B --> B17[CLI ZIGBEE - conditional]
+    B --> B12[SPECTRUM]
+    B --> B13[DEVICE INSPECTOR]
+    B --> B14[SCAN NET]
+    B --> B15[CLI]
+    B --> B16[HTTP LOAD]
+    B --> B17[PROBE REQ]
+    B --> B18[OPENTHREAD CLI - conditional]
+    B --> B19[CLI ZIGBEE - conditional]
 
     C --> C1[MIDI]
     C --> C2[CONTROL]
@@ -367,6 +371,13 @@ This section expands each app with:
 - Wi-Fi metrics: one-second observation windows report frames/s, retry percentage and deauths/s. They do not claim exact RF airtime or channel-load percentage.
 - I/O: OLED-only.
 - Exit/return: exits to launcher and publishes `poom/menu/resume`.
+
+#### DEVICE INSPECTOR (`menu_device_inspector.c`, `menu_device_inspector_show()`)
+- What it is: passive multi-radio observation summary for nearby IoT activity.
+- Subsystems: `poom_wifi_detector`, `poom_ble_scan`, and `poom_scanner_core`.
+- UI: cycles every three seconds through Wi-Fi, BLE, and IEEE 802.15.4. Shows unique Wi-Fi AP and BLE MAC counts plus the number of active IEEE 802.15.4 channels. **A** pauses/resumes and **B** stops.
+- I/O: OLED-only; it deliberately does not write SD files or start PCAP capture.
+- Memory: state exists only during the session in PSRAM and is released on exit.
 
 #### SCAN NET (`menu_poom_wifi_arp.c`, `menu_poom_wifi_arp_show()`)
 - What it is: local network discovery/ARP tooling for diagnostics on authorized networks.

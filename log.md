@@ -1,3 +1,42 @@
+## POOM 1.0.16
+
+### DEVICE INSPECTOR
+- Added **DEVICE INSPECTOR** to `THE BEAST`, providing passive monitoring of nearby Wi-Fi, BLE and IEEE 802.15.4 activity.
+- Added sequential radio scanning to prevent simultaneous Wi-Fi, BLE and IEEE 802.15.4 operations on POOM.
+- Added a compact overview displaying detected Wi-Fi access points, BLE advertisers and active IEEE 802.15.4 channels.
+- Added automatic scan rotation with **12-second intervals** between Wi-Fi, BLE and IEEE 802.15.4 phases.
+- Added a blinking activity indicator to identify the currently active radio receiver.
+- Added interactive controls:
+  - **A:** Pause or resume the current scanning phase.
+  - **B:** Stop scanning, release memory and return to THE BEAST.
+- Optimised memory usage by allocating temporary survey data in PSRAM and releasing resources when the application closes.
+
+### WIFI GUARD
+- Added **WIFI GUARD** to `THE BEAST`, providing passive Wi-Fi security monitoring and unusual management-frame activity detection.
+- Added support for **2.4 GHz and 5 GHz** channel monitoring on POOM.
+- Added automatic channel hopping with **180 ms intervals** to observe nearby Wi-Fi activity.
+- Added **Beacon Consistency Detection** with the following alerts:
+  - **MULTI NETWORK NAMES:** Detects BSSIDs advertising multiple SSID names.
+  - **SECURITY CONFLICT:** Detects matching SSIDs with inconsistent security configurations across BSSIDs.
+  - **KNOWN TEST DEVICE:** Identifies BSSIDs matching the `00:13:37` test-device prefix.
+- Added **Activity Detection** using rolling five-second observation windows:
+  - **AUTH BURST:** Detects unusually high authentication-frame activity.
+  - **PROBE BURST:** Detects excessive probe requests.
+  - **CHANNEL SWITCH:** Detects repeated channel-switch announcements.
+  - **EAPOL LOGOFF:** Detects repeated visible EAPOL Logoff frames.
+  - **SAE BURST:** Detects unusually high WPA3-SAE authentication activity.
+- Added a real-time monitoring interface displaying the active channel, detected access points, alert count and current alert status.
+- Added **Alert Details** displaying channel information, frame counts, BSSID identifiers and relevant security information.
+- Added automatic expiration of activity alerts after five seconds without matching traffic.
+- Added **CSV REPORT EXPORT** to `/sdcard/wifi_guard/`, allowing detected warnings and active alerts to be saved to the microSD card.
+- Added interactive controls:
+  - **UP / DOWN:** Navigate between detected alerts.
+  - **A:** Open alert details or save the selected alert report.
+  - **B:** Return to monitoring or stop the application.
+- Improved memory management with PSRAM-first allocation, automatic heap fallback and complete resource cleanup when exiting.
+- Both applications operate in **passive monitoring mode**, without transmitting Wi-Fi traffic.
+
+
 ## POOM 1.0.15
 
 ### BLE DETECT
