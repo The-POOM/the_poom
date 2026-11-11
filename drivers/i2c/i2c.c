@@ -379,3 +379,22 @@ void i2c_scan_devices(uint8_t **found_addresses, size_t *num_addresses)
 
     I2C_PRINTF_I("scan completed, %u devices found", (unsigned)*num_addresses);
 }
+
+uint8_t i2c_stream_transfer(uint8_t address,const uint8_t *tx,size_t tx_length,
+                            uint8_t *rx,size_t rx_length,int timeout_ms)
+{
+    i2c_master_dev_handle_t dev=i2c_find_device_(address);
+    if(!s_i2c_bus||timeout_ms<=0||(!tx_length&&!rx_length)||(tx_length&&!tx)||(rx_length&&!rx)) return I2C_STATUS_ERROR;
+    bool temporary=false;
+    if(!dev) {
+        i2c_device_config_t config={.dev_addr_length=I2C_ADDR_BIT_LEN_7,.device_address=address,.scl_speed_hz=I2C_FREQ_HZ};
+        if(i2c_master_bus_add_device(s_i2c_bus,&config,&dev)!=ESP_OK) return I2C_STATUS_ERROR;
+        temporary=true;
+    }
+    esp_err_t err;
+    if(tx_length&&rx_length) err=i2c_master_transmit_receive(dev,tx,tx_length,rx,rx_length,timeout_ms);
+    else if(tx_length) err=i2c_master_transmit(dev,tx,tx_length,timeout_ms);
+    else err=i2c_master_receive(dev,rx,rx_length,timeout_ms);
+    if(temporary && i2c_master_bus_rm_device(dev)!=ESP_OK) return I2C_STATUS_ERROR;
+    return err==ESP_OK?I2C_STATUS_OK:I2C_STATUS_ERROR;
+}

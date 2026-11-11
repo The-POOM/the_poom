@@ -4,7 +4,6 @@ file(GLOB POOM_APP_PACK_SRCS
 
 list(REMOVE_ITEM POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/menu_sony_tv.c"
-    "${COMPONENT_DIR}/src/menu_wardrive.c"
     "${COMPONENT_DIR}/src/menu_netguard.c"
 )
 
@@ -30,6 +29,8 @@ endif()
 list(REMOVE_DUPLICATES POOM_APP_PACK_SRCS)
 
 set(POOM_APP_PACK_REQUIRES
+    poom_gps
+    poom_wardrive
     app_update
     nvs_flash
     button_driver
