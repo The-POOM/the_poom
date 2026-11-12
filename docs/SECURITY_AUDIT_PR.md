@@ -34,4 +34,3 @@ Upstream defaults, partitions, dependency versions, Device Inspector and Wi-Fi G
 The tested combined QA image contained a focused DNS-restoration fix for the separate Wardrive implementation. When combining this feature with Wardrive PR #50, that Wardrive cleanup fix is also needed for the tested transition behavior; it is outside this PR.
 
 Full validation details: `docs/SECURITY_AUDIT_VALIDATION.md`.
-
