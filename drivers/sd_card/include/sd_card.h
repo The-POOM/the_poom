@@ -52,6 +52,16 @@ void sd_card_begin(void);
 esp_err_t sd_card_mount(void);
 
 /**
+ * @brief Mount with two open-file slots (much smaller contiguous heap need
+ *        than sd_card_mount()'s four). For callers that stream at most two
+ *        files at a time on a busy heap. No-op if already mounted (by anyone).
+ */
+esp_err_t sd_card_mount_lean(void);
+
+/** @brief Unmapped ESP-IDF error of the last mount attempt (diagnostics). */
+esp_err_t sd_card_last_raw_err(void);
+
+/**
  * @brief Unmount SD card and release SPI bus.
  *
  * @return ESP_OK on success.
