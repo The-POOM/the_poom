@@ -1,0 +1,2 @@
+idf_component_register(SRCS "wardrive_timezone.c" "wardrive_clock.c" "wardrive_clock_scope.c" "wardrive_sessions.c" "wardrive_distance.c" "wardrive_files.c" "wardrive_format.c" "wardrive_archive.c" "wardrive_storage.c" "wardrive_radio.c" "wardrive_ble.c" "wardrive_wifi.c" "wardrive_export.c" "wardrive_credentials.c" "wardrive_transfer.c" "wardrive_upload.c"
+    INCLUDE_DIRS "include" REQUIRES poom_gps poom_wifi_ctrl bt esp_wifi esp_netif esp_timer esp_event poom_secrets_store cjson esp_http_server esp_http_client mbedtls PRIV_REQUIRES esp-tls lwip)

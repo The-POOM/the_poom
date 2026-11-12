@@ -1,0 +1,9 @@
+menu "Wardrive"
+    config POOM_WARDRIVE_DIAGNOSTICS
+        bool "Verbose Wardrive serial diagnostics"
+        default n
+        help
+            Print radio, worker, memory and transfer diagnostics while Wardrive
+            is open. Off for normal builds. Raw GPS serial output remains a
+            separate on-device user option. No global heap hook is installed.
+endmenu
