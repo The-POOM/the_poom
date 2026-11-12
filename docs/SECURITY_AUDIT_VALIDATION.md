@@ -37,10 +37,26 @@ validation; it is not a warning-free build. Host compiler checks for the scanner
 are strict. The build's static memory/partition checks do not establish runtime
 heap headroom or app-transition behavior.
 
-## Pending
+## Owner hardware checks
 
-Cloud checks have no attached ESP32-C5. The owner verified discovery, full
-audit, SD report saving and app transitions in the separate combined QA build
-using the pinned SDK and release memory profile. The newly renamed labels and
-log/report headings still require an owner smoke test. ESP32-C6 is not validated
-here. No upstream PR was published by this preparation task.
+On 12 November 2026 the owner verified discovery, full audit, indexed offline
+lookup, SD report saving, cancellation/exit and app transitions on ESP32-C5
+using the pinned release SDK and memory profile in a separate combined QA
+build. After the rename, the owner also confirmed the SECURITY AUDIT menu and
+screen titles, successful audit/report saving, renamed report heading and a
+responsive main menu on exit.
+
+These are owner-reported hardware results; the cloud environment has no device.
+The hardware build also contained the separate handshake and Wardrive features,
+and enabled Wardrive diagnostics. The standalone branch was built separately
+but was not separately flashed. Hardware checks with diagnostics disabled and
+ESP32-C6 validation are not claimed.
+
+## Integration note
+
+The combined QA exercise exposed a DNS-restoration issue in the separate
+Wardrive implementation after borrowing a station interface. Its fix and the
+Wardrive navigation improvements remain on the QA branch, outside this PR.
+The tested combined Wi-Fi/BLE transition used that fix. When combining with
+Wardrive PR #50, apply its focused DNS cleanup fix as well; Security Audit
+itself does not depend on the Wardrive feature.
