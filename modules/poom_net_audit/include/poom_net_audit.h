@@ -3,7 +3,7 @@
 
 /**
  * @file poom_net_audit.h
- * @brief Offline SearchSploit (Exploit-DB) lookup for the Network Scanner.
+ * @brief Offline SearchSploit (Exploit-DB) lookup for the Security Audit.
  *
  * Reads the Exploit-DB metadata CSV from the microSD card
  * (`/sdcard/searchsploit/files_exploits.csv`) and finds entries whose title

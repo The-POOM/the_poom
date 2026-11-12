@@ -1,4 +1,4 @@
-# POOM Network Scanner & Security Auditor
+# POOM Security Audit
 
 A LAN scanner and lightweight security auditor for POOM firmware (ESP32-C5,
 the release ESP-IDF snapshot). It joins a Wi-Fi network, discovers devices, finds open ports,
@@ -13,14 +13,14 @@ flags **risky configurations** - all from the handheld, no PC needed.
 > changes anything on the devices it scans. Exploit results are *leads* for you
 > to verify, never proof of a vulnerability.
 
-Network Scanner lives under **THE BEAST -> NET SCANNER**. It is independent of
+Security Audit lives under **THE BEAST -> SECURITY AUDIT**. It is independent of
 **WIFI DETECT** and the ARP **SCAN NET** app.
 
 ---
 
 ## Quick start: Full NetAudit
 
-1. Open **NET SCANNER**, connect to a network (*Saved Profiles* or *Scan
+1. Open **SECURITY AUDIT**, connect to a network (*Saved Profiles* or *Scan
    Networks*).
 2. On the **Devices** list choose **Full NetAudit**.
 3. Pick a port range (**Quick** is a good start), check the estimate, press **A**.
@@ -211,12 +211,12 @@ mounted it), so other radio apps start cleanly.
 
 ## Architecture
 
-- **`modules/poom_net_scanner`** - headless engine:
-  - `poom_net_scanner_logic.c` - pure: subnet math, port sets and windows, port
+- **`modules/poom_security_audit`** - headless engine:
+  - `poom_security_audit_logic.c` - pure: subnet math, port sets and windows, port
     parser, service table, banner / HTTP parsers, word wrap.
-  - `poom_net_scanner_ident.c` - pure: OS / device identification and the
+  - `poom_security_audit_ident.c` - pure: OS / device identification and the
     discovery packet builders/parsers (ICMP, SSDP, NetBIOS, mDNS, UPnP XML).
-  - `poom_net_scanner.c` - networked: subnet, ARP discovery, TCP Connect scan,
+  - `poom_security_audit.c` - networked: subnet, ARP discovery, TCP Connect scan,
     service detection, the identify pass.
 - **`modules/poom_net_audit`** - offline audit:
   - `poom_net_audit_logic.c` - pure: CSV parsing, whole-word matching, version
@@ -225,20 +225,20 @@ mounted it), so other radio apps start cleanly.
   - `poom_net_audit_rules.c` - exposure rule engine + built-in rules.
   - `poom_net_audit_checks.c` - read-only web checks + matcher.
   - `poom_net_audit.c` - SD mount / search entry points.
-- **`applications/poom_app_pack/src/menu_net_scanner.c`** - the screens.
+- **`applications/poom_app_pack/src/menu_security_audit.c`** - the screens.
 
 ### Build
 
-See [the pinned release build and memory profile](NET_SCANNER_BUILD.md).
+See [the pinned release build and memory profile](SECURITY_AUDIT_BUILD.md).
 
 ### Tests
 
 The pure parts have host unit tests (no ESP32 needed):
 
 ```
-cd modules/poom_net_scanner
-cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_logic.c poom_net_scanner_logic.c -o /tmp/t && /tmp/t
-cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_ident.c poom_net_scanner_ident.c poom_net_scanner_logic.c -o /tmp/t && /tmp/t
+cd modules/poom_security_audit
+cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_logic.c poom_security_audit_logic.c -o /tmp/t && /tmp/t
+cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_ident.c poom_security_audit_ident.c poom_security_audit_logic.c -o /tmp/t && /tmp/t
 
 cd ../poom_net_audit
 cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_logic.c poom_net_audit_logic.c -o /tmp/t && /tmp/t
@@ -250,7 +250,7 @@ cc -std=gnu11 -Wall -Wextra -Iinclude -Itest test/test_index.c poom_net_audit_in
 ### Diagnostics
 
 The default build compiles `ESP_LOGx` output out, so the scanner prints a few
-`[net_scanner] ...` lines with `printf` to the USB console: heap on enter /
+`[security_audit] ...` lines with `printf` to the USB console: heap on enter /
 exit, per-host open-port counts, UPnP models found, web-check hits, the saved
 report's path, how the Exploit-DB pass ran
 (*indexed* / *full scan + index built*) and a one-line summary at the end of a

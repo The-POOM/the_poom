@@ -1,5 +1,5 @@
 # Optional POOM 1.0.16 release-compatible memory profile.
-# Use with sdkconfig.defaults in a fresh build; see docs/NET_SCANNER_BUILD.md.
+# Use with sdkconfig.defaults in a fresh build; see docs/SECURITY_AUDIT_BUILD.md.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y

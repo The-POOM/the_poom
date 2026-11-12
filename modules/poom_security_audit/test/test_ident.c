@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Host tests for poom_net_scanner_ident.c:
-//   cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_ident.c poom_net_scanner_ident.c poom_net_scanner_logic.c -o t && ./t
-#include "poom_net_scanner.h"
+// Host tests for poom_security_audit_ident.c:
+//   cc -std=c11 -Wall -Wextra -Iinclude -Itest test/test_ident.c poom_security_audit_ident.c poom_security_audit_logic.c -o t && ./t
+#include "poom_security_audit.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -10,16 +10,16 @@ static int g_fail = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s (%s:%d)\n", m, __FILE__, __LINE__); g_fail++; } \
                          else { printf("ok:   %s\n", m); } } while (0)
 
-static poom_net_scanner_ident_t fresh(void)
+static poom_security_audit_ident_t fresh(void)
 {
-    poom_net_scanner_ident_t id;
+    poom_security_audit_ident_t id;
     memset(&id, 0, sizeof(id));
     return id;
 }
 
 static void test_fold(void)
 {
-    poom_net_scanner_ident_t id = fresh();
+    poom_security_audit_ident_t id = fresh();
     poom_ns_os_from_ttl(&id, 64);
     CHECK(id.os == POOM_NS_OS_POSIX && id.os_ev == POOM_NS_OSEV_INFERRED, "ttl 64 -> Unix-like inferred");
     poom_ns_os_from_text(&id, "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6", POOM_NS_OSEV_CONFIRMED);
@@ -240,7 +240,7 @@ static void test_upnp(void)
                     "<modelName>NETGEAR Nighthawk R7000</modelName>"
                     "<modelNumber>R7000</modelNumber>"
                     "<firmwareVersion> V1.0.11.128 </firmwareVersion></device></root>";
-    poom_net_scanner_upnp_t u;
+    poom_security_audit_upnp_t u;
     memset(&u, 0, sizeof(u));
     char fr[24];
     CHECK(poom_ns_upnp_from_xml(x, strlen(x), &u, fr, sizeof(fr)) && strcmp(u.model, "R7000") == 0 &&

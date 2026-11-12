@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 THE POOM
 //
-// Pure device / OS identification logic for the Network Scanner: folding OS
+// Pure device / OS identification logic for the Security Audit: folding OS
 // clues (banners, SSDP, mDNS model, ping TTL, open-port signature, MAC vendor)
 // into one compact identity, plus builders/parsers for the read-only discovery
 // packets (ICMP echo, SSDP, NetBIOS node status, mDNS legacy unicast).
 // No ESP-IDF dependencies; host-unit-tested in test/test_ident.c.
 
-#include "poom_net_scanner.h"
+#include "poom_security_audit.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -89,7 +89,7 @@ static bool ns_os_consistent_(uint8_t a, uint8_t b)
     return ns_is_ancestor_(a, b) || ns_is_ancestor_(b, a);
 }
 
-void poom_ns_os_add(poom_net_scanner_ident_t *id, uint8_t os, uint8_t ev)
+void poom_ns_os_add(poom_security_audit_ident_t *id, uint8_t os, uint8_t ev)
 {
     if (id == NULL || os == POOM_NS_OS_UNKNOWN || os >= POOM_NS_OS_COUNT) { return; }
     if (ev > POOM_NS_OSEV_CONFIRMED) { ev = POOM_NS_OSEV_CONFIRMED; }
@@ -165,7 +165,7 @@ static bool ns_has_ci_(const char *hay, const char *needle)
     return false;
 }
 
-void poom_ns_os_from_text(poom_net_scanner_ident_t *id, const char *text, uint8_t ev)
+void poom_ns_os_from_text(poom_security_audit_ident_t *id, const char *text, uint8_t ev)
 {
     if (id == NULL || text == NULL || text[0] == '\0') { return; }
     for (size_t i = 0; i < sizeof(k_text_tokens) / sizeof(k_text_tokens[0]); ++i)
@@ -183,7 +183,7 @@ static bool ns_has_port_(const uint16_t *ports, size_t n, uint16_t p)
     return false;
 }
 
-void poom_ns_os_from_ports(poom_net_scanner_ident_t *id, const uint16_t *ports, size_t n)
+void poom_ns_os_from_ports(poom_security_audit_ident_t *id, const uint16_t *ports, size_t n)
 {
     if (id == NULL || ports == NULL || n == 0U) { return; }
     const uint8_t g = POOM_NS_OSEV_GUESS;
@@ -220,7 +220,7 @@ void poom_ns_os_from_ports(poom_net_scanner_ident_t *id, const uint16_t *ports, 
     }
 }
 
-void poom_ns_os_from_ttl(poom_net_scanner_ident_t *id, uint8_t ttl)
+void poom_ns_os_from_ttl(poom_security_audit_ident_t *id, uint8_t ttl)
 {
     if (id == NULL || ttl == 0U) { return; }
     /* LAN hosts are 0-1 hops away, so the reply TTL sits at/just under the
@@ -230,7 +230,7 @@ void poom_ns_os_from_ttl(poom_net_scanner_ident_t *id, uint8_t ttl)
     else                  { poom_ns_os_add(id, POOM_NS_OS_EMBEDDED, POOM_NS_OSEV_INFERRED); }
 }
 
-void poom_ns_os_from_vendor(poom_net_scanner_ident_t *id, const char *vendor)
+void poom_ns_os_from_vendor(poom_security_audit_ident_t *id, const char *vendor)
 {
     static const ns_token_t k_vendor[] = {
         {"apple", POOM_NS_OS_APPLE},       {"raspberry", POOM_NS_OS_RPI},
@@ -685,7 +685,7 @@ static bool ns_generic_vendor_(const char *m)
     return false;
 }
 
-bool poom_ns_upnp_from_xml(const char *xml, size_t len, poom_net_scanner_upnp_t *u,
+bool poom_ns_upnp_from_xml(const char *xml, size_t len, poom_security_audit_upnp_t *u,
                            char *friendly, size_t friendly_cap)
 {
     if (xml == NULL || u == NULL) { return false; }
@@ -703,8 +703,8 @@ bool poom_ns_upnp_from_xml(const char *xml, size_t len, poom_net_scanner_upnp_t 
     }
 
     u->model[0] = '\0';
-    if (poom_net_scanner_model_token(mname, u->model, sizeof(u->model)) == 0U &&
-        poom_net_scanner_model_token(mnum, u->model, sizeof(u->model)) == 0U)
+    if (poom_security_audit_model_token(mname, u->model, sizeof(u->model)) == 0U &&
+        poom_security_audit_model_token(mnum, u->model, sizeof(u->model)) == 0U)
     {
         /* No model number anywhere: fall back to the manufacturer's first
          * word, unless it is too generic to be a useful search term. */

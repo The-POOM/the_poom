@@ -2,10 +2,10 @@
 // Copyright (c) 2026 THE POOM
 
 /**
- * @file poom_net_scanner.h
+ * @file poom_security_audit.h
  * @brief Nmap-style network scan engine for the POOM (ESP32-C5 / ESP-IDF).
  *
- * This is the headless engine behind the Network Scanner app. It owns no UI
+ * This is the headless engine behind the Security Audit app. It owns no UI
  * and no Wi-Fi connection logic: the caller joins a network first (via
  * poom_wifi_ctrl + the saved Wi-Fi Profiles) and then drives this engine, which
  * provides three independent capabilities:
@@ -22,15 +22,15 @@
  *                          conservative concurrency cap, per-socket timeout,
  *                          progress callback and cooperative cancellation. A
  *                          TCP SYN method is declared here but is feasibility-
- *                          gated (see poom_net_scanner_syn_available()).
+ *                          gated (see poom_security_audit_syn_available()).
  *
  * Everything is caller-owned storage; the engine keeps no global scan state,
  * which keeps the pure logic (subnet math, port-set builder, service table)
  * host-compilable and unit-testable without an ESP32.
  */
 
-#ifndef POOM_NET_SCANNER_H
-#define POOM_NET_SCANNER_H
+#ifndef POOM_SECURITY_AUDIT_H
+#define POOM_SECURITY_AUDIT_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,26 +47,26 @@ extern "C" {
  * ========================================================================= */
 
 /** @brief Hard ceiling on hosts discovered/scanned in one pass (RAM + time). */
-#define POOM_NET_SCANNER_MAX_HOSTS        (256U)
+#define POOM_SECURITY_AUDIT_MAX_HOSTS        (256U)
 
 /** @brief Largest subnet (host count) the engine will sweep. A /22 is 1022
  *  usable hosts; anything wider is clamped to the first this-many hosts so a
  *  misconfigured /16 never becomes a 65k-probe runaway. */
-#define POOM_NET_SCANNER_MAX_SWEEP_HOSTS  (1022U)
+#define POOM_SECURITY_AUDIT_MAX_SWEEP_HOSTS  (1022U)
 
 /** @brief Maximum ports recorded per host in one port scan. */
-#define POOM_NET_SCANNER_MAX_PORTS        (2048U)
+#define POOM_SECURITY_AUDIT_MAX_PORTS        (2048U)
 
 /** @brief Default parallel TCP connects. Kept well under the lwIP socket cap
  *  (CONFIG_LWIP_MAX_SOCKETS, default 10) so the rest of the system keeps
  *  sockets. Raise CONFIG_LWIP_MAX_SOCKETS before raising this. */
-#define POOM_NET_SCANNER_DEFAULT_FANOUT   (8U)
+#define POOM_SECURITY_AUDIT_DEFAULT_FANOUT   (8U)
 
 /** @brief Absolute cap on parallel connects regardless of caller request. */
-#define POOM_NET_SCANNER_MAX_FANOUT       (12U)
+#define POOM_SECURITY_AUDIT_MAX_FANOUT       (12U)
 
 /** @brief IPv4 dotted-quad string capacity ("255.255.255.255" + NUL). */
-#define POOM_NET_SCANNER_IP_STR_CAP       (16U)
+#define POOM_SECURITY_AUDIT_IP_STR_CAP       (16U)
 
 /* =========================================================================
  * Subnet
@@ -88,14 +88,14 @@ typedef struct
     uint32_t host_count;  /**< Scannable host count (after clamping).   */
     uint8_t  prefix_len;  /**< CIDR prefix length (0..32).              */
     bool     clamped;     /**< true when host_count was capped.         */
-} poom_net_scanner_subnet_t;
+} poom_security_audit_subnet_t;
 
 /**
  * @brief Compute subnet fields from an IP + netmask (pure, host-testable).
  *
  * Fills network/broadcast/first_host/last_host/host_count/prefix_len. For a
  * /31 or /32 the usable range degenerates sensibly (first==last==ip). The host
- * count is clamped to POOM_NET_SCANNER_MAX_SWEEP_HOSTS and @c clamped is set.
+ * count is clamped to POOM_SECURITY_AUDIT_MAX_SWEEP_HOSTS and @c clamped is set.
  *
  * @param[in]  ip_host      IP in host byte order.
  * @param[in]  netmask_host Netmask in host byte order.
@@ -103,9 +103,9 @@ typedef struct
  * @param[out] out          Result. Must not be NULL.
  * @return ESP_OK, or ESP_ERR_INVALID_ARG on NULL / non-contiguous mask.
  */
-esp_err_t poom_net_scanner_subnet_compute(uint32_t ip_host, uint32_t netmask_host,
+esp_err_t poom_security_audit_subnet_compute(uint32_t ip_host, uint32_t netmask_host,
                                           uint32_t gw_host,
-                                          poom_net_scanner_subnet_t *out);
+                                          poom_security_audit_subnet_t *out);
 
 /**
  * @brief Read the live STA interface IP/mask/gw and compute the subnet.
@@ -115,10 +115,10 @@ esp_err_t poom_net_scanner_subnet_compute(uint32_t ip_host, uint32_t netmask_hos
  * @param[out] out Result. Must not be NULL.
  * @return ESP_OK, ESP_ERR_INVALID_STATE (no IP), else an esp_netif error.
  */
-esp_err_t poom_net_scanner_subnet_current(poom_net_scanner_subnet_t *out);
+esp_err_t poom_security_audit_subnet_current(poom_security_audit_subnet_t *out);
 
 /** @brief Format a host-order IPv4 address as dotted quad into @p out. */
-void poom_net_scanner_ip_to_str(uint32_t ip_host, char *out, size_t out_cap);
+void poom_security_audit_ip_to_str(uint32_t ip_host, char *out, size_t out_cap);
 
 /* =========================================================================
  * Discovery
@@ -127,7 +127,7 @@ void poom_net_scanner_ip_to_str(uint32_t ip_host, char *out, size_t out_cap);
 /** @brief One discovered host. */
 typedef struct
 {
-    char     ip_str[POOM_NET_SCANNER_IP_STR_CAP]; /**< Dotted-quad IP.         */
+    char     ip_str[POOM_SECURITY_AUDIT_IP_STR_CAP]; /**< Dotted-quad IP.         */
     uint32_t ip;                                  /**< IP (host byte order).   */
     uint8_t  mac[6];                              /**< MAC when @c mac_known.  */
     bool     mac_known;                           /**< MAC resolved via ARP.   */
@@ -135,7 +135,7 @@ typedef struct
     bool     arp_responded;                       /**< Appeared in ARP table.  */
     uint8_t  ttl;                                 /**< IP TTL of the ICMP reply.*/
     bool     ttl_known;                           /**< @c ttl is valid.        */
-} poom_net_scanner_host_t;
+} poom_security_audit_host_t;
 
 /** @brief Discovery tuning. Zero-initialise then override as needed. */
 typedef struct
@@ -144,13 +144,13 @@ typedef struct
     uint32_t arp_wait_ms;     /**< ARP settle time per batch (0 => default).   */
     bool     use_icmp;        /**< Send ICMP echo (default path).              */
     bool     use_arp;         /**< Resolve/confirm via ARP table.              */
-} poom_net_scanner_discovery_opts_t;
+} poom_security_audit_discovery_opts_t;
 
 /**
  * @brief Progress callback. @p done/@p total let the UI render a bar; return
  *        value is ignored. Keep it short and non-blocking.
  */
-typedef void (*poom_net_scanner_progress_cb_t)(uint32_t done, uint32_t total,
+typedef void (*poom_security_audit_progress_cb_t)(uint32_t done, uint32_t total,
                                                 void *user);
 
 /**
@@ -164,26 +164,26 @@ typedef void (*poom_net_scanner_progress_cb_t)(uint32_t done, uint32_t total,
  * @param[in]  subnet   Subnet to sweep.
  * @param[in]  opts     Options (NULL => ICMP+ARP, default timeouts).
  * @param[out] out      Caller array of @p cap entries.
- * @param[in]  cap      Capacity of @p out (<= POOM_NET_SCANNER_MAX_HOSTS used).
+ * @param[in]  cap      Capacity of @p out (<= POOM_SECURITY_AUDIT_MAX_HOSTS used).
  * @param[out] out_count Number of hosts found.
  * @param[in]  cancel   Optional cooperative-cancel flag (NULL => never).
  * @param[in]  cb       Optional progress callback (NULL => none).
  * @param[in]  user     Opaque pointer passed to @p cb.
  * @return ESP_OK on completion (including cancellation), else an error.
  */
-esp_err_t poom_net_scanner_discover(const poom_net_scanner_subnet_t *subnet,
-                                    const poom_net_scanner_discovery_opts_t *opts,
-                                    poom_net_scanner_host_t *out, size_t cap,
+esp_err_t poom_security_audit_discover(const poom_security_audit_subnet_t *subnet,
+                                    const poom_security_audit_discovery_opts_t *opts,
+                                    poom_security_audit_host_t *out, size_t cap,
                                     size_t *out_count,
                                     const volatile bool *cancel,
-                                    poom_net_scanner_progress_cb_t cb, void *user);
+                                    poom_security_audit_progress_cb_t cb, void *user);
 
 /**
  * @brief Resolve the MAC of a single already-known host via the ARP table.
  *        Useful for "Scan Specific IP" where no sweep ran.
  * @return ESP_OK and fills @p mac on success; ESP_ERR_NOT_FOUND otherwise.
  */
-esp_err_t poom_net_scanner_resolve_mac(const char *ip_str, uint8_t mac[6]);
+esp_err_t poom_security_audit_resolve_mac(const char *ip_str, uint8_t mac[6]);
 
 /* =========================================================================
  * Port scanning
@@ -192,48 +192,48 @@ esp_err_t poom_net_scanner_resolve_mac(const char *ip_str, uint8_t mac[6]);
 /** @brief Observed port state. */
 typedef enum
 {
-    POOM_NET_SCANNER_PORT_UNKNOWN = 0, /**< Not yet probed.                    */
-    POOM_NET_SCANNER_PORT_OPEN,        /**< Connect succeeded / SYN-ACK.       */
-    POOM_NET_SCANNER_PORT_CLOSED,      /**< Connection refused (RST).          */
-    POOM_NET_SCANNER_PORT_FILTERED,    /**< No response within timeout.        */
-} poom_net_scanner_port_state_t;
+    POOM_SECURITY_AUDIT_PORT_UNKNOWN = 0, /**< Not yet probed.                    */
+    POOM_SECURITY_AUDIT_PORT_OPEN,        /**< Connect succeeded / SYN-ACK.       */
+    POOM_SECURITY_AUDIT_PORT_CLOSED,      /**< Connection refused (RST).          */
+    POOM_SECURITY_AUDIT_PORT_FILTERED,    /**< No response within timeout.        */
+} poom_security_audit_port_state_t;
 
 /** @brief Scan method. */
 typedef enum
 {
-    POOM_NET_SCANNER_METHOD_TCP_CONNECT = 0, /**< Full 3-way handshake.        */
-    POOM_NET_SCANNER_METHOD_TCP_SYN,         /**< Half-open (feasibility-gated).*/
-} poom_net_scanner_method_t;
+    POOM_SECURITY_AUDIT_METHOD_TCP_CONNECT = 0, /**< Full 3-way handshake.        */
+    POOM_SECURITY_AUDIT_METHOD_TCP_SYN,         /**< Half-open (feasibility-gated).*/
+} poom_security_audit_method_t;
 
 /** @brief Port-set profile. */
 typedef enum
 {
-    POOM_NET_SCANNER_PROFILE_QUICK = 0, /**< ~common TCP ports.                */
-    POOM_NET_SCANNER_PROFILE_EXTENDED,  /**< Top ~1000 TCP ports.              */
-    POOM_NET_SCANNER_PROFILE_FULL,      /**< 1..65535.                         */
-    POOM_NET_SCANNER_PROFILE_CUSTOM,    /**< Caller-supplied list/range.       */
-} poom_net_scanner_profile_t;
+    POOM_SECURITY_AUDIT_PROFILE_QUICK = 0, /**< ~common TCP ports.                */
+    POOM_SECURITY_AUDIT_PROFILE_EXTENDED,  /**< Top ~1000 TCP ports.              */
+    POOM_SECURITY_AUDIT_PROFILE_FULL,      /**< 1..65535.                         */
+    POOM_SECURITY_AUDIT_PROFILE_CUSTOM,    /**< Caller-supplied list/range.       */
+} poom_security_audit_profile_t;
 
 /** @brief One port result. */
 typedef struct
 {
     uint16_t                      port;      /**< TCP port number.             */
-    poom_net_scanner_port_state_t state;     /**< Observed state.              */
-    poom_net_scanner_method_t     method;    /**< How it was probed.           */
+    poom_security_audit_port_state_t state;     /**< Observed state.              */
+    poom_security_audit_method_t     method;    /**< How it was probed.           */
     const char                   *service;   /**< Likely service (never NULL). */
     bool                          service_is_guess; /**< true => port-table guess, not a verified banner. */
-} poom_net_scanner_port_result_t;
+} poom_security_audit_port_result_t;
 
 /** @brief Port-scan tuning. Zero-initialise then override. */
 typedef struct
 {
-    poom_net_scanner_method_t method;       /**< TCP_CONNECT or TCP_SYN.       */
+    poom_security_audit_method_t method;       /**< TCP_CONNECT or TCP_SYN.       */
     uint32_t                  connect_timeout_ms; /**< Per-port wait (0=>600). */
     uint8_t                   fanout;       /**< Parallel connects (0=>default).*/
     bool                      open_only;    /**< Record only OPEN ports.       */
     uint32_t                 *n_closed;     /**< Optional: += closed ports seen  (NULL ok). */
     uint32_t                 *n_filtered;   /**< Optional: += filtered ports seen (NULL ok). */
-} poom_net_scanner_scan_opts_t;
+} poom_security_audit_scan_opts_t;
 
 /**
  * @brief Build a port list for a profile into @p out (pure, host-testable).
@@ -245,17 +245,17 @@ typedef struct
  * @param[in]  cap     Capacity of @p out.
  * @return Number of ports written (<= cap). FULL returns min(65535, cap).
  */
-size_t poom_net_scanner_build_ports(poom_net_scanner_profile_t profile,
+size_t poom_security_audit_build_ports(poom_security_audit_profile_t profile,
                                     uint16_t *out, size_t cap);
 
 /**
- * @brief Windowed form of poom_net_scanner_build_ports(): writes the profile's
+ * @brief Windowed form of poom_security_audit_build_ports(): writes the profile's
  *        ports starting at position @p offset of its full (de-duplicated)
  *        list, up to @p cap. Lets callers scan Extended/Full through a small
  *        buffer. Concatenating windows equals the full list.
  * @return Ports written; 0 once @p offset is past the end (or for CUSTOM).
  */
-size_t poom_net_scanner_build_ports_window(poom_net_scanner_profile_t profile, uint32_t offset,
+size_t poom_security_audit_build_ports_window(poom_security_audit_profile_t profile, uint32_t offset,
                                            uint16_t *out, size_t cap);
 
 /**
@@ -264,7 +264,7 @@ size_t poom_net_scanner_build_ports_window(poom_net_scanner_profile_t profile, u
  *        order of appearance (the scanner de-dupes at probe time if needed).
  * @return Number of ports written (<= cap), or 0 on a malformed string.
  */
-size_t poom_net_scanner_parse_ports(const char *spec, uint16_t *out, size_t cap);
+size_t poom_security_audit_parse_ports(const char *spec, uint16_t *out, size_t cap);
 
 /**
  * @brief Scan @p ports on a single host.
@@ -286,13 +286,13 @@ size_t poom_net_scanner_parse_ports(const char *spec, uint16_t *out, size_t cap)
  * @param[in]  user     Opaque pointer for @p cb.
  * @return ESP_OK, ESP_ERR_NOT_SUPPORTED (SYN unavailable), else an error.
  */
-esp_err_t poom_net_scanner_port_scan(const char *ip_str,
+esp_err_t poom_security_audit_port_scan(const char *ip_str,
                                      const uint16_t *ports, size_t n_ports,
-                                     const poom_net_scanner_scan_opts_t *opts,
-                                     poom_net_scanner_port_result_t *out,
+                                     const poom_security_audit_scan_opts_t *opts,
+                                     poom_security_audit_port_result_t *out,
                                      size_t cap, size_t *out_count,
                                      const volatile bool *cancel,
-                                     poom_net_scanner_progress_cb_t cb,
+                                     poom_security_audit_progress_cb_t cb,
                                      void *user);
 
 /* =========================================================================
@@ -306,13 +306,13 @@ esp_err_t poom_net_scanner_port_scan(const char *ip_str,
  * verified banner). Always returns a non-NULL string; unknown ports map to
  * "unknown".
  */
-const char *poom_net_scanner_service_name(uint16_t port);
+const char *poom_security_audit_service_name(uint16_t port);
 
 /** @brief Human label for a port state ("open"/"closed"/"filtered"/"-"). */
-const char *poom_net_scanner_state_label(poom_net_scanner_port_state_t state);
+const char *poom_security_audit_state_label(poom_security_audit_port_state_t state);
 
 /** @brief Human label for a method ("TCP Connect"/"TCP SYN"). */
-const char *poom_net_scanner_method_label(poom_net_scanner_method_t method);
+const char *poom_security_audit_method_label(poom_security_audit_method_t method);
 
 /**
  * @brief Whether a reliable TCP SYN scan is available on this build/target.
@@ -321,7 +321,7 @@ const char *poom_net_scanner_method_label(poom_net_scanner_method_t method);
  * and known to coexist with the lwIP TCP stack. The UI uses this to disable the
  * SYN option rather than silently substitute TCP Connect.
  */
-bool poom_net_scanner_syn_available(void);
+bool poom_security_audit_syn_available(void);
 
 /* =========================================================================
  * Service / version detection (nmap -sV-lite)
@@ -330,29 +330,29 @@ bool poom_net_scanner_syn_available(void);
 /** @brief How strongly a service/version was established (never overstate). */
 typedef enum
 {
-    POOM_NET_SCANNER_EV_PORT_GUESS = 0,   /**< From the port number only.      */
-    POOM_NET_SCANNER_EV_PROTO_RESPONSE,   /**< Confirmed by a protocol reply.  */
-    POOM_NET_SCANNER_EV_VERSION_REPORTED, /**< Service reported its version.   */
-} poom_net_scanner_evidence_t;
+    POOM_SECURITY_AUDIT_EV_PORT_GUESS = 0,   /**< From the port number only.      */
+    POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE,   /**< Confirmed by a protocol reply.  */
+    POOM_SECURITY_AUDIT_EV_VERSION_REPORTED, /**< Service reported its version.   */
+} poom_security_audit_evidence_t;
 
-#define POOM_NET_SCANNER_SVC_CAP     (16U)
-#define POOM_NET_SCANNER_PRODUCT_CAP (28U)
-#define POOM_NET_SCANNER_VERSION_CAP (24U)
-#define POOM_NET_SCANNER_BANNER_CAP  (80U)
+#define POOM_SECURITY_AUDIT_SVC_CAP     (16U)
+#define POOM_SECURITY_AUDIT_PRODUCT_CAP (28U)
+#define POOM_SECURITY_AUDIT_VERSION_CAP (24U)
+#define POOM_SECURITY_AUDIT_BANNER_CAP  (80U)
 
 /** @brief Result of service/version detection on one open port. */
 typedef struct
 {
     uint16_t                    port;
-    char                        service[POOM_NET_SCANNER_SVC_CAP];     /**< "http","ssh",... */
-    char                        product[POOM_NET_SCANNER_PRODUCT_CAP]; /**< "OpenSSH","nginx","" */
-    char                        version[POOM_NET_SCANNER_VERSION_CAP]; /**< "9.6p1","" if none */
-    char                        banner[POOM_NET_SCANNER_BANNER_CAP];   /**< trimmed raw evidence */
-    poom_net_scanner_evidence_t evidence;
-} poom_net_scanner_service_t;
+    char                        service[POOM_SECURITY_AUDIT_SVC_CAP];     /**< "http","ssh",... */
+    char                        product[POOM_SECURITY_AUDIT_PRODUCT_CAP]; /**< "OpenSSH","nginx","" */
+    char                        version[POOM_SECURITY_AUDIT_VERSION_CAP]; /**< "9.6p1","" if none */
+    char                        banner[POOM_SECURITY_AUDIT_BANNER_CAP];   /**< trimmed raw evidence */
+    poom_security_audit_evidence_t evidence;
+} poom_security_audit_service_t;
 
 /** @brief Human label for an evidence level ("guessed"/"confirmed"/"version"). */
-const char *poom_net_scanner_evidence_label(poom_net_scanner_evidence_t ev);
+const char *poom_security_audit_evidence_label(poom_security_audit_evidence_t ev);
 
 /**
  * @brief Classify a raw TCP banner into service/product/version (pure,
@@ -360,23 +360,23 @@ const char *poom_net_scanner_evidence_label(poom_net_scanner_evidence_t ev);
  *        leaves a trimmed snippet with PROTO_RESPONSE if any text was seen, or
  *        PORT_GUESS (service from @p port) if empty.
  */
-void poom_net_scanner_parse_banner(const char *banner, size_t len, uint16_t port,
-                                   poom_net_scanner_service_t *out);
+void poom_security_audit_parse_banner(const char *banner, size_t len, uint16_t port,
+                                   poom_security_audit_service_t *out);
 
 /**
  * @brief First "model-like" token in free text (letters AND digits, 3-20
  *        chars, not version-like): "NETGEAR R7000" -> "R7000",
  *        "ASUS RT-AC68U Login" -> "RT-AC68U". @return length (0 = none).
  */
-size_t poom_net_scanner_model_token(const char *text, char *out, size_t cap);
+size_t poom_security_audit_model_token(const char *text, char *out, size_t cap);
 
 /**
  * @brief Parse an HTTP response head into service "http" + Server product/
  *        version (pure, host-testable). Returns false on a non-HTTP buffer
  *        (and leaves @p out unchanged).
  */
-bool poom_net_scanner_parse_http(const char *resp, size_t len,
-                                 poom_net_scanner_service_t *out);
+bool poom_security_audit_parse_http(const char *resp, size_t len,
+                                 poom_security_audit_service_t *out);
 
 /**
  * @brief Detect the service (and version where volunteered) on one open TCP
@@ -384,9 +384,9 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
  *        Networked; must run off the UI thread. No TLS handshake here (later).
  *        @p out is always populated (at worst PORT_GUESS).
  */
-esp_err_t poom_net_scanner_detect_service(const char *ip_str, uint16_t port,
+esp_err_t poom_security_audit_detect_service(const char *ip_str, uint16_t port,
                                           uint32_t timeout_ms,
-                                          poom_net_scanner_service_t *out,
+                                          poom_security_audit_service_t *out,
                                           const volatile bool *cancel);
 
 /* =========================================================================
@@ -409,14 +409,14 @@ esp_err_t poom_net_scanner_detect_service(const char *ip_str, uint16_t port,
  * @param[in]  cap        Capacity of @p out.
  * @param[out] out_strong Optional; set true when the hint came from a banner.
  */
-void poom_net_scanner_os_hint(const poom_net_scanner_service_t *svc,
+void poom_security_audit_os_hint(const poom_security_audit_service_t *svc,
                               uint8_t ttl, bool ttl_known, const char *vendor,
                               char *out, size_t cap, bool *out_strong);
 
 /** @brief Map a service name to a small stable id (0 = unknown), and back.
  *  Used to store a service per open port compactly (1 byte) in bulk scans. */
-uint8_t     poom_net_scanner_service_id(const char *name);
-const char *poom_net_scanner_service_by_id(uint8_t id);
+uint8_t     poom_security_audit_service_id(const char *name);
+const char *poom_security_audit_service_by_id(uint8_t id);
 
 /* =========================================================================
  * Duration estimate (pure, host-testable) - for the Full NetAudit confirm
@@ -429,14 +429,14 @@ const char *poom_net_scanner_service_by_id(uint8_t id);
  *        real runs are usually faster. 0 fanout/timeout => engine defaults.
  *        Rounded up; saturates at UINT32_MAX.
  */
-uint32_t poom_net_scanner_estimate_scan_s(uint32_t hosts, uint32_t ports_per_host,
+uint32_t poom_security_audit_estimate_scan_s(uint32_t hosts, uint32_t ports_per_host,
                                           uint32_t fanout, uint32_t timeout_ms);
 
 /**
  * @brief Format seconds compactly for a 128x64 screen: "45s", "12m", "3h05m",
  *        ">99h". Always NUL-terminates @p out (cap >= 1).
  */
-void poom_net_scanner_fmt_duration(uint32_t seconds, char *out, size_t cap);
+void poom_security_audit_fmt_duration(uint32_t seconds, char *out, size_t cap);
 
 /* =========================================================================
  * Device / OS identification (pure parts host-tested in test/test_ident.c)
@@ -489,7 +489,7 @@ typedef struct
     uint8_t os_ev;                  /**< poom_ns_osev_t (valid if os != 0)     */
     uint8_t ttl;                    /**< ping reply TTL (valid if ttl_known)   */
     bool    ttl_known;
-} poom_net_scanner_ident_t;
+} poom_security_audit_ident_t;
 
 /** @brief Short display label for an os id ("Windows", "Ubuntu", ...). */
 const char *poom_ns_os_label(uint8_t os);
@@ -503,20 +503,20 @@ const char *poom_ns_osev_label(uint8_t ev);
  *        and keep the strongest evidence; a conflicting clue only replaces the
  *        current one when its evidence is strictly stronger.
  */
-void poom_ns_os_add(poom_net_scanner_ident_t *id, uint8_t os, uint8_t ev);
+void poom_ns_os_add(poom_security_audit_ident_t *id, uint8_t os, uint8_t ev);
 
 /** @brief Fold every OS/device token found in free text (banner, product,
  *         SSDP SERVER header, mDNS model) at evidence @p ev. */
-void poom_ns_os_from_text(poom_net_scanner_ident_t *id, const char *text, uint8_t ev);
+void poom_ns_os_from_text(poom_security_audit_ident_t *id, const char *text, uint8_t ev);
 
 /** @brief Fold the open-port signature (GUESS). */
-void poom_ns_os_from_ports(poom_net_scanner_ident_t *id, const uint16_t *ports, size_t n);
+void poom_ns_os_from_ports(poom_security_audit_ident_t *id, const uint16_t *ports, size_t n);
 
 /** @brief Fold the ping reply TTL family (INFERRED). */
-void poom_ns_os_from_ttl(poom_net_scanner_ident_t *id, uint8_t ttl);
+void poom_ns_os_from_ttl(poom_security_audit_ident_t *id, uint8_t ttl);
 
 /** @brief Fold a MAC-vendor hint (GUESS). */
-void poom_ns_os_from_vendor(poom_net_scanner_ident_t *id, const char *vendor);
+void poom_ns_os_from_vendor(poom_security_audit_ident_t *id, const char *vendor);
 
 /* --- packet helpers (pure) ----------------------------------------------- */
 
@@ -563,7 +563,7 @@ typedef struct
     char     manufacturer[16];
     char     model[24];        /**< search term (model token / product name)    */
     char     version[16];      /**< firmware / software version, or ""          */
-} poom_net_scanner_upnp_t;
+} poom_security_audit_upnp_t;
 
 /** @brief LOCATION of an SSDP reply as an IPv4 http URL -> ip/port/path. */
 bool poom_ns_ssdp_location(const char *resp, size_t len, uint32_t *ip_host, uint16_t *port,
@@ -578,7 +578,7 @@ bool poom_ns_xml_tag(const char *xml, size_t len, const char *tag, char *out, si
  *        manufacturer name) and firmware/software version into @p u, and the
  *        friendlyName into @p friendly. @return true if a model term was found.
  */
-bool poom_ns_upnp_from_xml(const char *xml, size_t len, poom_net_scanner_upnp_t *u,
+bool poom_ns_upnp_from_xml(const char *xml, size_t len, poom_security_audit_upnp_t *u,
                            char *friendly, size_t friendly_cap);
 
 /**
@@ -587,7 +587,7 @@ bool poom_ns_upnp_from_xml(const char *xml, size_t len, poom_net_scanner_upnp_t 
  *        start of the body) into @p dst, NUL-terminated.
  * @return bytes read (> 0), or -1 if the port did not answer.
  */
-int poom_net_scanner_http_get(uint32_t ip_host, uint16_t port, const char *path,
+int poom_security_audit_http_get(uint32_t ip_host, uint16_t port, const char *path,
                               char *dst, size_t cap);
 
 /**
@@ -600,9 +600,9 @@ int poom_net_scanner_http_get(uint32_t ip_host, uint16_t port, const char *path,
  *        @p upnp (up to @p upnp_cap; may be NULL). Read-only discovery
  *        traffic only. Honors @p cancel. ~3 s plus ~0.5 s per UPnP device.
  */
-esp_err_t poom_net_scanner_identify(const poom_net_scanner_host_t *hosts, size_t n,
-                                    poom_net_scanner_ident_t *out,
-                                    poom_net_scanner_upnp_t *upnp, size_t upnp_cap,
+esp_err_t poom_security_audit_identify(const poom_security_audit_host_t *hosts, size_t n,
+                                    poom_security_audit_ident_t *out,
+                                    poom_security_audit_upnp_t *upnp, size_t upnp_cap,
                                     size_t *upnp_count,
                                     const volatile bool *cancel);
 
@@ -614,10 +614,10 @@ esp_err_t poom_net_scanner_identify(const poom_net_scanner_host_t *hosts, size_t
  * @return Start of the remaining text, or NULL when @p text is exhausted.
  *         Pure; used by the scrolling detail pages.
  */
-const char *poom_net_scanner_wrap(const char *text, size_t width, char *out, size_t cap);
+const char *poom_security_audit_wrap(const char *text, size_t width, char *out, size_t cap);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* POOM_NET_SCANNER_H */
+#endif /* POOM_SECURITY_AUDIT_H */

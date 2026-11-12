@@ -2,7 +2,7 @@
 # Regression: compiler/test failures must make check.sh fail immediately.
 set -eu
 R=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-T=$(mktemp -d "${TMPDIR:-/tmp}/net-scanner-harness-test.XXXXXX")
+T=$(mktemp -d "${TMPDIR:-/tmp}/security-audit-harness-test.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 trap 'exit 1' HUP INT TERM
 mkdir "$T/bin" "$T/tmp"
@@ -23,7 +23,7 @@ STUB
 chmod +x "$T/bin/cc"
 for fail_compile in 0 1; do
   if PATH="$T/bin:$PATH" TMPDIR="$T/tmp" FAIL_COMPILE="$fail_compile" \
-      sh "$R/tools/net_scanner_hostcheck/check.sh" > "$T/result" 2>&1; then
+      sh "$R/tools/security_audit_hostcheck/check.sh" > "$T/result" 2>&1; then
     echo 'FAIL: harness swallowed an injected failure'
     exit 1
   fi

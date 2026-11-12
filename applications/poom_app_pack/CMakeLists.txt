@@ -75,7 +75,7 @@ set(POOM_APP_PACK_REQUIRES
     poom_sniffer_device
     poom_scanner_core
     poom_pcap
-    poom_net_scanner
+    poom_security_audit
     poom_net_audit
     poom_ui_keyboard
     poom_wifi_attacks

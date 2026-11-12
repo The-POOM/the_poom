@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 THE POOM
 //
-// Pure, hardware-independent logic for the network scanner: subnet math,
+// Pure, hardware-independent logic for the security audit: subnet math,
 // port-set construction, "ports" string parsing, and the service-name table.
 // Deliberately free of lwIP / esp_netif / FreeRTOS so it host-compiles and is
 // unit-tested in test/test_logic.c. The networked parts live in
-// poom_net_scanner.c and call into these.
+// poom_security_audit.c and call into these.
 
-#include "poom_net_scanner.h"
+#include "poom_security_audit.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -17,14 +17,14 @@
 
 /* A valid IPv4 mask is a run of 1s followed by a run of 0s (host byte order).
  * Reject anything non-contiguous (e.g. 255.0.255.0). */
-static bool net_scanner_mask_is_contiguous_(uint32_t mask)
+static bool security_audit_mask_is_contiguous_(uint32_t mask)
 {
     /* ~mask + 1 must be a power of two (or mask == 0xFFFFFFFF). */
     uint32_t inv = ~mask;
     return (inv & (inv + 1U)) == 0U;
 }
 
-static uint8_t net_scanner_prefix_from_mask_(uint32_t mask)
+static uint8_t security_audit_prefix_from_mask_(uint32_t mask)
 {
     uint8_t n = 0;
     for (int i = 31; i >= 0; --i)
@@ -41,15 +41,15 @@ static uint8_t net_scanner_prefix_from_mask_(uint32_t mask)
     return n;
 }
 
-esp_err_t poom_net_scanner_subnet_compute(uint32_t ip_host, uint32_t netmask_host,
+esp_err_t poom_security_audit_subnet_compute(uint32_t ip_host, uint32_t netmask_host,
                                           uint32_t gw_host,
-                                          poom_net_scanner_subnet_t *out)
+                                          poom_security_audit_subnet_t *out)
 {
     if (out == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
-    if (netmask_host != 0U && !net_scanner_mask_is_contiguous_(netmask_host))
+    if (netmask_host != 0U && !security_audit_mask_is_contiguous_(netmask_host))
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -58,7 +58,7 @@ esp_err_t poom_net_scanner_subnet_compute(uint32_t ip_host, uint32_t netmask_hos
     out->ip         = ip_host;
     out->netmask    = netmask_host;
     out->gateway    = gw_host;
-    out->prefix_len = net_scanner_prefix_from_mask_(netmask_host);
+    out->prefix_len = security_audit_prefix_from_mask_(netmask_host);
     out->network    = ip_host & netmask_host;
     out->broadcast  = out->network | (~netmask_host);
 
@@ -79,9 +79,9 @@ esp_err_t poom_net_scanner_subnet_compute(uint32_t ip_host, uint32_t netmask_hos
                          ? (out->last_host - out->first_host + 1U)
                          : 0U;
 
-    if (count > POOM_NET_SCANNER_MAX_SWEEP_HOSTS)
+    if (count > POOM_SECURITY_AUDIT_MAX_SWEEP_HOSTS)
     {
-        count = POOM_NET_SCANNER_MAX_SWEEP_HOSTS;
+        count = POOM_SECURITY_AUDIT_MAX_SWEEP_HOSTS;
         out->last_host = out->first_host + count - 1U;
         out->clamped = true;
     }
@@ -89,7 +89,7 @@ esp_err_t poom_net_scanner_subnet_compute(uint32_t ip_host, uint32_t netmask_hos
     return ESP_OK;
 }
 
-void poom_net_scanner_ip_to_str(uint32_t ip_host, char *out, size_t out_cap)
+void poom_security_audit_ip_to_str(uint32_t ip_host, char *out, size_t out_cap)
 {
     if (out == NULL || out_cap == 0U)
     {
@@ -127,7 +127,7 @@ static const uint16_t k_common_high_ports[] = {
     49152, 49153, 49154, 50000, 51820, 54321, 55443, 62078,
 };
 
-size_t poom_net_scanner_build_ports(poom_net_scanner_profile_t profile,
+size_t poom_security_audit_build_ports(poom_security_audit_profile_t profile,
                                     uint16_t *out, size_t cap)
 {
     if (out == NULL || cap == 0U)
@@ -137,7 +137,7 @@ size_t poom_net_scanner_build_ports(poom_net_scanner_profile_t profile,
 
     switch (profile)
     {
-    case POOM_NET_SCANNER_PROFILE_QUICK:
+    case POOM_SECURITY_AUDIT_PROFILE_QUICK:
     {
         size_t n = 0;
         for (size_t i = 0; i < (sizeof(k_quick_ports) / sizeof(k_quick_ports[0])) && n < cap; ++i)
@@ -156,7 +156,7 @@ size_t poom_net_scanner_build_ports(poom_net_scanner_profile_t profile,
         return n;
     }
 
-    case POOM_NET_SCANNER_PROFILE_EXTENDED:
+    case POOM_SECURITY_AUDIT_PROFILE_EXTENDED:
     {
         size_t n = 0;
         /* Well-known range 1..1023. */
@@ -185,7 +185,7 @@ size_t poom_net_scanner_build_ports(poom_net_scanner_profile_t profile,
         return n;
     }
 
-    case POOM_NET_SCANNER_PROFILE_FULL:
+    case POOM_SECURITY_AUDIT_PROFILE_FULL:
     {
         size_t n = 0;
         for (uint32_t p = 1; p <= 65535U && n < cap; ++p)
@@ -195,13 +195,13 @@ size_t poom_net_scanner_build_ports(poom_net_scanner_profile_t profile,
         return n;
     }
 
-    case POOM_NET_SCANNER_PROFILE_CUSTOM:
+    case POOM_SECURITY_AUDIT_PROFILE_CUSTOM:
     default:
         return 0U; /* caller supplies ports directly */
     }
 }
 
-size_t poom_net_scanner_parse_ports(const char *spec, uint16_t *out, size_t cap)
+size_t poom_security_audit_parse_ports(const char *spec, uint16_t *out, size_t cap)
 {
     if (spec == NULL || out == NULL || cap == 0U)
     {
@@ -300,10 +300,10 @@ typedef struct
 {
     uint16_t    port;
     const char *name;
-} net_scanner_service_t;
+} security_audit_service_t;
 
 /* Guess-from-port-number table. Not a verified banner. */
-static const net_scanner_service_t k_services[] = {
+static const security_audit_service_t k_services[] = {
     {20, "ftp-data"}, {21, "ftp"}, {22, "ssh"}, {23, "telnet"}, {25, "smtp"},
     {53, "dns"}, {67, "dhcp"}, {68, "dhcp"}, {69, "tftp"}, {80, "http"},
     {110, "pop3"}, {111, "rpcbind"}, {123, "ntp"}, {135, "msrpc"},
@@ -334,7 +334,7 @@ static const net_scanner_service_t k_services[] = {
     {32400, "plex"}, {49152, "upnp"}, {51820, "wireguard"}, {62078, "iphone-sync"},
 };
 
-const char *poom_net_scanner_service_name(uint16_t port)
+const char *poom_security_audit_service_name(uint16_t port)
 {
     for (size_t i = 0; i < (sizeof(k_services) / sizeof(k_services[0])); ++i)
     {
@@ -346,24 +346,24 @@ const char *poom_net_scanner_service_name(uint16_t port)
     return "unknown";
 }
 
-const char *poom_net_scanner_state_label(poom_net_scanner_port_state_t state)
+const char *poom_security_audit_state_label(poom_security_audit_port_state_t state)
 {
     switch (state)
     {
-    case POOM_NET_SCANNER_PORT_OPEN:     return "open";
-    case POOM_NET_SCANNER_PORT_CLOSED:   return "closed";
-    case POOM_NET_SCANNER_PORT_FILTERED: return "filtered";
-    case POOM_NET_SCANNER_PORT_UNKNOWN:
+    case POOM_SECURITY_AUDIT_PORT_OPEN:     return "open";
+    case POOM_SECURITY_AUDIT_PORT_CLOSED:   return "closed";
+    case POOM_SECURITY_AUDIT_PORT_FILTERED: return "filtered";
+    case POOM_SECURITY_AUDIT_PORT_UNKNOWN:
     default:                             return "-";
     }
 }
 
-const char *poom_net_scanner_method_label(poom_net_scanner_method_t method)
+const char *poom_security_audit_method_label(poom_security_audit_method_t method)
 {
     switch (method)
     {
-    case POOM_NET_SCANNER_METHOD_TCP_SYN:     return "TCP SYN";
-    case POOM_NET_SCANNER_METHOD_TCP_CONNECT:
+    case POOM_SECURITY_AUDIT_METHOD_TCP_SYN:     return "TCP SYN";
+    case POOM_SECURITY_AUDIT_METHOD_TCP_CONNECT:
     default:                                  return "TCP Connect";
     }
 }
@@ -372,30 +372,30 @@ const char *poom_net_scanner_method_label(poom_net_scanner_method_t method)
  * raw-socket SYN scan is demonstrated to coexist reliably with the lwIP TCP
  * stack on this target (see Stage 6 / the handover doc). Defined here (pure)
  * so the UI and host tests can query it without the networked backend. */
-#ifndef POOM_NET_SCANNER_SYN_IMPL
-#define POOM_NET_SCANNER_SYN_IMPL (0)
+#ifndef POOM_SECURITY_AUDIT_SYN_IMPL
+#define POOM_SECURITY_AUDIT_SYN_IMPL (0)
 #endif
 
-bool poom_net_scanner_syn_available(void)
+bool poom_security_audit_syn_available(void)
 {
-    return (POOM_NET_SCANNER_SYN_IMPL != 0);
+    return (POOM_SECURITY_AUDIT_SYN_IMPL != 0);
 }
 
 /* ---- service / version parsing (pure, host-tested) ---------------------- */
 
-const char *poom_net_scanner_evidence_label(poom_net_scanner_evidence_t ev)
+const char *poom_security_audit_evidence_label(poom_security_audit_evidence_t ev)
 {
     switch (ev)
     {
-    case POOM_NET_SCANNER_EV_VERSION_REPORTED: return "version";
-    case POOM_NET_SCANNER_EV_PROTO_RESPONSE:   return "confirmed";
-    case POOM_NET_SCANNER_EV_PORT_GUESS:
+    case POOM_SECURITY_AUDIT_EV_VERSION_REPORTED: return "version";
+    case POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE:   return "confirmed";
+    case POOM_SECURITY_AUDIT_EV_PORT_GUESS:
     default:                                   return "guessed";
     }
 }
 
 /* Case-insensitive substring search within a length-bounded buffer. */
-static const char *net_scanner_memfind_ci_(const char *hay, size_t hlen, const char *needle)
+static const char *security_audit_memfind_ci_(const char *hay, size_t hlen, const char *needle)
 {
     size_t nlen = strlen(needle);
     if (nlen == 0 || hlen < nlen) { return NULL; }
@@ -412,7 +412,7 @@ static const char *net_scanner_memfind_ci_(const char *hay, size_t hlen, const c
 }
 
 /* Copy the first line of src (printable ASCII only), trimmed, into dst. */
-static void net_scanner_snippet_(char *dst, size_t cap, const char *src, size_t len)
+static void security_audit_snippet_(char *dst, size_t cap, const char *src, size_t len)
 {
     size_t n = 0, i = 0;
     while (i < len && (src[i] == ' ' || src[i] == '\t')) { i++; }
@@ -427,17 +427,17 @@ static void net_scanner_snippet_(char *dst, size_t cap, const char *src, size_t 
     while (n > 0 && dst[n - 1] == ' ') { dst[--n] = '\0'; }
 }
 
-static void net_scanner_svc_clear_(poom_net_scanner_service_t *o, uint16_t port)
+static void security_audit_svc_clear_(poom_security_audit_service_t *o, uint16_t port)
 {
     memset(o, 0, sizeof(*o));
     o->port = port;
-    o->evidence = POOM_NET_SCANNER_EV_PORT_GUESS;
-    (void)snprintf(o->service, sizeof(o->service), "%s", poom_net_scanner_service_name(port));
+    o->evidence = POOM_SECURITY_AUDIT_EV_PORT_GUESS;
+    (void)snprintf(o->service, sizeof(o->service), "%s", poom_security_audit_service_name(port));
 }
 
 /* Split a "product<sep>version" token (sep = '_' '/' or the first digit) into
  * out->product / out->version. */
-static void net_scanner_split_pv_(const char *tok, poom_net_scanner_service_t *o)
+static void security_audit_split_pv_(const char *tok, poom_security_audit_service_t *o)
 {
     int sep = -1;
     size_t seplen = 0;
@@ -477,7 +477,7 @@ static const struct { const char *tok; const char *product; } k_banner_products[
 
 /* Copy a version-like token ([0-9][0-9A-Za-z.-]*) found within a few chars
  * after @p p into @p out. */
-static void net_scanner_version_after_(const char *p, char *out, size_t cap)
+static void security_audit_version_after_(const char *p, char *out, size_t cap)
 {
     out[0] = '\0';
     for (int skip = 0; skip < 4 && *p != '\0' && !isdigit((unsigned char)*p); ++skip) { p++; }
@@ -493,22 +493,22 @@ static void net_scanner_version_after_(const char *p, char *out, size_t cap)
     out[n] = '\0';
 }
 
-static void net_scanner_banner_product_(const char *s, poom_net_scanner_service_t *out)
+static void security_audit_banner_product_(const char *s, poom_security_audit_service_t *out)
 {
     size_t sl = strlen(s);
     for (size_t i = 0; i < sizeof(k_banner_products) / sizeof(k_banner_products[0]); ++i)
     {
-        const char *hit = net_scanner_memfind_ci_(s, sl, k_banner_products[i].tok);
+        const char *hit = security_audit_memfind_ci_(s, sl, k_banner_products[i].tok);
         if (hit == NULL) { continue; }
         (void)snprintf(out->product, sizeof(out->product), "%s", k_banner_products[i].product);
-        net_scanner_version_after_(hit + strlen(k_banner_products[i].tok), out->version,
+        security_audit_version_after_(hit + strlen(k_banner_products[i].tok), out->version,
                                    sizeof(out->version));
-        if (out->version[0] != '\0') { out->evidence = POOM_NET_SCANNER_EV_VERSION_REPORTED; }
+        if (out->version[0] != '\0') { out->evidence = POOM_SECURITY_AUDIT_EV_VERSION_REPORTED; }
         return;
     }
 }
 
-size_t poom_net_scanner_model_token(const char *text, char *out, size_t cap)
+size_t poom_security_audit_model_token(const char *text, char *out, size_t cap)
 {
     if (out == NULL || cap == 0U) { return 0U; }
     out[0] = '\0';
@@ -544,11 +544,11 @@ size_t poom_net_scanner_model_token(const char *text, char *out, size_t cap)
     return 0U;
 }
 
-void poom_net_scanner_parse_banner(const char *banner, size_t len, uint16_t port,
-                                   poom_net_scanner_service_t *out)
+void poom_security_audit_parse_banner(const char *banner, size_t len, uint16_t port,
+                                   poom_security_audit_service_t *out)
 {
     if (out == NULL) { return; }
-    net_scanner_svc_clear_(out, port);
+    security_audit_svc_clear_(out, port);
     if (banner == NULL || len == 0) { return; }
 
     /* Binary greetings first (the printable snippet would lose them). */
@@ -556,8 +556,8 @@ void poom_net_scanner_parse_banner(const char *banner, size_t len, uint16_t port
     if (ub[0] == 0xFFU) /* Telnet option negotiation (IAC) */
     {
         (void)snprintf(out->service, sizeof(out->service), "telnet");
-        out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
-        net_scanner_snippet_(out->banner, sizeof(out->banner), banner, len);
+        out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
+        security_audit_snippet_(out->banner, sizeof(out->banner), banner, len);
         return;
     }
     if (len > 6U && ub[3] == 0x00U && ub[4] == 0x0AU) /* MySQL / MariaDB handshake v10 */
@@ -571,7 +571,7 @@ void poom_net_scanner_parse_banner(const char *banner, size_t len, uint16_t port
         ver[n] = '\0';
         if (n > 0U && isdigit((unsigned char)ver[0]))
         {
-            bool maria = net_scanner_memfind_ci_(ver, n, "mariadb") != NULL;
+            bool maria = security_audit_memfind_ci_(ver, n, "mariadb") != NULL;
             const char *v = ver;
             if (maria && strncmp(v, "5.5.5-", 6) == 0) { v += 6; } /* compat prefix */
             (void)snprintf(out->service, sizeof(out->service), "mysql");
@@ -580,13 +580,13 @@ void poom_net_scanner_parse_banner(const char *banner, size_t len, uint16_t port
             while (v[vn] != '\0' && v[vn] != '-' && vn + 1 < sizeof(out->version)) { vn++; }
             (void)snprintf(out->version, sizeof(out->version), "%.*s", (int)vn, v);
             (void)snprintf(out->banner, sizeof(out->banner), "%s", ver); /* keeps "ubuntu" etc. */
-            out->evidence = (out->version[0] != '\0') ? POOM_NET_SCANNER_EV_VERSION_REPORTED
-                                                       : POOM_NET_SCANNER_EV_PROTO_RESPONSE;
+            out->evidence = (out->version[0] != '\0') ? POOM_SECURITY_AUDIT_EV_VERSION_REPORTED
+                                                       : POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
             return;
         }
     }
 
-    net_scanner_snippet_(out->banner, sizeof(out->banner), banner, len);
+    security_audit_snippet_(out->banner, sizeof(out->banner), banner, len);
     const char *s = out->banner;
     size_t sl = strlen(s);
     if (sl == 0) { return; } /* no printable greeting -> PORT_GUESS */
@@ -594,49 +594,49 @@ void poom_net_scanner_parse_banner(const char *banner, size_t len, uint16_t port
     if (sl >= 4 && strncmp(s, "RFB ", 4) == 0)
     {
         (void)snprintf(out->service, sizeof(out->service), "vnc");
-        out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
+        out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
         return;
     }
 
     if (sl >= 4 && strncmp(s, "SSH-", 4) == 0)
     {
         (void)snprintf(out->service, sizeof(out->service), "ssh");
-        out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
+        out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
         const char *d1 = strchr(s + 4, '-'); /* SSH-<proto>-<software> */
         if (d1 != NULL)
         {
-            net_scanner_split_pv_(d1 + 1, out);
-            if (out->version[0] != '\0') { out->evidence = POOM_NET_SCANNER_EV_VERSION_REPORTED; }
+            security_audit_split_pv_(d1 + 1, out);
+            if (out->version[0] != '\0') { out->evidence = POOM_SECURITY_AUDIT_EV_VERSION_REPORTED; }
         }
         return;
     }
     if (strncmp(s, "+OK", 3) == 0)
     {
         (void)snprintf(out->service, sizeof(out->service), "pop3");
-        out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
-        net_scanner_banner_product_(s, out);
+        out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
+        security_audit_banner_product_(s, out);
         return;
     }
     if (strncmp(s, "* OK", 4) == 0 || strncmp(s, "* PREAUTH", 9) == 0)
     {
         (void)snprintf(out->service, sizeof(out->service), "imap");
-        out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
-        net_scanner_banner_product_(s, out);
+        out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
+        security_audit_banner_product_(s, out);
         return;
     }
     if (strncmp(s, "220", 3) == 0) /* SMTP and FTP both greet with 220 */
     {
-        bool is_smtp = net_scanner_memfind_ci_(s, sl, "smtp") != NULL;
-        bool is_ftp  = net_scanner_memfind_ci_(s, sl, "ftp") != NULL;
-        if (is_smtp)      { (void)snprintf(out->service, sizeof(out->service), "smtp"); out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE; }
-        else if (is_ftp)  { (void)snprintf(out->service, sizeof(out->service), "ftp");  out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE; }
+        bool is_smtp = security_audit_memfind_ci_(s, sl, "smtp") != NULL;
+        bool is_ftp  = security_audit_memfind_ci_(s, sl, "ftp") != NULL;
+        if (is_smtp)      { (void)snprintf(out->service, sizeof(out->service), "smtp"); out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE; }
+        else if (is_ftp)  { (void)snprintf(out->service, sizeof(out->service), "ftp");  out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE; }
         else if (port == 25 || port == 587 || port == 465) { (void)snprintf(out->service, sizeof(out->service), "smtp"); }
         else if (port == 21) { (void)snprintf(out->service, sizeof(out->service), "ftp"); }
         /* else: ambiguous -> keep port-guess service + the banner snippet */
-        net_scanner_banner_product_(s, out);
-        if (out->product[0] != '\0' && out->evidence < POOM_NET_SCANNER_EV_PROTO_RESPONSE)
+        security_audit_banner_product_(s, out);
+        if (out->product[0] != '\0' && out->evidence < POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE)
         {
-            out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE; /* named software answered */
+            out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE; /* named software answered */
         }
         return;
     }
@@ -654,7 +654,7 @@ static const char *const k_service_ids[] = {
     "snmp", "ntp", "sip", "rtsp", "upnp", "mdns", "printer",
 };
 
-uint8_t poom_net_scanner_service_id(const char *name)
+uint8_t poom_security_audit_service_id(const char *name)
 {
     if (name == NULL || name[0] == '\0') { return 0; }
     for (size_t i = 0; i < sizeof(k_service_ids) / sizeof(k_service_ids[0]); ++i)
@@ -670,15 +670,15 @@ uint8_t poom_net_scanner_service_id(const char *name)
     return 0;
 }
 
-const char *poom_net_scanner_service_by_id(uint8_t id)
+const char *poom_security_audit_service_by_id(uint8_t id)
 {
     if (id == 0 || id > (sizeof(k_service_ids) / sizeof(k_service_ids[0]))) { return ""; }
     return k_service_ids[id - 1];
 }
 
 /* OS tokens we trust from a banner (case-insensitive substring -> family). */
-typedef struct { const char *token; const char *family; } net_scanner_os_token_t;
-static const net_scanner_os_token_t k_os_tokens[] = {
+typedef struct { const char *token; const char *family; } security_audit_os_token_t;
+static const security_audit_os_token_t k_os_tokens[] = {
     {"ubuntu", "Linux/Ubuntu"}, {"debian", "Linux/Debian"}, {"raspbian", "Linux/RPi"},
     {"centos", "Linux/CentOS"}, {"red hat", "Linux/RHEL"},  {"fedora", "Linux/Fedora"},
     {"alpine", "Linux/Alpine"}, {"openwrt", "Linux/OpenWrt"},{"gentoo", "Linux"},
@@ -690,7 +690,7 @@ static const net_scanner_os_token_t k_os_tokens[] = {
     {"android", "Android"},
 };
 
-void poom_net_scanner_os_hint(const poom_net_scanner_service_t *svc,
+void poom_security_audit_os_hint(const poom_security_audit_service_t *svc,
                               uint8_t ttl, bool ttl_known, const char *vendor,
                               char *out, size_t cap, bool *out_strong)
 {
@@ -701,12 +701,12 @@ void poom_net_scanner_os_hint(const poom_net_scanner_service_t *svc,
     /* 1) Strong: OS token in a service banner / product string. */
     if (svc != NULL)
     {
-        char hay[POOM_NET_SCANNER_BANNER_CAP + POOM_NET_SCANNER_PRODUCT_CAP + 2];
+        char hay[POOM_SECURITY_AUDIT_BANNER_CAP + POOM_SECURITY_AUDIT_PRODUCT_CAP + 2];
         (void)snprintf(hay, sizeof(hay), "%s %s", svc->banner, svc->product);
         size_t hlen = strlen(hay);
         for (size_t i = 0; i < sizeof(k_os_tokens) / sizeof(k_os_tokens[0]); ++i)
         {
-            if (net_scanner_memfind_ci_(hay, hlen, k_os_tokens[i].token) != NULL)
+            if (security_audit_memfind_ci_(hay, hlen, k_os_tokens[i].token) != NULL)
             {
                 (void)snprintf(out, cap, "%s", k_os_tokens[i].family);
                 if (out_strong != NULL) { *out_strong = true; }
@@ -727,7 +727,7 @@ void poom_net_scanner_os_hint(const poom_net_scanner_service_t *svc,
     /* 3) Inferred: MAC vendor hints at a device type/OS family. */
     if (vendor != NULL && vendor[0] != '\0')
     {
-        static const net_scanner_os_token_t k_vendor_hints[] = {
+        static const security_audit_os_token_t k_vendor_hints[] = {
             {"apple", "Apple?"}, {"raspberry", "Raspberry Pi?"},
             {"espressif", "ESP/IoT?"}, {"samsung", "Samsung?"},
             {"google", "Google?"}, {"amazon", "Amazon?"},
@@ -748,7 +748,7 @@ void poom_net_scanner_os_hint(const poom_net_scanner_service_t *svc,
         size_t vl = strlen(vendor);
         for (size_t i = 0; i < sizeof(k_vendor_hints) / sizeof(k_vendor_hints[0]); ++i)
         {
-            if (net_scanner_memfind_ci_(vendor, vl, k_vendor_hints[i].token) != NULL)
+            if (security_audit_memfind_ci_(vendor, vl, k_vendor_hints[i].token) != NULL)
             {
                 (void)snprintf(out, cap, "%s", k_vendor_hints[i].family);
                 return;
@@ -758,8 +758,8 @@ void poom_net_scanner_os_hint(const poom_net_scanner_service_t *svc,
     }
 }
 
-bool poom_net_scanner_parse_http(const char *resp, size_t len,
-                                 poom_net_scanner_service_t *out)
+bool poom_security_audit_parse_http(const char *resp, size_t len,
+                                 poom_security_audit_service_t *out)
 {
     if (out == NULL || resp == NULL || len < 5) { return false; }
     if (strncmp(resp, "HTTP/", 5) != 0) { return false; }
@@ -767,21 +767,21 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
     (void)snprintf(out->service, sizeof(out->service), "http");
     out->product[0] = '\0';
     out->version[0] = '\0';
-    out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
-    net_scanner_snippet_(out->banner, sizeof(out->banner), resp, len); /* status line */
+    out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
+    security_audit_snippet_(out->banner, sizeof(out->banner), resp, len); /* status line */
 
     /* Find a "Server:" header value (case-insensitive), bounded to the head. */
-    const char *sv = net_scanner_memfind_ci_(resp, len, "server:");
+    const char *sv = security_audit_memfind_ci_(resp, len, "server:");
     if (sv != NULL)
     {
         sv += strlen("server:");
         size_t rem = len - (size_t)(sv - resp);
-        char val[POOM_NET_SCANNER_PRODUCT_CAP + POOM_NET_SCANNER_VERSION_CAP];
-        net_scanner_snippet_(val, sizeof(val), sv, rem); /* value to EOL, trimmed */
+        char val[POOM_SECURITY_AUDIT_PRODUCT_CAP + POOM_SECURITY_AUDIT_VERSION_CAP];
+        security_audit_snippet_(val, sizeof(val), sv, rem); /* value to EOL, trimmed */
         if (val[0] != '\0')
         {
-            net_scanner_split_pv_(val, out);
-            if (out->version[0] != '\0') { out->evidence = POOM_NET_SCANNER_EV_VERSION_REPORTED; }
+            security_audit_split_pv_(val, out);
+            if (out->version[0] != '\0') { out->evidence = POOM_SECURITY_AUDIT_EV_VERSION_REPORTED; }
             /* keep the Server line as the banner evidence */
             (void)snprintf(out->banner, sizeof(out->banner), "%s", val);
         }
@@ -791,7 +791,7 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
      * NAS, cameras put "NETGEAR R7000" / "RT-AC68U" there). Preferred over a
      * version-less Server header, which names only the embedded web server. */
     char hint[64] = {0};
-    const char *rl = net_scanner_memfind_ci_(resp, len, "realm=\"");
+    const char *rl = security_audit_memfind_ci_(resp, len, "realm=\"");
     if (rl != NULL)
     {
         rl += 7;
@@ -806,7 +806,7 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
     }
     if (hint[0] == '\0')
     {
-        const char *t = net_scanner_memfind_ci_(resp, len, "<title>");
+        const char *t = security_audit_memfind_ci_(resp, len, "<title>");
         if (t != NULL)
         {
             t += 7;
@@ -816,12 +816,12 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
             hint[n] = '\0';
         }
     }
-    char model[POOM_NET_SCANNER_PRODUCT_CAP];
+    char model[POOM_SECURITY_AUDIT_PRODUCT_CAP];
     if (hint[0] != '\0' && out->version[0] == '\0' &&
-        poom_net_scanner_model_token(hint, model, sizeof(model)) > 0U)
+        poom_security_audit_model_token(hint, model, sizeof(model)) > 0U)
     {
         (void)snprintf(out->product, sizeof(out->product), "%s", model);
-        out->evidence = POOM_NET_SCANNER_EV_PROTO_RESPONSE;
+        out->evidence = POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE;
     }
     if (hint[0] != '\0')
     {
@@ -837,16 +837,16 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
     /* Language runtime as a last resort ("X-Powered-By: PHP/5.6.40"). */
     if (out->product[0] == '\0')
     {
-        const char *xp = net_scanner_memfind_ci_(resp, len, "x-powered-by:");
+        const char *xp = security_audit_memfind_ci_(resp, len, "x-powered-by:");
         if (xp != NULL)
         {
             xp += 13;
-            char v2[POOM_NET_SCANNER_PRODUCT_CAP + POOM_NET_SCANNER_VERSION_CAP];
-            net_scanner_snippet_(v2, sizeof(v2), xp, len - (size_t)(xp - resp));
+            char v2[POOM_SECURITY_AUDIT_PRODUCT_CAP + POOM_SECURITY_AUDIT_VERSION_CAP];
+            security_audit_snippet_(v2, sizeof(v2), xp, len - (size_t)(xp - resp));
             if (v2[0] != '\0')
             {
-                net_scanner_split_pv_(v2, out);
-                if (out->version[0] != '\0') { out->evidence = POOM_NET_SCANNER_EV_VERSION_REPORTED; }
+                security_audit_split_pv_(v2, out);
+                if (out->version[0] != '\0') { out->evidence = POOM_SECURITY_AUDIT_EV_VERSION_REPORTED; }
             }
         }
     }
@@ -855,14 +855,14 @@ bool poom_net_scanner_parse_http(const char *resp, size_t len,
 
 /* ---- duration estimate (pure) ------------------------------------------- */
 
-#define NET_SCANNER_EST_DEFAULT_TIMEOUT_MS (600U) /* matches the engine default */
+#define SECURITY_AUDIT_EST_DEFAULT_TIMEOUT_MS (600U) /* matches the engine default */
 
-uint32_t poom_net_scanner_estimate_scan_s(uint32_t hosts, uint32_t ports_per_host,
+uint32_t poom_security_audit_estimate_scan_s(uint32_t hosts, uint32_t ports_per_host,
                                           uint32_t fanout, uint32_t timeout_ms)
 {
-    if (fanout == 0U) { fanout = POOM_NET_SCANNER_DEFAULT_FANOUT; }
-    if (fanout > POOM_NET_SCANNER_MAX_FANOUT) { fanout = POOM_NET_SCANNER_MAX_FANOUT; }
-    if (timeout_ms == 0U) { timeout_ms = NET_SCANNER_EST_DEFAULT_TIMEOUT_MS; }
+    if (fanout == 0U) { fanout = POOM_SECURITY_AUDIT_DEFAULT_FANOUT; }
+    if (fanout > POOM_SECURITY_AUDIT_MAX_FANOUT) { fanout = POOM_SECURITY_AUDIT_MAX_FANOUT; }
+    if (timeout_ms == 0U) { timeout_ms = SECURITY_AUDIT_EST_DEFAULT_TIMEOUT_MS; }
 
     uint64_t batches = ((uint64_t)ports_per_host + fanout - 1U) / fanout;
     uint64_t ms = (uint64_t)hosts * batches * timeout_ms;
@@ -870,7 +870,7 @@ uint32_t poom_net_scanner_estimate_scan_s(uint32_t hosts, uint32_t ports_per_hos
     return (s > UINT32_MAX) ? UINT32_MAX : (uint32_t)s;
 }
 
-void poom_net_scanner_fmt_duration(uint32_t seconds, char *out, size_t cap)
+void poom_security_audit_fmt_duration(uint32_t seconds, char *out, size_t cap)
 {
     if (out == NULL || cap == 0U) { return; }
     if (seconds < 60U)
@@ -892,7 +892,7 @@ void poom_net_scanner_fmt_duration(uint32_t seconds, char *out, size_t cap)
 
 /* ---- word wrap (pure) --------------------------------------------------- */
 
-const char *poom_net_scanner_wrap(const char *text, size_t width, char *out, size_t cap)
+const char *poom_security_audit_wrap(const char *text, size_t width, char *out, size_t cap)
 {
     if (out == NULL || cap == 0U) { return NULL; }
     out[0] = '\0';
@@ -930,7 +930,7 @@ const char *poom_net_scanner_wrap(const char *text, size_t width, char *out, siz
 
 /* Is table[i] a repeat of an earlier table entry (or, when @p skip_low, below
  * 1024 = already in the Extended well-known range)? */
-static bool net_scanner_tbl_skip_(const uint16_t *tbl, size_t i, bool skip_low)
+static bool security_audit_tbl_skip_(const uint16_t *tbl, size_t i, bool skip_low)
 {
     if (skip_low && tbl[i] < 1024U) { return true; }
     for (size_t j = 0; j < i; ++j)
@@ -940,7 +940,7 @@ static bool net_scanner_tbl_skip_(const uint16_t *tbl, size_t i, bool skip_low)
     return false;
 }
 
-size_t poom_net_scanner_build_ports_window(poom_net_scanner_profile_t profile, uint32_t offset,
+size_t poom_security_audit_build_ports_window(poom_security_audit_profile_t profile, uint32_t offset,
                                            uint16_t *out, size_t cap)
 {
     if (out == NULL || cap == 0U) { return 0U; }
@@ -949,27 +949,27 @@ size_t poom_net_scanner_build_ports_window(poom_net_scanner_profile_t profile, u
 
     switch (profile)
     {
-    case POOM_NET_SCANNER_PROFILE_QUICK:
+    case POOM_SECURITY_AUDIT_PROFILE_QUICK:
         for (size_t i = 0; i < sizeof(k_quick_ports) / sizeof(k_quick_ports[0]) && n < cap; ++i)
         {
-            if (net_scanner_tbl_skip_(k_quick_ports, i, false)) { continue; }
+            if (security_audit_tbl_skip_(k_quick_ports, i, false)) { continue; }
             if (idx++ >= offset) { out[n++] = k_quick_ports[i]; }
         }
         return n;
 
-    case POOM_NET_SCANNER_PROFILE_EXTENDED:
+    case POOM_SECURITY_AUDIT_PROFILE_EXTENDED:
         for (uint32_t p = 1; p <= 1023U && n < cap; ++p)
         {
             if (idx++ >= offset) { out[n++] = (uint16_t)p; }
         }
         for (size_t i = 0; i < sizeof(k_common_high_ports) / sizeof(k_common_high_ports[0]) && n < cap; ++i)
         {
-            if (net_scanner_tbl_skip_(k_common_high_ports, i, true)) { continue; }
+            if (security_audit_tbl_skip_(k_common_high_ports, i, true)) { continue; }
             if (idx++ >= offset) { out[n++] = k_common_high_ports[i]; }
         }
         return n;
 
-    case POOM_NET_SCANNER_PROFILE_FULL:
+    case POOM_SECURITY_AUDIT_PROFILE_FULL:
         for (uint32_t p = offset + 1U; p <= 65535U && n < cap; ++p)
         {
             out[n++] = (uint16_t)p;

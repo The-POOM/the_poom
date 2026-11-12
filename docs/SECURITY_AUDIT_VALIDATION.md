@@ -1,8 +1,8 @@
-# Net Scanner PR validation
+# Security Audit PR validation
 
 Prepared against upstream tag `1.0.16` (`3533ee027efcf06a610265f3c4b4be8c73548fb5`).
 The original two scanner commits were cherry-picked onto this base in an isolated
-worktree. The original `feature/net-scanner-auditor-clean` branch remains at
+worktree. The original source branch is preserved at
 `c703cea793c4e7edf3e3add565735014bdf10316`.
 
 ## Review changes
@@ -25,7 +25,7 @@ worktree. The original `feature/net-scanner-auditor-clean` branch remains at
 - Harness regression: injected compiler and executable failures both stop the
   suite, preserve diagnostics and clean temporary files.
 - Full ESP32-C5 firmware build and size check with the exact SDK and profile in
-  [build instructions](NET_SCANNER_BUILD.md), including the real lwIP backend,
+  [build instructions](SECURITY_AUDIT_BUILD.md), including the real lwIP backend,
   shared Wi-Fi controller, SD driver and menu integration.
 - All 16 explicit release-profile settings verified in generated sdkconfig.
 - Upstream defaults, partitions, dependency versions, Device Inspector and
@@ -39,8 +39,8 @@ heap headroom or app-transition behavior.
 
 ## Pending
 
-No attached ESP32-C5 was available. The hardware acceptance scenarios in the
-build guide remain untested for Net Scanner, including the cleanup fixes.
-No scans were run against real network targets. Only the ESP32-C5 release
-configuration was built; ESP32-C6 is not validated here. No upstream PR was
-published by this preparation task.
+Cloud checks have no attached ESP32-C5. The owner verified discovery, full
+audit, SD report saving and app transitions in the separate combined QA build
+using the pinned SDK and release memory profile. The newly renamed labels and
+log/report headings still require an owner smoke test. ESP32-C6 is not validated
+here. No upstream PR was published by this preparation task.

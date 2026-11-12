@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Host-only shim of esp_err.h, enough to compile poom_net_scanner_logic.c off
+// Host-only shim of esp_err.h, enough to compile poom_security_audit_logic.c off
 // target for unit testing. NOT used in the firmware build (ESP-IDF provides the
 // real header, which takes include precedence there).
 #ifndef POOM_TEST_ESP_ERR_SHIM_H
@@ -20,5 +20,3 @@ typedef int esp_err_t;
 #define ESP_ERR_TIMEOUT         (0x107)
 
 #endif /* POOM_TEST_ESP_ERR_SHIM_H */
-#define ESP_ERR_NOT_ALLOWED (0x10A)
-const char *esp_err_to_name(esp_err_t e);

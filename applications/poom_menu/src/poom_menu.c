@@ -35,7 +35,7 @@
 #include "menu_cli_ot.h"
 #endif
 #include "menu_cli_web.h"
-#include "menu_net_scanner.h"
+#include "menu_security_audit.h"
 #include "menu_control_music.h"
 #include "menu_deauth.h"
 #include "menu_deauth_detector.h"
@@ -571,15 +571,15 @@ static void action_sniffer_rt_(void)
 }
 
 /**
- * @brief Internal helper for `action_net_scanner`.
+ * @brief Internal helper for `action_security_audit`.
  *
  * @return void
  */
-static void action_net_scanner_(void)
+static void action_security_audit_(void)
 {
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
-    menu_net_scanner_show();
+    menu_security_audit_show();
 }
 
 /**
@@ -1161,7 +1161,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"DEVICE INSPECTOR", action_device_inspector_},
     {"WIFI GUARD", action_wifi_guard_},
     {"SCAN NET", action_arp_},
-    {"NET SCANNER", action_net_scanner_},
+    {"SECURITY AUDIT", action_security_audit_},
 
 #if CONFIG_ZB_ENABLED
     {"CLI ZIGBEE", action_cli_zigbee_},
