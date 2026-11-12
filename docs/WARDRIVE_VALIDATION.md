@@ -64,8 +64,8 @@ transaction helper used by the GPS adapter. Stock boot, allocator defaults,
 Device Inspector and shared BLE/Wi-Fi helpers remain unchanged. The optional
 release memory profile is documented separately from app lifecycle behavior.
 
-The subsequent Saved Sessions cache change is described below and still
-requires its own hardware check. Field endurance, power-loss resilience
+The subsequent Saved Sessions cache change passed its owner hardware check
+as described below. Field endurance, power-loss resilience
 across SD brands and every unsupported GPS receiver are not claimed. Preserve
 raw data when inspecting faults. See [lifecycle](WARDRIVE_LIFECYCLE.md) for
 ownership refusal and the shared-clock concurrency limit during HTTPS.
@@ -82,7 +82,7 @@ revision as recorded above. The Windows final image was 0x380350 bytes,
 leaving 0x1fcb0 (130224) bytes, or 3%, in the same app slot. Internal BSS
 52080 and external BSS 33816 matched the Linux build.
 
-## Saved Sessions scrolling fix (hardware check pending)
+## Saved Sessions scrolling fix (hardware check passed)
 
 The previous edge-scroll path scanned all directories and reread every
 session manifest to find each adjacent row. The browser now loads/sorts one
@@ -96,5 +96,9 @@ and detail returns. Tests also cover ordering, legacy IDs, dates/time zones,
 allocation failure, over-budget fallback, browser refresh and cache release.
 The complete ASan/UBSan host suite passed (1240 UI frames). ESP32-C5 build
 0x37fd60 fits with 3% headroom; static internal/external BSS remains unchanged.
-The owner must confirm actual SD/OLED responsiveness before this fix is folded
-into the official PR branch. Earlier hardware acceptance applies to its parent.
+On 12 November 2026 (Australia/Brisbane), the owner tested source commit
+`c60355d952b019d25f7bc017ea08987df8731149` and reported responsive scrolling
+across visible-row boundaries, correct selection after opening/backing out of
+sessions, and working BLE Detect after exiting Wardrive. This accepts the
+scrolling fix; earlier full recording/GPS/export acceptance is recorded above.
+Only acceptance documentation changed after this hardware test.
