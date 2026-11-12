@@ -25,3 +25,17 @@ bool wd_session_page(const char *root,const char *cursor,int direction,wd_sessio
  * pass; false at either end. Lets the list scroll one row without a page scan. */
 bool wd_session_neighbor(const char *root,const char *cursor,int direction,wd_timezone_t fallback,wd_session_info_t *out);
 bool wd_session_page_local(const char *root,const char *cursor,int direction,wd_timezone_t fallback,wd_session_page_t *page);
+
+/* Optional browser snapshot. Metadata is read/sorted once, then page movement
+ * does not scan directories or reopen manifests. Bounded to 256 KiB; callers
+ * can retain the constant-memory pager if loading fails or the list is larger.
+ * Zero-initialize before first use and close when leaving the browser. */
+#define WD_SESSION_CACHE_BYTES (256U * 1024U)
+typedef struct {
+    wd_session_info_t *entries;
+    unsigned count;
+    bool ready;
+} wd_session_cache_t;
+bool wd_session_cache_load(const char *root,wd_timezone_t fallback,wd_session_cache_t *cache);
+void wd_session_cache_close(wd_session_cache_t *cache);
+void wd_session_cache_page(const wd_session_cache_t *cache,const char *cursor,wd_session_page_t *page);

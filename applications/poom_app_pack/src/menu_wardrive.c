@@ -79,6 +79,7 @@ typedef struct {
     wd_distance_t distance;
     char message[64];
     wd_session_page_t saved_page;
+    wd_session_cache_t saved_cache;
     unsigned notice_count;
     uint8_t menu_tops[WD_SCREEN_COUNT];
 } wd_ui_state_t;
@@ -261,10 +262,9 @@ static void pause_toggle(uint64_t now) {
     if(ui->session.paused) wd_elapsed_pause(&ui->elapsed,now); else wd_elapsed_resume(&ui->elapsed,now);
     if(!wd_session_checkpoint(&ui->session,ui->session.paused?"Paused":"Active")) { ui->session.fault=true; stop(); }
 }
-/* Saved Sessions keeps a 4-row window. Moving inside it touches no files;
- * crossing an edge reads one neighbour and shifts the rows. Full rescans
- * happen only on entry/return (direction 0). Upload marks are read when a
- * row appears; the open session's details are read when it is opened. */
+/* Cache sorted metadata on browser entry. Row shifts reuse that snapshot;
+ * only the arriving row's upload status is read. Large lists/allocation failure
+ * retain the bounded pager. Refresh the snapshot on the next main-menu entry. */
 /* Bounded string copy (always terminated). */
 static void copy_text(char *out,size_t capacity,const char *text) {
     size_t n=strnlen(text,capacity-1); memcpy(out,text,n); out[n]=0;
@@ -292,7 +292,17 @@ static void saved_details(void) {
 static bool saved_shift(int direction) {
     wd_session_info_t next;
     const char *edge=direction>0?ui->saved_page.entries[3].id:ui->saved_page.entries[0].id;
-    if(!edge[0]||!wd_session_neighbor(WD_ROOT "/sessions",edge,direction,ui->time_zone.zone,&next)) return false;
+    if(!edge[0]) return false;
+    if(ui->saved_cache.ready) {
+        unsigned rank=ui->saved_page.selected_rank;
+        if(direction>0) {
+            if(rank+4>=ui->saved_cache.count) return false;
+            next=ui->saved_cache.entries[rank+4];
+        } else {
+            if(!rank) return false;
+            next=ui->saved_cache.entries[rank-1];
+        }
+    } else if(!wd_session_neighbor(WD_ROOT "/sessions",edge,direction,ui->time_zone.zone,&next)) return false;
     if(direction>0) {
         memmove(&ui->saved_page.entries[0],&ui->saved_page.entries[1],3*sizeof(ui->saved_page.entries[0])); memmove(ui->row_status,ui->row_status+1,3);
         ui->saved_page.entries[3]=next; ui->row_status[3]=status_code(next.id); ui->saved_page.selected_rank++;
@@ -303,6 +313,8 @@ static bool saved_shift(int direction) {
     return true;
 }
 static void saved_refresh(int direction) {
+    if(!direction&&!ui->selected_id[0])
+        (void)wd_session_cache_load(WD_ROOT "/sessions",ui->time_zone.zone,&ui->saved_cache);
     if(direction&&ui->selected_id[0]&&ui->saved_page.count) {
         if(direction>0) {
             if(ui->saved_index+1>=ui->saved_count) return;
@@ -320,7 +332,9 @@ static void saved_refresh(int direction) {
     else { snprintf(anchor,sizeof(anchor),"%s",ui->selected_id); ui->saved_row=0; }
     /* Never pass a cursor pointing inside the page: the page reader clears
      * its output before scanning. Keep the viewport anchor separately. */
-    bool ok=wd_session_page_local(WD_ROOT "/sessions",anchor,0,ui->time_zone.zone,&ui->saved_page);
+    bool ok=true;
+    if(ui->saved_cache.ready) wd_session_cache_page(&ui->saved_cache,anchor,&ui->saved_page);
+    else ok=wd_session_page_local(WD_ROOT "/sessions",anchor,0,ui->time_zone.zone,&ui->saved_page);
     ui->saved_count=ok?ui->saved_page.count:0;
     if(!ok) { strcpy(ui->message,"SESSION LIST FAILED"); ui->saved_row=0; }
     while(ui->saved_row&&!ui->saved_page.entries[ui->saved_row].id[0]) ui->saved_row--;
@@ -945,6 +959,9 @@ static void back_key(void) {
             if(ui->screen==WD_SCREEN_GPS) poom_gps_capture_stop(&ui->gps_capture);
             ui->screen=wd_ui_session_back(ui->screen); ui->selection=0; ui->raw=false; ui->message[0]=0; return;
         case WD_SCREEN_STOP: ui->screen=ui->stop_return; return;
+        case WD_SCREEN_SAVED:
+            wd_session_cache_close(&ui->saved_cache);
+            ui->screen=WD_SCREEN_MAIN; ui->message[0]=0; return;
         case WD_SCREEN_SESSION: ui->screen=WD_SCREEN_SAVED; ui->message[0]=0; saved_refresh(0); return;
         case WD_SCREEN_UPLOAD_CHOICE: case WD_SCREEN_OPTIONS: ui->screen=WD_SCREEN_SESSION; ui->message[0]=0; return;
         case WD_SCREEN_TRANSFER_FORMAT: ui->choice_row=0; ui->screen=WD_SCREEN_UPLOAD_CHOICE; ui->message[0]=0; return;
@@ -1169,6 +1186,7 @@ static bool ui_alloc(void) {
 static void ui_free(void) {
     wd_ui_state_t *state=ui; ui=NULL;
     if(!state) return;
+    wd_session_cache_close(&state->saved_cache);
     /* Wipe secrets (API keys, WiFi password, edit buffer) before release. */
     volatile unsigned char *bytes=(volatile unsigned char *)state;
     for(size_t i=0;i<sizeof(*state);i++) bytes[i]=0;

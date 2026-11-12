@@ -40,7 +40,9 @@ renamed. Earlier observations do not receive invented positions or timestamps.
 ## Saved Sessions
 
 Runs live under `/sdcard/wardrive/sessions/`. Saved Sessions shows dated runs
-newest first and unknown dates afterwards. Stop recording before exporting,
+newest first and unknown dates afterwards. Sorted metadata is cached while browsing,
+so moving beyond the four visible rows does not rescan every recording. The
+cache is released on return to the main Wardrive menu or app exit. Stop recording before exporting,
 transferring or uploading. A session offers CSV creation, transfer/upload and
 additional recovery/status operations. Raw logs remain available even if
 there are no geographically usable CSV rows.

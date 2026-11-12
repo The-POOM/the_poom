@@ -13,6 +13,16 @@
 #include <unistd.h>
 #include "esp_err.h"
 #include "nvs.h"
+/* Count actual filesystem calls made by the production browser. */
+#include <dirent.h>
+static unsigned browser_directories,browser_manifests;
+DIR *__real_opendir(const char *path);
+DIR *__wrap_opendir(const char *path) { browser_directories++; return __real_opendir(path); }
+FILE *__real_fopen(const char *path,const char *mode);
+FILE *__wrap_fopen(const char *path,const char *mode) {
+    if(mode[0]=='r'&&strstr(path,"/session.json")) browser_manifests++;
+    return __real_fopen(path,mode);
+}
 static time_t wall=1794117600; /* 2026-11-13 06:00:00 UTC */
 static time_t fake_time(time_t *out) { if(out) *out=wall; return wall; }
 #define time fake_time
@@ -490,6 +500,8 @@ int main(void) {
     make_session("f-extra","2026-11-07 01:00:00"); make_session("g-extra","2026-11-07 01:00:01"); make_session("h-extra","2026-11-07 01:00:02");
     static const char *const order[]={"e-confirmed","d-review","c-failed","b-submitted","a-pending","h-extra","g-extra","f-extra"};
     goto_main_item(WD_MENU_SAVED); tap(BUTTON_A); assert(ui->saved_count==8&&!strcmp(ui->selected_id,order[0]));
+    assert(ui->saved_cache.ready&&ui->saved_cache.count==8);
+    unsigned scans_after_entry=browser_directories,manifests_after_entry=browser_manifests;
     tap(BUTTON_UP); assert(ui->saved_row==0&&!strcmp(ui->selected_id,order[0]));
     for(unsigned i=1;i<8;i++) {
         unsigned reads=status_reads;
@@ -502,9 +514,19 @@ int main(void) {
     tap(BUTTON_DOWN); assert(ui->saved_index==7);
     for(unsigned i=7;i>0;i--) { tap(BUTTON_UP); assert(ui->saved_index==i-1&&!strcmp(ui->selected_id,order[i-1])); }
     assert(ui->saved_row==0&&!strcmp(ui->saved_page.entries[0].id,order[0])&&at(2,12,ui->saved_page.entries[0].label));
+    assert(browser_directories==scans_after_entry&&browser_manifests==manifests_after_entry);
+    puts("Saved Sessions: bidirectional edge scrolling and detail returns perform zero directory rescans/manifest rereads after entry");
     /* Marks follow their rows through shifts. */
     for(unsigned i=0;i<4;i++) assert(ui->row_status[i]==status_code(ui->saved_page.entries[i].id));
 
+    /* The uncached fallback must still expose every row in both directions. */
+    wd_session_cache_close(&ui->saved_cache);
+    for(unsigned i=1;i<8;i++) { tap(BUTTON_DOWN); assert(ui->saved_index==i&&!strcmp(ui->selected_id,order[i])); }
+    for(unsigned i=7;i>0;i--) { tap(BUTTON_UP); assert(ui->saved_index==i-1&&!strcmp(ui->selected_id,order[i-1])); }
+    assert(browser_directories>scans_after_entry);
+    tap(BUTTON_B); assert(ui->screen==WD_SCREEN_MAIN&&!ui->saved_cache.entries&&!ui->saved_cache.ready);
+    goto_main_item(WD_MENU_SAVED);tap(BUTTON_A);
+    assert(ui->saved_cache.ready&&browser_directories>scans_after_entry);
     /* WiFi chooser for a transfer: profiles, scan, passwords, hidden SSID, saving. */
     tap(BUTTON_A); ui->session_action=0; ui->credentials.ssid[0]=0; ui->credentials.password[0]=0; link_up=false;
     ui->screen=WD_SCREEN_TRANSFER; frame(); assert(at(0,56,"A:Choose WiFi B:Back"));

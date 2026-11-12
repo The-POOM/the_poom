@@ -4,6 +4,14 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/* Inject a cache allocation failure without changing the allocator globally. */
+#include <stdlib.h>
+static bool fail_cache_allocation;
+void *__real_realloc(void *pointer,size_t bytes);
+void *__wrap_realloc(void *pointer,size_t bytes) {
+    if(fail_cache_allocation) return NULL;
+    return __real_realloc(pointer,bytes);
+}
 static void manifest(const char *root,const char *id,const char *json) {
     char path[256]; snprintf(path,sizeof(path),"%s/%s",root,id); assert(!mkdir(path,0700));
     snprintf(path,sizeof(path),"%s/%s/session.json",root,id);
@@ -95,5 +103,37 @@ int main(int argc,char **argv) {
     FILE *unchanged=fopen(metadata_path,"rb");assert(unchanged);char metadata_text[128]={0};
     assert(fread(metadata_text,1,sizeof(metadata_text)-1,unchanged)>0&&!fclose(unchanged));
     assert(strstr(metadata_text,"\"start_utc\":\"\""));
+    /* Snapshot preserves the exact ordering and displayed zone, including
+     * legacy metadata, undated entries, ties and daylight-saving folds. */
+    wd_session_cache_t cache={0};
+    assert(wd_session_cache_load(root,WD_TZ_SYDNEY,&cache)&&cache.ready);
+    assert(wd_session_page_local(root,"",0,WD_TZ_SYDNEY,&page)&&page.count==cache.count);
+    for(unsigned i=0;i<cache.count;i++) {
+        wd_session_page_t cached;
+        wd_session_cache_page(&cache,cache.entries[i].id,&cached);
+        assert(cached.selected_rank==i&&cached.count==cache.count);
+        assert(wd_session_page_local(root,cache.entries[i].id,0,WD_TZ_SYDNEY,&page));
+        assert(!memcmp(cached.entries,page.entries,sizeof(page.entries)));
+    }
+    fail_cache_allocation=true;
+    assert(!wd_session_cache_load(root,WD_TZ_UTC,&cache));
+    assert(!cache.ready&&!cache.entries&&!cache.count);
+    fail_cache_allocation=false;
+    assert(wd_session_cache_load(root,WD_TZ_UTC,&cache)&&cache.ready);
+    wd_session_cache_close(&cache);wd_session_cache_close(&cache);
+    assert(!cache.ready&&!cache.entries&&!cache.count);
+    /* Going past the memory budget must not silently truncate recordings:
+     * reject the snapshot so the unchanged streaming pager can show all. */
+    char large[192];snprintf(large,sizeof(large),"%s/large-browser",argv[1]);assert(!mkdir(large,0700));
+    unsigned limit=WD_SESSION_CACHE_BYTES/sizeof(wd_session_info_t);
+    for(unsigned i=0;i<=limit;i++) {
+        char directory[256];snprintf(directory,sizeof(directory),"%s/run-%05u",large,i);assert(!mkdir(directory,0700));
+    }
+    assert(!wd_session_cache_load(large,WD_TZ_UTC,&cache)&&!cache.ready&&!cache.entries);
+    assert(wd_session_page(large,"",0,&page)&&page.count==limit+1);
+    char missing[192];snprintf(missing,sizeof(missing),"%s/missing-browser",argv[1]);
+    assert(wd_session_cache_load(missing,WD_TZ_UTC,&cache)&&cache.ready&&!cache.count);
+    wd_session_cache_page(&cache,"deleted",&page);assert(!page.count&&!page.entries[0].id[0]);
+    wd_session_cache_close(&cache);
     puts("Session UTC IDs, legacy labels, newest-first bounded browsing, invalid metadata and navigation passed");
 }

@@ -169,3 +169,44 @@ bool wd_session_neighbor(const char *root,const char *cursor,int direction,wd_ti
 bool wd_session_page(const char *root,const char *cursor,int direction,wd_session_page_t *page) {
     return wd_session_page_local(root,cursor,direction,WD_TZ_UTC,page);
 }
+
+void wd_session_cache_close(wd_session_cache_t *cache) {
+    free(cache->entries); memset(cache,0,sizeof(*cache));
+}
+static int cache_compare(const void *a,const void *b) { return compare(a,b); }
+bool wd_session_cache_load(const char *root,wd_timezone_t fallback,wd_session_cache_t *cache) {
+    wd_session_cache_close(cache);
+    DIR *directory=opendir(root);
+    if(!directory) { cache->ready=errno==ENOENT; return cache->ready; }
+    const unsigned limit=WD_SESSION_CACHE_BYTES/sizeof(wd_session_info_t);
+    unsigned capacity=0;
+    struct dirent *item;
+    while((item=readdir(directory))) {
+        wd_session_info_t entry;
+        if(!wd_session_info_local(root,item->d_name,fallback,&entry)) continue;
+        if(cache->count==capacity) {
+            unsigned next=capacity?capacity*2:32;
+            if(next>limit) next=limit;
+            if(next<=capacity) goto failed;
+            void *allocation=realloc(cache->entries,next*sizeof(*cache->entries));
+            if(!allocation) goto failed;
+            cache->entries=allocation; capacity=next;
+        }
+        cache->entries[cache->count++]=entry;
+    }
+    closedir(directory);
+    if(cache->count>1) qsort(cache->entries,cache->count,sizeof(*cache->entries),cache_compare);
+    cache->ready=true; return true;
+failed:
+    closedir(directory); wd_session_cache_close(cache); return false;
+}
+void wd_session_cache_page(const wd_session_cache_t *cache,const char *cursor,wd_session_page_t *page) {
+    memset(page,0,sizeof(*page));
+    if(!cache->ready) return;
+    page->count=cache->count;
+    unsigned first=0;
+    if(cursor&&*cursor) for(unsigned i=0;i<cache->count;i++)
+        if(!strcmp(cache->entries[i].id,cursor)) { first=i; break; }
+    page->selected_rank=first;
+    for(unsigned i=0;i<4&&first+i<cache->count;i++) page->entries[i]=cache->entries[first+i];
+}

@@ -69,7 +69,7 @@ else
     echo 'Credential tests require CJSON_DIR pointing to cJSON source (IDF component manager downloads it).'
     exit 1
 fi
-$CC $COMMON $INC -I"$CJSON_DIR" modules/poom_wardrive/test/test_sessions.c modules/poom_wardrive/wardrive_timezone.c modules/poom_wardrive/wardrive_sessions.c modules/poom_wardrive/wardrive_format.c "$CJSON_DIR/cJSON.c" -lm -o "$TASK_TMP/sessions"
+$CC $COMMON $INC -I"$CJSON_DIR" modules/poom_wardrive/test/test_sessions.c modules/poom_wardrive/wardrive_timezone.c modules/poom_wardrive/wardrive_sessions.c modules/poom_wardrive/wardrive_format.c "$CJSON_DIR/cJSON.c" -Wl,--wrap=realloc -lm -o "$TASK_TMP/sessions"
 "$TASK_TMP/sessions" "$TASK_TMP/data"
 $CC $COMMON $INC -Itools/wardrive_hostcheck/stubs tools/wardrive_hostcheck/test_clock.c modules/poom_wardrive/wardrive_clock.c modules/poom_wardrive/wardrive_clock_scope.c modules/poom_wardrive/wardrive_format.c -lm -o "$TASK_TMP/clock"
 "$TASK_TMP/clock"
@@ -99,7 +99,7 @@ $CC $COMMON $INC -DCONFIG_IDF_TARGET_ESP32C5=1 -DWD_ROOT=\"$TASK_TMP/ui\" -Itool
     tools/wardrive_hostcheck/test_ui_flow.c applications/poom_app_pack/src/wardrive_ui_logic.c modules/poom_wardrive/wardrive_sessions.c \
     modules/poom_wardrive/wardrive_timezone.c modules/poom_wardrive/wardrive_format.c modules/poom_wardrive/wardrive_files.c \
     modules/poom_wardrive/wardrive_export.c modules/poom_wardrive/wardrive_credentials.c modules/poom_wardrive/wardrive_distance.c \
-    modules/poom_gps/poom_nmea.c modules/poom_gps/poom_gps_capture.c modules/poom_wardrive/wardrive_clock.c modules/poom_arduboy_display/poom_arduboy_font5x7.c "$CJSON_DIR/cJSON.c" -lm -o "$TASK_TMP/ui_flow"
+    modules/poom_gps/poom_nmea.c modules/poom_gps/poom_gps_capture.c modules/poom_wardrive/wardrive_clock.c modules/poom_arduboy_display/poom_arduboy_font5x7.c "$CJSON_DIR/cJSON.c" -Wl,--wrap=fopen -Wl,--wrap=opendir -lm -o "$TASK_TMP/ui_flow"
 "$TASK_TMP/ui_flow"
 $CC $COMMON $INC modules/poom_gps/test/test_capture.c modules/poom_gps/poom_gps_capture.c modules/poom_gps/poom_nmea.c -lm -o "$TASK_TMP/capture"
 "$TASK_TMP/capture" "$TASK_TMP/data"

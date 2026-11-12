@@ -84,6 +84,18 @@ User-requested recordings, exports, settings and saved credentials/profiles
 remain persistent. Restoring transient runtime ownership does not undo those
 explicit user operations.
 
+## Saved Sessions browser
+
+Entering Saved Sessions creates an app-owned sorted metadata snapshot, using
+at most 256 KiB through the configured allocator (PSRAM under the verified
+release profile). Arrow scrolling and detail returns reuse the snapshot;
+only an arriving row's upload marker is read. Re-entering from the main menu
+refreshes the snapshot, and backing out or closing Wardrive releases it.
+Allocation failure or a collection beyond the cache budget falls back to the
+existing constant-memory pager without hiding recordings. External SD edits
+while browsing become visible on the next browser entry. Raw recordings,
+manifest dates, exports and upload queue contents are not changed by browsing.
+
 ## Limits and hardware acceptance
 
 Adding code has a permanent flash cost and some static bookkeeping. Exact heap

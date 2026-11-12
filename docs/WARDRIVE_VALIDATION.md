@@ -64,8 +64,8 @@ transaction helper used by the GPS adapter. Stock boot, allocator defaults,
 Device Inspector and shared BLE/Wi-Fi helpers remain unchanged. The optional
 release memory profile is documented separately from app lifecycle behavior.
 
-Saved Sessions scrolling across off-screen entries can be sluggish; the owner
-explicitly deferred performance work. Field endurance, power-loss resilience
+The subsequent Saved Sessions cache change is described below and still
+requires its own hardware check. Field endurance, power-loss resilience
 across SD brands and every unsupported GPS receiver are not claimed. Preserve
 raw data when inspecting faults. See [lifecycle](WARDRIVE_LIFECYCLE.md) for
 ownership refusal and the shared-clock concurrency limit during HTTPS.
@@ -81,3 +81,20 @@ stock-file checks passed. The owner subsequently passed the final hardware smoke
 revision as recorded above. The Windows final image was 0x380350 bytes,
 leaving 0x1fcb0 (130224) bytes, or 3%, in the same app slot. Internal BSS
 52080 and external BSS 33816 matched the Linux build.
+
+## Saved Sessions scrolling fix (hardware check pending)
+
+The previous edge-scroll path scanned all directories and reread every
+session manifest to find each adjacent row. The browser now loads/sorts one
+bounded metadata snapshot, and reuses it until returning to the main menu.
+The unchanged streaming pager remains a fallback on allocation failure or
+when the snapshot would exceed 256 KiB; no sessions are silently truncated.
+
+The production UI regression wraps real fopen/opendir calls and confirms zero
+directory rescans or manifest rereads during forward/backward edge scrolling
+and detail returns. Tests also cover ordering, legacy IDs, dates/time zones,
+allocation failure, over-budget fallback, browser refresh and cache release.
+The complete ASan/UBSan host suite passed (1240 UI frames). ESP32-C5 build
+0x37fd60 fits with 3% headroom; static internal/external BSS remains unchanged.
+The owner must confirm actual SD/OLED responsiveness before this fix is folded
+into the official PR branch. Earlier hardware acceptance applies to its parent.
