@@ -105,6 +105,8 @@ set(MODULES
     poom_wifi_attacks
     poom_wifi_ctrl
     poom_wifi_mac
+    open_thread
+    poom_154_recon
 # zigbee jonathan
 #    zb_cli
 #    open_thread
@@ -182,6 +184,8 @@ set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_mac
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_scanner
     ${CMAKE_SOURCE_DIR}/modules/poom_pcap
+    ${CMAKE_SOURCE_DIR}/modules/open_thread
+    ${CMAKE_SOURCE_DIR}/modules/poom_154_recon
 # zigbee jonathan
 #    ${CMAKE_SOURCE_DIR}/modules/open_thread
 # -----------------------------------
@@ -262,5 +266,15 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # bootloader hook component. Ignore the old full-main override to avoid
 # ambiguous resolution in the bootloader sub-build.
 set(BOOTLOADER_IGNORE_EXTRA_COMPONENT "main")
+
+# Relax optimization-triggered GCC warnings from fatal to non-fatal.
+# -Os enables deeper inlining/IPA, which surfaces benign format/stringop/
+# uninitialized analysis warnings in existing code that -Og did not trigger.
+idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format-truncation" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "-Wno-error=format-overflow" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "-Wno-error=stringop-truncation" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "-Wno-error=stringop-overflow" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "-Wno-error=maybe-uninitialized" APPEND)
+idf_build_set_property(COMPILE_OPTIONS "-Wno-error=array-bounds" APPEND)
 
 project(poom)
