@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "Arduboy2.h"
 #include "button_driver.h"
@@ -14,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "input_events.h"
+#include "menu_handshake_crack.h"
 #include "poom_pcap_manager.h"
 #include "poom_sbus.h"
 #include "poom_wifi_ctrl.h"
@@ -83,6 +85,11 @@ static bool s_menu_poom_pcap_input_dirty = false;
 static TaskHandle_t s_menu_poom_pcap_task = NULL;
 static char s_menu_poom_pcap_sbus_user[] = "menu_poom_pcap";
 
+/* Post-capture handoff to the handshake cracker: set from the RUNNING screen's
+ * A button, consumed by the task loop once the .22000 has been finalized. */
+static volatile bool s_menu_poom_pcap_crack_requested = false;
+static char s_menu_poom_pcap_crack_path[160] = {0};
+
 static menu_poom_pcap_screen_t s_menu_poom_pcap_screen = MENU_POOM_PCAP_SCREEN_SELECT;
 static menu_poom_pcap_mode_t s_menu_poom_pcap_mode = MENU_POOM_PCAP_MODE_ZIGBEE;
 static uint8_t s_menu_poom_pcap_zigbee_channel = MENU_POOM_PCAP_ZB_CH_DEFAULT;
@@ -92,6 +99,9 @@ static poom_pcap_wifi_capture_t s_menu_poom_pcap_wifi_capture = POOM_PCAP_WIFI_C
 static void menu_poom_pcap_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static esp_err_t menu_poom_pcap_exit_(void);
 static void menu_poom_pcap_request_render_from_input_(void);
+static bool menu_poom_pcap_handshake_crackable_(void);
+static bool menu_poom_pcap_build_22000_path_(char *out, size_t out_len);
+static void menu_poom_pcap_handoff_crack_(const char *path);
 
 /**
  * @brief Renders the current menu state.
@@ -481,7 +491,8 @@ static void menu_poom_pcap_draw_running_(void)
     (void)poom_arduboy_print(line3);
 
     poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print(F("B:STOP"));
+    (void)poom_arduboy_print(menu_poom_pcap_handshake_crackable_() ? F("A:CRACK  B:STOP")
+                                                                   : F("B:STOP"));
     poom_arduboy_display();
 }
 
@@ -618,7 +629,29 @@ static void menu_poom_pcap_task_(void *task_arg)
             break;
         }
 
-        if (s_menu_poom_pcap_input_dirty)
+        if (s_menu_poom_pcap_crack_requested)
+        {
+            s_menu_poom_pcap_crack_requested = false;
+            menu_poom_pcap_stop_capture_(); /* finalizes the .22000 on disk */
+
+            struct stat st;
+            if ((s_menu_poom_pcap_crack_path[0] != '\0') &&
+                (stat(s_menu_poom_pcap_crack_path, &st) == 0) && (st.st_size > 0))
+            {
+                menu_poom_pcap_handoff_crack_(s_menu_poom_pcap_crack_path);
+                break; /* cracker owns the screen now; this task self-deletes */
+            }
+
+            /* Nothing usable was written -- drop back to the capture menu. */
+            s_menu_poom_pcap_screen = MENU_POOM_PCAP_SCREEN_SELECT;
+            menu_poom_pcap_render_();
+        }
+
+        /* The RUNNING screen refreshes every tick so the live HS/PMK counts --
+         * and the "A:CRACK" footer that appears once a handshake/PMKID is
+         * captured -- update without needing a button press. */
+        if (s_menu_poom_pcap_input_dirty ||
+            (s_menu_poom_pcap_screen == MENU_POOM_PCAP_SCREEN_RUNNING))
         {
             menu_poom_pcap_render_();
             s_menu_poom_pcap_input_dirty = false;
@@ -669,6 +702,85 @@ static esp_err_t menu_poom_pcap_exit_(void)
 }
 
 /**
+ * @brief True while a WiFi handshake capture holds at least one crackable
+ *        target (a full handshake pair or a PMKID).
+ *
+ * @return bool
+ */
+static bool menu_poom_pcap_handshake_crackable_(void)
+{
+    if ((s_menu_poom_pcap_mode != MENU_POOM_PCAP_MODE_WIFI) ||
+        (s_menu_poom_pcap_wifi_capture != POOM_PCAP_WIFI_CAPTURE_HANDSHAKE))
+    {
+        return false;
+    }
+
+    poom_pcap_wifi_handshake_status_t hs = {0};
+    if (!poom_pcap_manager_wifi_handshake_get_status(&hs))
+    {
+        return false;
+    }
+    return (hs.valid_pair_count > 0U) || (hs.pmkid_count > 0U);
+}
+
+/**
+ * @brief Builds the .22000 path for the current capture (the hash file the
+ *        finalizer writes alongside the .pcap).
+ *
+ * @param[out] out Output buffer.
+ * @param[in] out_len Output buffer size.
+ * @return true on success.
+ */
+static bool menu_poom_pcap_build_22000_path_(char *out, size_t out_len)
+{
+    const char *p = poom_pcap_manager_get_file_path();
+    if ((p == NULL) || (p[0] == '\0'))
+    {
+        return false;
+    }
+
+    int w = snprintf(out, out_len, "%s", p);
+    if ((w < 0) || ((size_t)w >= out_len))
+    {
+        return false;
+    }
+
+    char *dot = strrchr(out, '.');
+    if (dot == NULL)
+    {
+        return false;
+    }
+
+    const size_t prefix = (size_t)(dot - out);
+    w = snprintf(dot, out_len - prefix, ".22000");
+    return (w > 0) && ((size_t)w < (out_len - prefix));
+}
+
+/**
+ * @brief Hands control from the capture screen to the handshake cracker,
+ *        opened directly on @p path. Tears this menu down (but leaves the
+ *        resume-to-main-menu to the cracker when it exits).
+ *
+ * @param[in] path Absolute path to the .22000 file.
+ * @return void
+ */
+static void menu_poom_pcap_handoff_crack_(const char *path)
+{
+    s_menu_poom_pcap_active = false;
+
+    if (s_menu_poom_pcap_buttons_subscribed)
+    {
+        (void)poom_sbus_unsubscribe_cb("input/button", menu_poom_pcap_button_cb_, s_menu_poom_pcap_sbus_user);
+        s_menu_poom_pcap_buttons_subscribed = false;
+    }
+
+    /* We are running in the UI task; it self-deletes once the loop breaks. */
+    s_menu_poom_pcap_task = NULL;
+
+    menu_handshake_crack_show_file(path);
+}
+
+/**
  * @brief Handles button events for this menu module.
  *
  * @param[in] msg Parameter passed to the helper.
@@ -698,6 +810,19 @@ static void menu_poom_pcap_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx
             menu_poom_pcap_stop_capture_();
             s_menu_poom_pcap_screen = MENU_POOM_PCAP_SCREEN_SELECT;
             menu_poom_pcap_request_render_from_input_();
+        }
+        else if (button_msg.button == BUTTON_A)
+        {
+            /* Manual post-capture crack: only when a handshake/PMKID is in
+             * hand. The task loop does the stop + handoff so the .22000 is
+             * finalized first. */
+            if (menu_poom_pcap_handshake_crackable_() &&
+                menu_poom_pcap_build_22000_path_(s_menu_poom_pcap_crack_path,
+                                                 sizeof(s_menu_poom_pcap_crack_path)))
+            {
+                s_menu_poom_pcap_crack_requested = true;
+                menu_poom_pcap_request_render_from_input_();
+            }
         }
         return;
     }
