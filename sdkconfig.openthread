@@ -22,3 +22,6 @@ CONFIG_OPENTHREAD_CLI=y
 # Keep Zigbee out of this profile
 # -------------------------
 # CONFIG_ZB_ENABLED is not set
+
+# OT message pool: default (1024) assumes PSRAM; 64 fits internal SRAM.
+CONFIG_OPENTHREAD_NUM_MESSAGE_BUFFERS=64

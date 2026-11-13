@@ -109,9 +109,7 @@ if(CONFIG_OPENTHREAD_ENABLED AND CONFIG_OPENTHREAD_CLI)
         vfs
     )
 
-    idf_component_get_property(OPENTHREAD_INCLUDE_DIRS openthread INCLUDE_DIRS)
     list(APPEND POOM_APP_PACK_PRIV_INCLUDE_DIRS
-        ${OPENTHREAD_INCLUDE_DIRS}
         "${IDF_PATH}/components/openthread/include"
         "${IDF_PATH}/components/openthread/openthread/include"
         "${IDF_PATH}/components/esp_driver_gpio/include"

@@ -16,6 +16,7 @@
 #include "cli_config.h"
 #include "cli_drone.h"
 #include "cli_nfc.h"
+#include "cli_154recon.h"
 #include "poom_nfc_controller.h"
 #include "poom_sbus.h"
 
@@ -73,6 +74,7 @@ static void menu_cli_nfc_register_all_cmds_(void)
     cli_poom_nfc_register_cmds();
     cli_poom_config_register_cmds();
     cli_poom_drone_register_cmds();
+    cli_poom_154recon_register_cmds();
 }
 
 /**

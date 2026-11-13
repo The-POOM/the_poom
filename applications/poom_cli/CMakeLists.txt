@@ -4,6 +4,7 @@ set(srcs
     "src/cli_apps.c"
     "src/cli_config.c"
     "src/cli_drone.c"
+    "src/cli_154recon.c"
 )
 
 set(cli_requires
@@ -11,6 +12,7 @@ set(cli_requires
     poom_sbus
     console
     esp_netif
+    esp_timer
     ir
     nvs_flash
     poom_nfc
@@ -33,6 +35,7 @@ set(cli_requires
     poom_wifi_scanner
     poom_sniffer_device
     poom_wifi_spam
+    poom_154_recon
 )
 
 if(CONFIG_ZB_ENABLED)
