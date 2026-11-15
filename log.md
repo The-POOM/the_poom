@@ -1,4 +1,4 @@
-## POOM 1.0.16
+## POOM 1.0.17
 
 ### 802.15.4 SNIFFER
 - Improved **802.15.4 SNIFFER** in `THE BEAST > SNIFFER RT > 802.15.4`, providing enhanced real-time packet capture and Wireshark integration.
