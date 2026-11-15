@@ -1,4 +1,4 @@
-## POOM 1.0.17
+## POOM 1.0.16
 
 ### 802.15.4 SNIFFER
 - Improved **802.15.4 SNIFFER** in `THE BEAST > SNIFFER RT > 802.15.4`, providing enhanced real-time packet capture and Wireshark integration.
@@ -10,7 +10,7 @@
 - Added **Packet Drop Monitoring** to track dropped frames when the capture queue is full.
 - Added **Queue Usage Statistics** to monitor peak queue occupancy.
 - Updated the **COBS transport protocol to version 2** for IEEE 802.15.4 captures.
-- Added **IEEE 802.15.4 TAP** support in the Wireshark bridge, including channel, RSSI, LQI and regenerated FCS for improved Zigbee, Thread and Matter over Thread analysis.
+- Updated [**poom-wireshark-bridge**](https://github.com/The-POOM/poom-wireshark-bridge) to support COBS v2 and **IEEE 802.15.4 TAP**, preserving channel, RSSI and LQI metadata while regenerating the FCS for improved Zigbee, Thread and Matter over Thread analysis in Wireshark.
 - Improved the real-time OLED interface to display:
   - **CH:** Active IEEE 802.15.4 channel.
   - **P:** Captured packet count.
