@@ -29,6 +29,8 @@ typedef struct
     uint8_t len;
     uint8_t channel;
     int8_t rssi;
+    uint8_t lqi;
+    uint64_t timestamp_us;
     uint8_t data[POOM_IEEE802154_SNIFFER_MAX_FRAME_LEN];
 } poom_ieee802154_sniffer_item_t;
 
@@ -38,7 +40,10 @@ static volatile bool s_ieee802154_sniffer_active = false;
 static bool s_ieee802154_sniffer_uart_forward_enabled = false;
 static uint8_t s_ieee802154_sniffer_channel = 0U;
 static int8_t s_ieee802154_sniffer_recent_rssi = -127;
+static uint8_t s_ieee802154_sniffer_recent_lqi = 0U;
 static uint32_t s_ieee802154_sniffer_packet_count = 0U;
+static volatile uint32_t s_ieee802154_sniffer_drop_count = 0U;
+static volatile uint32_t s_ieee802154_sniffer_queue_high_water = 0U;
 
 /**
  * @brief Runs the internal task for this module.
@@ -66,6 +71,7 @@ static void poom_ieee802154_sniffer_task_(void *arg)
         }
 
         s_ieee802154_sniffer_recent_rssi = item.rssi;
+        s_ieee802154_sniffer_recent_lqi = item.lqi;
         s_ieee802154_sniffer_packet_count++;
 
         if (s_ieee802154_sniffer_uart_forward_enabled)
@@ -75,7 +81,9 @@ static void poom_ieee802154_sniffer_task_(void *arg)
                 item.data,
                 item.len,
                 item.channel,
-                item.rssi);
+                item.rssi,
+                item.lqi,
+                item.timestamp_us);
         }
     }
 
@@ -98,7 +106,6 @@ static void poom_ieee802154_sniffer_isr_consumer_(
     BaseType_t *woken,
     void *user)
 {
-    (void)frame_info;
     (void)user;
 
     if ((frame == NULL) || !s_ieee802154_sniffer_active || (s_ieee802154_sniffer_q == NULL) || (woken == NULL))
@@ -127,14 +134,28 @@ static void poom_ieee802154_sniffer_isr_consumer_(
     }
 
     item.len = payload_len;
-    item.channel = s_ieee802154_sniffer_channel;
+    item.channel = (frame_info != NULL) ? frame_info->channel : s_ieee802154_sniffer_channel;
+    item.rssi = (frame_info != NULL) ? frame_info->rssi : item.rssi;
+    item.lqi = (frame_info != NULL) ? frame_info->lqi : 0U;
+    item.timestamp_us = (frame_info != NULL) ? frame_info->timestamp : 0U;
 
     if (payload_len > 0U)
     {
         memcpy(item.data, frame + 1, payload_len);
     }
 
-    (void)xQueueSendFromISR(s_ieee802154_sniffer_q, &item, woken);
+    if(xQueueSendFromISR(s_ieee802154_sniffer_q, &item, woken) != pdTRUE)
+    {
+        s_ieee802154_sniffer_drop_count++;
+    }
+    else
+    {
+        const UBaseType_t used = uxQueueMessagesWaitingFromISR(s_ieee802154_sniffer_q);
+        if(used > s_ieee802154_sniffer_queue_high_water)
+        {
+            s_ieee802154_sniffer_queue_high_water = used;
+        }
+    }
 }
 
 void poom_ieee802154_sniffer_set_uart_forward_enabled(bool enabled)
@@ -169,7 +190,10 @@ esp_err_t poom_ieee802154_sniffer_start(uint8_t channel)
 
     s_ieee802154_sniffer_channel = channel;
     s_ieee802154_sniffer_recent_rssi = -127;
+    s_ieee802154_sniffer_recent_lqi = 0U;
     s_ieee802154_sniffer_packet_count = 0U;
+    s_ieee802154_sniffer_drop_count = 0U;
+    s_ieee802154_sniffer_queue_high_water = 0U;
 
     ret = esp_ieee802154_enable();
     if (ret != ESP_OK)
@@ -272,9 +296,24 @@ int8_t poom_ieee802154_sniffer_get_recent_rssi(void)
     return s_ieee802154_sniffer_recent_rssi;
 }
 
+uint8_t poom_ieee802154_sniffer_get_recent_lqi(void)
+{
+    return s_ieee802154_sniffer_recent_lqi;
+}
+
 uint32_t poom_ieee802154_sniffer_get_packet_count(void)
 {
     return s_ieee802154_sniffer_packet_count;
+}
+
+uint32_t poom_ieee802154_sniffer_get_drop_count(void)
+{
+    return s_ieee802154_sniffer_drop_count;
+}
+
+uint32_t poom_ieee802154_sniffer_get_queue_high_water(void)
+{
+    return s_ieee802154_sniffer_queue_high_water;
 }
 
 #else
@@ -310,7 +349,22 @@ int8_t poom_ieee802154_sniffer_get_recent_rssi(void)
     return -127;
 }
 
+uint8_t poom_ieee802154_sniffer_get_recent_lqi(void)
+{
+    return 0U;
+}
+
 uint32_t poom_ieee802154_sniffer_get_packet_count(void)
+{
+    return 0U;
+}
+
+uint32_t poom_ieee802154_sniffer_get_drop_count(void)
+{
+    return 0U;
+}
+
+uint32_t poom_ieee802154_sniffer_get_queue_high_water(void)
 {
     return 0U;
 }

@@ -53,6 +53,8 @@ void poom_uart_sniffer_send_packet_ble(poom_uart_sniffer_packet_type_t type, esp
  * @param[in] len Payload length in bytes.
  * @param[in] channel Real capture channel (11..26).
  * @param[in] rssi Packet RSSI in dBm.
+ * @param[in] lqi Packet link-quality indicator.
+ * @param[in] timestamp_us Radio SFD timestamp in microseconds.
  * @return void
  */
 void poom_uart_sniffer_send_packet_ieee802154(
@@ -60,7 +62,9 @@ void poom_uart_sniffer_send_packet_ieee802154(
     const uint8_t *packet,
     uint8_t len,
     uint8_t channel,
-    int8_t rssi);
+    int8_t rssi,
+    uint8_t lqi,
+    uint64_t timestamp_us);
 
 /**
  * @brief Deinitializes the UART sniffer module state.

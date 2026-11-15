@@ -81,7 +81,9 @@ void poom_uart_sniffer_send_packet_ieee802154(
     const uint8_t *packet,
     uint8_t len,
     uint8_t channel,
-    int8_t rssi)
+    int8_t rssi,
+    uint8_t lqi,
+    uint64_t timestamp_us)
 {
     (void)type;
 
@@ -95,5 +97,7 @@ void poom_uart_sniffer_send_packet_ieee802154(
         packet,
         len,
         channel,
-        rssi);
+        rssi,
+        lqi,
+        timestamp_us);
 }
