@@ -10,27 +10,18 @@ Do not update dependency versions as part of this feature.
 
 ## Memory profile
 
-The optional root `sdkconfig.wardrive_release` preserves the memory settings
-verified from published POOM 1.0.16 machine code and validated on hardware:
+Use upstream's existing `sdkconfig.esp32c5.ram_optimization` together with
+`sdkconfig.defaults`. Wardrive does not add or maintain another profile.
+The upstream profile enables PSRAM malloc, a 512-byte internal-allocation
+threshold, a 32 KiB internal reserve, Wi-Fi/LWIP external allocation, external
+BSS and external mbedTLS allocation. TLS certificate verification is unchanged.
 
-- PSRAM quad, 80 MHz, available to malloc.
-- Internal-allocation threshold 512 bytes; internal reserve 32768 bytes.
-- Wi-Fi/LWIP allocations prefer PSRAM, static TX 16 and cache TX 32.
-- Static RX 10, dynamic RX 32 and RX BA window 6.
-- **External BSS enabled.** This moves eligible Wi-Fi, Bluetooth and LWIP
-  zero-initialized data into PSRAM, recovering about 33 KiB internally.
-
-Caps-only PSRAM left this data internally. Pure stock source then failed BLE
-startup after Device Inspector's Wi-Fi phase; the same failure occurred without
-Wardrive. With the verified profile, stock and Wardrive builds passed the
-owner's app-transition tests without modifying Device Inspector. Loaded image
-segment sizes alone miss BSS and cannot establish runtime memory equivalence.
-
-The profile is opt-in; it does not replace upstream `sdkconfig.defaults`,
-change Wi-Fi IRAM options, weaken TLS or change partitions. It reconstructs
-identified memory settings, not every unknown release configuration option.
-The separate `sdkconfig.esp32c5.ram_optimization` profile changes more settings
-and is not the acceptance configuration for this feature.
+On the pinned release SDK, fresh generation selects static Wi-Fi RX 16 and RX
+BA window 16. Those differ from the earlier hardware-tested custom profile's
+10/6; mbedTLS also now allocates externally. Earlier hardware acceptance is
+historical evidence, not proof of the revised configuration. Repeat the app
+transition, GPS/recording and transfer smoke tests after this change.
+Do not modify the shared profile or disable Wi-Fi IRAM options for this app.
 
 ## Fresh build
 
@@ -40,7 +31,7 @@ reliably override an existing generated configuration.
 ```sh
 idf.py -B build-wardrive-release -D IDF_TARGET=esp32c5 \
   -D SDKCONFIG=build-wardrive-release/sdkconfig \
-  '-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.wardrive_release' build size
+  '-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.esp32c5.ram_optimization' build size
 idf.py -B build-wardrive-release -p YOUR_PORT flash
 idf.py -B build-wardrive-release -p YOUR_PORT monitor --no-reset
 ```
@@ -49,7 +40,7 @@ PowerShell (after exporting the pinned SDK):
 
 ```powershell
 $buildDir = "build-wardrive-release"
-python "$env:IDF_PATH/tools/idf.py" -B $buildDir -D IDF_TARGET=esp32c5 "-DSDKCONFIG=$buildDir/sdkconfig" "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.wardrive_release" build size
+python "$env:IDF_PATH/tools/idf.py" -B $buildDir -D IDF_TARGET=esp32c5 "-DSDKCONFIG=$buildDir/sdkconfig" "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.esp32c5.ram_optimization" build size
 python "$env:IDF_PATH/tools/idf.py" -B $buildDir -p COM5 flash
 python "$env:IDF_PATH/tools/idf.py" -B $buildDir -p COM5 monitor --no-reset
 ```
@@ -64,13 +55,13 @@ Verbose tracing is available through menuconfig → Wardrive → Verbose Wardriv
 serial diagnostics. It defaults off. User-selected raw GPS output remains
 available separately. No global allocation-failure callback is installed.
 
-## Host checks
+## Optional developer checks
 
-With a C compiler, Python 3 and a local cJSON source checkout:
+Host stubs and regression harnesses are maintained on the separate
+`validation/wardrive-pr50` branch of the contributor fork. They are not part
+of the application PR and are not firmware dependencies. That branch retains
+matching source and the harness; its instructions are for optional development
+validation. It uses synthetic data and offline HTTP/TLS mocks only.
 
-```sh
-ASAN_OPTIONS=detect_leaks=0 CJSON_DIR=/path/to/cJSON sh tools/wardrive_hostcheck/check.sh
-```
-
-The suite uses synthetic observations and offline HTTP/TLS mocks. It does not
-contact WiGLE or need account credentials. See [validation](WARDRIVE_VALIDATION.md).
+The application PR needs only the standard ESP-IDF build above. See
+[validation](WARDRIVE_VALIDATION.md) for build and hardware-test limits.

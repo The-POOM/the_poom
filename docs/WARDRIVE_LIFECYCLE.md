@@ -128,13 +128,9 @@ HTTP/TLS mocks only.
 
 ## Validation
 
-`ASAN_OPTIONS=detect_leaks=0 CJSON_DIR=/path/to/cJSON sh tools/wardrive_hostcheck/check.sh`
-includes the production UI and private Wi-Fi/BLE adapters. Lifecycle tests
-exercise pre-existing owners, partial initialisation failures, failed teardown
-and retry, asynchronous scan failure/timeout, late callbacks and restart.
-`test_isolation_contract.py` guards stock boot/config/partition/radio files.
-
-ESP32-C5 compilation is checked against IDF commit
-`95b6f32350e1118181d1a1c375972cbcd85a6540`. The owner reported successful Wi-Fi/BLE/GPS collection, pause/resume, repeated
-entry/exit, CSV export and local Wi-Fi download, with stock BLE Detect and Fox
-Hunt still working afterwards. The owner also reported a working clock, dated session saves and successful WiGLE submission. No real WiGLE upload was performed by the agent.
+Optional host checks live on the separate `validation/wardrive-pr50` branch;
+no host stubs or test harnesses are required by the application build.
+The application uses upstream's existing memory optimization profile.
+See [build instructions](WARDRIVE_BUILD.md) and
+[validation history](WARDRIVE_VALIDATION.md). The profile switch requires a
+fresh hardware smoke test; earlier owner acceptance used a different profile.

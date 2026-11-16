@@ -102,3 +102,27 @@ across visible-row boundaries, correct selection after opening/backing out of
 sessions, and working BLE Detect after exiting Wardrive. This accepts the
 scrolling fix; earlier full recording/GPS/export acceptance is recorded above.
 Only acceptance documentation changed after this hardware test.
+
+## Maintainer scope revision (hardware check pending)
+
+The application now uses upstream `sdkconfig.esp32c5.ram_optimization`; the
+app-specific profile is removed. Optional host test modules and FreeRTOS/SDK
+stubs are kept on `validation/wardrive-pr50`, not in this PR. No test stub or
+host compiler is a firmware dependency.
+
+Shared changes remain limited to build/menu registration and an additive I²C
+stream helper. The helper performs receiver-style reads without a register
+write, using a temporary device handle when required; existing I²C APIs and
+callers are unchanged. No Wi-Fi/BLE, SD, boot or partition changes are included.
+
+Fresh generation on the pinned SDK changes Wi-Fi RX/BA from 10/6 to 16/16
+and moves mbedTLS allocation to PSRAM. External BSS, the malloc threshold and
+internal reserve remain enabled. Earlier hardware tests do not certify this
+new configuration. Repeat recording, GPS/time, CSV/local download, cancellation
+and app transitions before merge. Keep TLS verification enabled; no live WiGLE
+upload is needed for that smoke test.
+
+Maintainer-review build check: full ESP32-C5 build on the pinned release SDK
+with the unmodified upstream RAM profile passed. Image 0x37fd50 retains 3% app-slot headroom.
+The optional Wardrive host suite passed (1240 UI frames, ASan/UBSan).
+Hardware acceptance of this revised profile remains pending.

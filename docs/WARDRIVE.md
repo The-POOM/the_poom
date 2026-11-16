@@ -72,10 +72,8 @@ on recording completion. See [WiGLE setup and queue behavior](WARDRIVE_WIGLE.md)
 
 ## Build and validation
 
-Use the [release-compatible build instructions](WARDRIVE_BUILD.md). The
-verified memory profile includes external BSS in PSRAM; simply enabling PSRAM
-is insufficient to reproduce the stock release's radio memory behavior.
-The profile is opt-in and upstream defaults, boot code and partitions are
-unchanged. [Lifecycle and ownership](WARDRIVE_LIFECYCLE.md) describes teardown,
+Use the [release-compatible build instructions](WARDRIVE_BUILD.md). Use upstream's existing memory optimization profile, including external BSS
+in PSRAM. No app-specific profile is introduced. Upstream defaults, boot code
+and partitions are unchanged. [Lifecycle and ownership](WARDRIVE_LIFECYCLE.md) describes teardown,
 clock handling and limits. [Validation](WARDRIVE_VALIDATION.md) distinguishes
 host checks, firmware builds and owner-reported hardware results.
