@@ -70,6 +70,7 @@
 #include "menu_spectrum.h"
 #include "menu_device_inspector.h"
 #include "menu_wifi_guard.h"
+#include "menu_wifi_csi.h"
 #include "menu_wifi_action.h"
 #include "menu_findmy_beep.h"
 #include "menu_wardrive_node.h"
@@ -1059,6 +1060,22 @@ static void action_wifi_guard_(void)
     menu_wifi_guard_show();
 }
 
+static void action_wifi_recon_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_recon_show();
+}
+
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_ESP_WIFI_CSI_ENABLED
+static void action_wifi_csi_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_csi_show();
+}
+#endif
+
 /** Opens the ESP-NOW wardriving node for a Biscuit or JCMK core. */
 static void action_wardrive_node_(void)
 {
@@ -1203,6 +1220,10 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SPECTRUM", action_spectrum_},
     {"DEVICE INSPECTOR", action_device_inspector_},
     {"WIFI GUARD", action_wifi_guard_},
+    {"WIFI RECON", action_wifi_recon_},
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_ESP_WIFI_CSI_ENABLED
+    {"CSI RF MOTION", action_wifi_csi_},
+#endif
     {"WARDRIVING NODE", action_wardrive_node_},
     {"SCAN NET", action_arp_},
 

@@ -135,6 +135,8 @@ set(MODULES
     poom_ble_tracker
     poom_ble_detector
     poom_wifi_detector
+    poom_wifi_observer
+    poom_wifi_csi
     poom_drone
     poom_edge_impulse
     poom_http_load_test
@@ -181,6 +183,8 @@ set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_uart_sniffer
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_attacks
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_ctrl
+    ${CMAKE_SOURCE_DIR}/modules/poom_wifi_observer
+    ${CMAKE_SOURCE_DIR}/modules/poom_wifi_csi
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_mac
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_scanner
     ${CMAKE_SOURCE_DIR}/modules/poom_pcap

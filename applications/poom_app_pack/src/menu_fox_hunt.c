@@ -242,6 +242,7 @@ static fox_screen_t s_hunt_return = SCR_MAIN;
 static bool s_start_in_hunt;           /* launched straight into the hunt screen */
 static bool s_return_to_detector;      /* launched from WIFI DETECT: B goes back there */
 static bool s_return_to_ble_detector;  /* launched from BLE DETECT */
+static bool s_return_to_menu;          /* direct AP target from passive observer */
 
 /* Client discovery (AP -> clients) uses the session buffers above. */
 static bool s_monitor_on;
@@ -1397,7 +1398,7 @@ static void fox_task_(void *arg)
                     (void)ws2812_show(&s_strip);
                     s_led_level = -2;
                 }
-                if (s_return_to_detector || s_return_to_ble_detector)
+                if (s_return_to_detector || s_return_to_ble_detector || s_return_to_menu)
                 {
                     /* Launched from a detector: exit and hand control back to
                      * the detector at that AP's client list (teardown does it). */
@@ -1692,6 +1693,7 @@ static void fox_reset_state_(void)
     s_start_in_hunt = false;
     s_return_to_detector = false;
     s_return_to_ble_detector = false;
+    s_return_to_menu = false;
     s_hunt_return = SCR_MAIN;
     s_cli_cache_count = 0;
     fox_rssi_reset_();
@@ -1733,6 +1735,29 @@ void app_fox_hunt(void)
         return;
     }
     fox_reset_state_();
+    fox_launch_task_();
+}
+
+void app_fox_hunt_wifi_ap(const uint8_t bssid[6], uint8_t channel, const char *name)
+{
+    if(s_active || !bssid || !poom_wifi_ctrl_channel_is_valid(channel)) return;
+    fox_preferences_load_();
+    if(!fox_alloc_session_())
+    {
+        const uint8_t token=1U;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC,&token,sizeof(token),0);
+        return;
+    }
+    fox_reset_state_();
+    s_target_wifi=true;
+    s_target_client=false;
+    s_target_channel=channel;
+    memcpy(s_target_addr,bssid,6U);
+    memcpy(s_target_ap_bssid,bssid,6U);
+    snprintf(s_target_name,sizeof(s_target_name),"%.19s",name && name[0]?name:"HIDDEN AP");
+    s_start_in_hunt=true;
+    s_return_to_menu=true;
+    s_hunt_return=SCR_MAIN;
     fox_launch_task_();
 }
 

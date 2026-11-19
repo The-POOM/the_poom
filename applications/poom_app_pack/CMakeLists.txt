@@ -12,7 +12,7 @@ list(APPEND POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/menu_tv_off.c"
     "${COMPONENT_DIR}/src/menu_spectrum.c"
     "${COMPONENT_DIR}/src/menu_device_inspector.c"
-    "${COMPONENT_DIR}/src/menu_wifi_guard.c"
+    "${COMPONENT_DIR}/src/menu_wifi_observer.c"
     "${COMPONENT_DIR}/src/menu_wardrive_node.c"
 )
 
@@ -82,6 +82,8 @@ set(POOM_APP_PACK_REQUIRES
     poom_wifi_arp
     poom_wifi_captive
     poom_wifi_ctrl
+    poom_wifi_observer
+    poom_wifi_csi
     poom_wifi_deauth
     poom_wifi_deauth_detector
     poom_wifi_detector
