@@ -23,7 +23,7 @@
 #include "poom_wifi_marauder.h"
 #include "poom_wifi_scanner.h"
 
-#define ACTION_CLIENTS 16U
+#define ACTION_CLIENTS POOM_MARAUDER_MAX_CLIENTS
 #define ACTION_TICK_MS 100U
 #define ACTION_RESUME_TOPIC "poom/menu/resume"
 
@@ -31,8 +31,10 @@ enum { ACTION_A = 0, ACTION_B = 1, ACTION_LEFT = 2, ACTION_RIGHT = 3,
        ACTION_UP = 4, ACTION_DOWN = 5 };
 
 typedef enum {
-    VIEW_SCAN, VIEW_APS, VIEW_CLIENTS, VIEW_READY, VIEW_RUNNING, VIEW_RESULT, VIEW_ERROR
+    VIEW_SCAN, VIEW_APS, VIEW_SCOPE, VIEW_CLIENTS, VIEW_READY, VIEW_RUNNING, VIEW_RESULT, VIEW_ERROR
 } action_view_t;
+
+typedef enum { CLIENT_SCOPE_ALL, CLIENT_SCOPE_CHOOSE } client_scope_t;
 
 typedef struct {
     bool scan_done;
@@ -49,8 +51,10 @@ typedef struct {
     uint16_t selected_ap;
     poom_wifi_detector_record_t clients[ACTION_CLIENTS];
     poom_wifi_detector_record_t *client_ptrs[ACTION_CLIENTS];
+    bool client_observed[ACTION_CLIENTS];
     size_t client_count;
     size_t selected_client;
+    client_scope_t client_scope;
     poom_marauder_config_t config;
     poom_marauder_status_t status;
     esp_err_t error;
@@ -71,12 +75,10 @@ static bool s_stop_action;
 static const char s_input_user[] = "menu_wifi_action";
 
 static const char *const s_titles[] = {
-    "BAD MSG", "BAD MSG TARGETED", "ASSOC SLEEP", "ASSOC SLEEP TARGETED",
-    "QUIET TIME", "CHANNEL SWITCH", "SAE COMMIT FLOOD",
+    "BAD MSG", "ASSOC SLEEP", "QUIET TIME", "CHANNEL SWITCH", "SAE COMMIT FLOOD",
 };
 static const poom_marauder_mode_t s_modes[] = {
-    POOM_MARAUDER_BAD_MSG, POOM_MARAUDER_BAD_MSG,
-    POOM_MARAUDER_ASSOC_SLEEP, POOM_MARAUDER_ASSOC_SLEEP,
+    POOM_MARAUDER_BAD_MSG, POOM_MARAUDER_ASSOC_SLEEP,
     POOM_MARAUDER_QUIET, POOM_MARAUDER_CSA, POOM_MARAUDER_SAE_COMMIT,
 };
 static const uint8_t s_channels[] = {
@@ -116,10 +118,27 @@ static bool needs_clients_(const action_session_t *s)
 {
     return s->config.mode == POOM_MARAUDER_BAD_MSG || s->config.mode == POOM_MARAUDER_ASSOC_SLEEP;
 }
-static bool targeted_(const action_session_t *s)
+static int selected_client_index_(const action_session_t *s, const uint8_t mac[6])
 {
-    return s->action == POOM_WIFI_ACTION_BAD_MSG_TARGETED ||
-           s->action == POOM_WIFI_ACTION_ASSOC_SLEEP_TARGETED;
+    for(size_t i = 0U; i < s->config.client_count; ++i) {
+        if(memcmp(s->config.clients[i], mac, 6U) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static void toggle_client_(action_session_t *s)
+{
+    if(s->selected_client >= s->client_count) return;
+    const uint8_t *mac = s->clients[s->selected_client].bssid;
+    const int index = selected_client_index_(s, mac);
+    if(index >= 0) {
+        const size_t remaining = s->config.client_count - (size_t)index - 1U;
+        if(remaining) memmove(s->config.clients[index], s->config.clients[index + 1U], remaining * 6U);
+        --s->config.client_count;
+        memset(s->config.clients[s->config.client_count], 0, 6U);
+    } else if(s->config.client_count < ACTION_CLIENTS) {
+        memcpy(s->config.clients[s->config.client_count++], mac, 6U);
+    }
 }
 static bool supports_sae_(const wifi_ap_record_t *ap)
 {
@@ -174,26 +193,44 @@ static void draw_(action_session_t *s)
         }
         print_(56, "A:PICK >:SCAN B:BACK");
         break;
+    case VIEW_SCOPE:
+        ap_name_(line, sizeof(line), &s->config.ap);
+        print_(13, line);
+        print_(28, s->client_scope == CLIENT_SCOPE_ALL ? "> ALL CLIENTS" : "  ALL CLIENTS");
+        print_(40, s->client_scope == CLIENT_SCOPE_CHOOSE ? "> CHOOSE CLIENTS" : "  CHOOSE CLIENTS");
+        print_(56, "UP/DN A:PICK B:BACK");
+        break;
     case VIEW_CLIENTS:
         ap_name_(line, sizeof(line), &s->config.ap);
         print_(13, line);
-        (void)snprintf(line, sizeof(line), "%u clients / %lus", (unsigned)s->client_count,
-                       (unsigned long)((now_ms_() - s->discover_started_ms) / 1000U));
+        if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
+            (void)snprintf(line, sizeof(line), "%u clients, %u picked", (unsigned)s->client_count,
+                           (unsigned)s->config.client_count);
+        } else {
+            (void)snprintf(line, sizeof(line), "%u clients / %lus", (unsigned)s->client_count,
+                           (unsigned long)((now_ms_() - s->discover_started_ms) / 1000U));
+        }
         print_(24, line);
         if(!s->client_count) {
             print_(35, "Listening for clients");
             print_(45, "Use lab client Wi-Fi");
-        } else if(targeted_(s)) {
+        } else if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
             const uint8_t *mac = s->clients[s->selected_client].bssid;
-            (void)snprintf(line, sizeof(line), "%02X:%02X:%02X:%02X:%02X:%02X",
+            (void)snprintf(line, sizeof(line), "[%c]%02X:%02X:%02X:%02X:%02X:%02X",
+                           selected_client_index_(s, mac) >= 0 ? 'x' : ' ',
                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
             print_(35, line);
-            print_(45, "UP/DOWN: choose client");
+            (void)snprintf(line, sizeof(line), "%u/%u  %s", (unsigned)s->selected_client + 1U,
+                           (unsigned)s->client_count,
+                           s->client_observed[s->selected_client] ? "UP/DOWN: browse" : "seen earlier");
+            print_(45, line);
         } else {
             print_(35, "Selecting all clients");
             print_(45, "Only this network");
         }
-        print_(56, s->client_count ? "A:USE CLIENTS B:BACK" : "B:BACK");
+        if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
+            print_(56, s->config.client_count ? "A:MARK >:NEXT B:BACK" : "A:MARK        B:BACK");
+        } else print_(56, s->client_count ? "A:USE CLIENTS B:BACK" : "B:BACK");
         break;
     case VIEW_READY:
         ap_name_(line, sizeof(line), &s->config.ap);
@@ -308,6 +345,8 @@ static void discover_clients_(action_session_t *s)
     s->client_count = 0U;
     s->selected_client = 0U;
     s->config.client_count = 0U;
+    memset(s->config.clients, 0, sizeof(s->config.clients));
+    memset(s->client_observed, 0, sizeof(s->client_observed));
     esp_err_t err = poom_wifi_detector_monitor_start(POOM_WIFI_DETECTOR_FILTER_AP_CLIENTS,
                                                    NULL, 0U, ACTION_CLIENTS);
     s->monitoring = err == ESP_OK;
@@ -328,11 +367,13 @@ static void discover_clients_(action_session_t *s)
 
 static void use_clients_(action_session_t *s)
 {
-    s->config.client_count = targeted_(s) ? 1U : s->client_count;
-    for(size_t i = 0U; i < s->config.client_count; ++i) {
-        const size_t index = targeted_(s) ? s->selected_client : i;
-        memcpy(s->config.clients[i], s->clients[index].bssid, 6U);
+    if(s->client_scope == CLIENT_SCOPE_ALL) {
+        s->config.client_count = s->client_count;
+        for(size_t i = 0U; i < s->client_count; ++i) {
+            memcpy(s->config.clients[i], s->clients[i].bssid, 6U);
+        }
     }
+    if(!s->config.client_count) return;
     stop_monitor_(s);
     s->view = VIEW_READY;
 }
@@ -351,14 +392,34 @@ static void refresh_clients_(action_session_t *s)
         s->view = VIEW_ERROR;
         return;
     }
+    for(size_t i = 0U; i < count; ++i) s->client_observed[i] = true;
+    /* Selection is a set of MACs, independent of snapshot order or pruning.
+     * Keep a selected-but-unseen station browsable so it can be deselected. */
+    if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
+        for(size_t picked = 0U; picked < s->config.client_count; ++picked) {
+            size_t index = 0U;
+            while(index < count && memcmp(s->clients[index].bssid, s->config.clients[picked], 6U) != 0) ++index;
+            if(index < count) continue;
+            if(count < ACTION_CLIENTS) ++count;
+            else {
+                for(index = 0U; index < count; ++index) {
+                    if(selected_client_index_(s, s->clients[index].bssid) < 0) break;
+                }
+                if(index == count) continue;
+            }
+            memset(&s->clients[index], 0, sizeof(s->clients[index]));
+            memcpy(s->clients[index].bssid, s->config.clients[picked], 6U);
+            s->clients[index].channel = s->config.ap.primary;
+            s->client_observed[index] = false;
+        }
+    }
     s->client_count = count;
     s->selected_client = 0U;
     for(size_t i = 0U; i < count; ++i) {
         if(memcmp(selected_mac, s->clients[i].bssid, 6U) == 0) s->selected_client = i;
     }
-    /* All-client variants need no client-picker interaction. Allow a short
-     * listening window, then carry the discovered set straight to Start. */
-    if(count && !targeted_(s) && now_ms_() - s->discover_started_ms >= 3000U) use_clients_(s);
+    /* ALL CLIENTS collects briefly, then copies the set to the ready screen. */
+    if(count && s->client_scope == CLIENT_SCOPE_ALL && now_ms_() - s->discover_started_ms >= 3000U) use_clients_(s);
 }
 
 static void change_channel_(action_session_t *s, bool next)
@@ -398,11 +459,11 @@ static bool button_(action_session_t *s, uint8_t button)
             break;
         case VIEW_CLIENTS:
             stop_monitor_(s);
-            s->view = VIEW_APS;
+            s->view = VIEW_SCOPE;
             break;
+        case VIEW_SCOPE: s->view = VIEW_APS; break;
         case VIEW_READY:
-            if(needs_clients_(s)) discover_clients_(s);
-            else s->view = VIEW_APS;
+            s->view = needs_clients_(s) ? VIEW_SCOPE : VIEW_APS;
             break;
         case VIEW_RESULT: s->view = VIEW_APS; break;
         default: return false;
@@ -414,11 +475,17 @@ static bool button_(action_session_t *s, uint8_t button)
             s->config.ap = s->aps[s->selected_ap];
             s->config.csa_channel = s->config.ap.primary;
             change_channel_(s, true);
-            if(needs_clients_(s)) discover_clients_(s);
+            if(needs_clients_(s)) {
+                s->client_scope = CLIENT_SCOPE_ALL;
+                s->config.client_count = 0U;
+                s->view = VIEW_SCOPE;
+            }
             else s->view = VIEW_READY;
             break;
+        case VIEW_SCOPE: discover_clients_(s); break;
         case VIEW_CLIENTS:
-            if(s->client_count) use_clients_(s);
+            if(s->client_scope == CLIENT_SCOPE_CHOOSE) toggle_client_(s);
+            else if(s->client_count) use_clients_(s);
             break;
         case VIEW_READY:
             (void)poom_wifi_ctrl_deinit();
@@ -434,7 +501,9 @@ static bool button_(action_session_t *s, uint8_t button)
         const bool next = button == ACTION_DOWN;
         if(s->view == VIEW_APS && s->ap_count) {
             s->selected_ap = (s->selected_ap + (next ? 1U : s->ap_count - 1U)) % s->ap_count;
-        } else if(s->view == VIEW_CLIENTS && s->client_count && targeted_(s)) {
+        } else if(s->view == VIEW_SCOPE) {
+            s->client_scope = s->client_scope == CLIENT_SCOPE_ALL ? CLIENT_SCOPE_CHOOSE : CLIENT_SCOPE_ALL;
+        } else if(s->view == VIEW_CLIENTS && s->client_count && s->client_scope == CLIENT_SCOPE_CHOOSE) {
             s->selected_client = (s->selected_client + (next ? 1U : s->client_count - 1U)) % s->client_count;
         } else if(s->view == VIEW_READY) {
             const uint32_t duration = s->config.duration_ms;
@@ -443,6 +512,9 @@ static bool button_(action_session_t *s, uint8_t button)
         }
     } else if(button == ACTION_LEFT || button == ACTION_RIGHT) {
         if(s->view == VIEW_APS && button == ACTION_RIGHT) begin_scan_(s);
+        else if(s->view == VIEW_CLIENTS && s->client_scope == CLIENT_SCOPE_CHOOSE && button == ACTION_RIGHT) {
+            use_clients_(s);
+        }
         else if(s->view == VIEW_READY && s->action == POOM_WIFI_ACTION_CHANNEL_SWITCH) {
             change_channel_(s, button == ACTION_RIGHT);
         }

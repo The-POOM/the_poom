@@ -182,28 +182,58 @@ static int scripted_input(action_event_t *event)
         case 4: assert(s->view == VIEW_APS && s->ap_count == 1); event->button = ACTION_B; break;
         default: assert(false);
         }
-    } else if(test_case == 3U) { /* Target identity survives snapshot reordering. */
+    } else if(test_case == 3U) { /* Multi-selection is a MAC set, not snapshot indexes. */
+        if(step <= 12U) assert(!start_calls);
         switch(step) {
         case 0: assert(s->view == VIEW_APS); event->button = ACTION_A; break;
-        case 1: assert(s->view == VIEW_CLIENTS && s->client_count == 2); event->button = ACTION_DOWN; break;
-        case 2: { assert(s->selected_client == 1); poom_wifi_detector_record_t temp = client_fixture[0]; client_fixture[0] = client_fixture[1]; client_fixture[1] = temp; clock_ms += 4000; return pdFALSE; }
-        case 3: assert(s->selected_client == 0 && s->clients[0].bssid[5] == 31); event->button = ACTION_A; break;
-        case 4: assert(s->view == VIEW_READY && s->config.client_count == 1 && s->config.clients[0][5] == 31 && !s->monitoring); event->button = ACTION_A; break;
-        case 5: assert(last_started.client_count == 1 && last_started.clients[0][5] == 31); event->button = ACTION_B; break;
-        case 6: assert(s->view == VIEW_RESULT); event->button = ACTION_B; break;
-        case 7: event->button = ACTION_B; break;
+        case 1: assert(s->view == VIEW_SCOPE && s->client_scope == CLIENT_SCOPE_ALL && !monitor_starts); event->button = ACTION_DOWN; break;
+        case 2: assert(s->view == VIEW_SCOPE && s->client_scope == CLIENT_SCOPE_CHOOSE); event->button = ACTION_A; break;
+        case 3: assert(s->view == VIEW_CLIENTS && s->client_count == 2 && !s->config.client_count); event->button = ACTION_RIGHT; break;
+        case 4: assert(s->view == VIEW_CLIENTS && !s->config.client_count); event->button = ACTION_A; break;
+        case 5: assert(s->config.client_count == 1 && s->config.clients[0][5] == 30); event->button = ACTION_DOWN; break;
+        case 6: assert(s->selected_client == 1); event->button = ACTION_A; break;
+        case 7: {
+            assert(s->view == VIEW_CLIENTS && s->config.client_count == 2);
+            poom_wifi_detector_record_t temp = client_fixture[0];
+            client_fixture[0] = client_fixture[1]; client_fixture[1] = temp;
+            clock_ms += 4000; return pdFALSE;
+        }
+        case 8: assert(s->view == VIEW_CLIENTS && s->selected_client == 0 && s->clients[0].bssid[5] == 31 && s->config.client_count == 2); event->button = ACTION_A; break;
+        case 9: assert(s->config.client_count == 1 && s->config.clients[0][5] == 30); event->button = ACTION_A; break;
+        case 10:
+            assert(s->config.client_count == 2 && s->config.clients[1][5] == 31);
+            client_fixture[1].bssid[5] = 32; clock_ms += 600; return pdFALSE;
+        case 11:
+            assert(s->view == VIEW_CLIENTS && s->client_count == 3 && s->selected_client == 0);
+            assert(s->clients[2].bssid[5] == 30 && !s->client_observed[2]);
+            assert(s->config.client_count == 2 && s->config.clients[0][5] == 30 && s->config.clients[1][5] == 31);
+            event->button = ACTION_RIGHT; break;
+        case 12: assert(s->view == VIEW_READY && s->config.client_count == 2 && !s->monitoring); event->button = ACTION_A; break;
+        case 13: assert(s->view == VIEW_RUNNING && last_started.client_count == 2 && last_started.clients[0][5] == 30 && last_started.clients[1][5] == 31); event->button = ACTION_B; break;
+        case 14: assert(s->view == VIEW_RESULT); event->button = ACTION_B; break;
+        case 15: assert(s->view == VIEW_APS); event->button = ACTION_B; break;
         default: assert(false);
         }
-    } else if(test_case == 4U) { /* Whole observed set; back returns to discovery. */
+    } else if(test_case == 4U) { /* Scope/back flow and fresh-discovery selection reset. */
+        assert(!start_calls);
         switch(step) {
         case 0: event->button = ACTION_A; break;
-        case 1: assert(s->view == VIEW_CLIENTS && s->client_count == 2); event->button = ACTION_A; break;
-        case 2: assert(s->view == VIEW_READY && s->config.client_count == 2); event->button = ACTION_B; break;
-        case 3: assert(s->view == VIEW_CLIENTS && s->config.client_count == 0); event->button = ACTION_A; break;
-        case 4: assert(s->view == VIEW_READY && s->config.client_count == 2); event->button = ACTION_A; break;
-        case 5: assert(s->view == VIEW_RUNNING && last_started.client_count == 2); event->button = ACTION_B; break;
-        case 6: event->button = ACTION_B; break;
-        case 7: event->button = ACTION_B; break;
+        case 1: assert(s->view == VIEW_SCOPE && !s->monitoring); event->button = ACTION_B; break;
+        case 2: assert(s->view == VIEW_APS); event->button = ACTION_A; break;
+        case 3: assert(s->view == VIEW_SCOPE); event->button = ACTION_DOWN; break;
+        case 4: assert(s->client_scope == CLIENT_SCOPE_CHOOSE); event->button = ACTION_A; break;
+        case 5: assert(s->view == VIEW_CLIENTS && !s->config.client_count); event->button = ACTION_A; break;
+        case 6: assert(s->config.client_count == 1); event->button = ACTION_B; break;
+        case 7: assert(s->view == VIEW_SCOPE && !s->monitoring); event->button = ACTION_A; break;
+        case 8: assert(s->view == VIEW_CLIENTS && !s->config.client_count); event->button = ACTION_A; break;
+        case 9: assert(s->config.client_count == 1); event->button = ACTION_RIGHT; break;
+        case 10: assert(s->view == VIEW_READY && !s->monitoring); event->button = ACTION_B; break;
+        case 11: assert(s->view == VIEW_SCOPE && s->client_scope == CLIENT_SCOPE_CHOOSE); event->button = ACTION_UP; break;
+        case 12: assert(s->client_scope == CLIENT_SCOPE_ALL); event->button = ACTION_A; break;
+        case 13: assert(s->view == VIEW_CLIENTS && !s->config.client_count); event->button = ACTION_A; break;
+        case 14: assert(s->view == VIEW_READY && s->config.client_count == 2); event->button = ACTION_B; break;
+        case 15: assert(s->view == VIEW_SCOPE); event->button = ACTION_B; break;
+        case 16: assert(s->view == VIEW_APS); event->button = ACTION_B; break;
         default: assert(false);
         }
     } else if(test_case == 5U) { /* B before scan worker starts. */
@@ -214,16 +244,17 @@ static int scripted_input(action_event_t *event)
     } else if(test_case == 7U) { /* Scan task allocation failure. */
         assert(step == 0 && s->view == VIEW_ERROR && s->error == ESP_ERR_NO_MEM); event->button = ACTION_B;
     } else if(test_case == 8U) { /* Client snapshot failure stops monitoring. */
-        if(step == 0) { event->button = ACTION_A; }
-        else { assert(step == 1 && s->view == VIEW_ERROR && !s->monitoring); event->button = ACTION_B; }
+        if(step <= 1) { event->button = ACTION_A; }
+        else { assert(step == 2 && s->view == VIEW_ERROR && !s->monitoring); event->button = ACTION_B; }
     } else if(test_case == 12U) { /* Automatic all-client selection after 3s. */
         switch(step) {
         case 0: event->button = ACTION_A; break;
-        case 1: assert(s->view == VIEW_CLIENTS && !s->client_count); clock_ms += 3500; return pdFALSE;
-        case 2: assert(s->view == VIEW_CLIENTS && !s->config.client_count); fixture_clients = 2; clock_ms += 600; return pdFALSE;
-        case 3: assert(s->view == VIEW_READY && s->config.client_count == 2 && !s->monitoring && !start_calls); event->button = ACTION_B; break;
-        case 4: assert(s->view == VIEW_CLIENTS); event->button = ACTION_B; break;
-        case 5: assert(s->view == VIEW_APS); event->button = ACTION_B; break;
+        case 1: assert(s->view == VIEW_SCOPE); event->button = ACTION_A; break;
+        case 2: assert(s->view == VIEW_CLIENTS && !s->client_count); clock_ms += 3500; return pdFALSE;
+        case 3: assert(s->view == VIEW_CLIENTS && !s->config.client_count); fixture_clients = 2; clock_ms += 600; return pdFALSE;
+        case 4: assert(s->view == VIEW_READY && s->config.client_count == 2 && !s->monitoring && !start_calls); event->button = ACTION_B; break;
+        case 5: assert(s->view == VIEW_SCOPE); event->button = ACTION_B; break;
+        case 6: assert(s->view == VIEW_APS); event->button = ACTION_B; break;
         default: assert(false);
         }
     } else if(test_case == 13U) { /* CSA remains in the selected AP's band. */
@@ -240,11 +271,70 @@ static int scripted_input(action_event_t *event)
     } else if(test_case == 14U) {
         switch(step) {
         case 0: event->button = ACTION_A; break;
-        case 1: assert(s->view == VIEW_ERROR && s->error == ESP_FAIL && !s->monitoring && !start_calls); event->button = ACTION_B; break;
+        case 1: assert(s->view == VIEW_SCOPE); event->button = ACTION_A; break;
+        case 2: assert(s->view == VIEW_ERROR && s->error == ESP_FAIL && !s->monitoring && !start_calls); event->button = ACTION_B; break;
+        default: assert(false);
+        }
+    } else if(test_case == 15U) { /* CLI cancellation also releases discovery. */
+        switch(step) {
+        case 0: event->button = ACTION_A; break;
+        case 1: assert(s->view == VIEW_SCOPE); event->button = ACTION_A; break;
+        case 2: assert(s->view == VIEW_CLIENTS && s->monitoring && !start_calls); s_stop_action = true; return pdFALSE;
         default: assert(false);
         }
     } else assert(false);
     return pdTRUE;
+}
+
+static void test_selection_capacity(void)
+{
+    /* Detector churn at its capacity must preserve every chosen MAC. A
+     * selected station absent from the new snapshot remains deselectable. */
+    action_session_t s = {0};
+    s.client_scope = CLIENT_SCOPE_CHOOSE;
+    s.config.ap.primary = 6;
+    s.config.client_count = ACTION_CLIENTS;
+    fixture_clients = ACTION_CLIENTS;
+    for(size_t i = 0U; i < ACTION_CLIENTS; ++i) {
+        s.client_ptrs[i] = &s.clients[i];
+        s.config.clients[i][0] = client_fixture[i].bssid[0] = 2;
+        s.config.clients[i][5] = (uint8_t)(40U + i);
+        client_fixture[i].bssid[5] = (uint8_t)(80U + i);
+    }
+    clock_ms += 600;
+    refresh_clients_(&s);
+    assert(s.client_count == ACTION_CLIENTS && s.config.client_count == ACTION_CLIENTS);
+    for(size_t i = 0U; i < ACTION_CLIENTS; ++i) {
+        assert(s.clients[i].bssid[5] == 40U + i && !s.client_observed[i]);
+    }
+    s.selected_client = ACTION_CLIENTS - 1U;
+    toggle_client_(&s);
+    assert(s.config.client_count == ACTION_CLIENTS - 1U);
+    assert(selected_client_index_(&s, s.clients[s.selected_client].bssid) == -1);
+    toggle_client_(&s);
+    assert(s.config.client_count == ACTION_CLIENTS);
+    s.selected_client = 3U;
+    toggle_client_(&s);
+    assert(s.config.client_count == ACTION_CLIENTS - 1U && s.config.clients[3][5] == 44U);
+    clock_ms += 600;
+    refresh_clients_(&s);
+    assert(s.client_count == ACTION_CLIENTS && s.config.client_count == ACTION_CLIENTS - 1U);
+    for(size_t i = 0U; i < s.config.client_count; ++i) {
+        bool found = false;
+        for(size_t j = 0U; j < s.client_count; ++j) {
+            if(memcmp(s.config.clients[i], s.clients[j].bssid, 6U) == 0) found = true;
+        }
+        assert(found);
+    }
+    /* Add the one newly observed, unselected station without exceeding 16. */
+    for(size_t i = 0U; i < s.client_count; ++i) {
+        if(selected_client_index_(&s, s.clients[i].bssid) < 0) { s.selected_client = i; break; }
+    }
+    toggle_client_(&s);
+    assert(s.config.client_count == ACTION_CLIENTS);
+    s.clients[s.selected_client].bssid[5] = 120U;
+    toggle_client_(&s);
+    assert(s.config.client_count == ACTION_CLIENTS && selected_client_index_(&s, s.clients[s.selected_client].bssid) == -1);
 }
 
 int main(void)
@@ -260,8 +350,8 @@ int main(void)
     scan_fixture.records[3] = scan_fixture.records[0]; scan_fixture.records[3].authmode = WIFI_AUTH_WPA3_ENTERPRISE;
     menu_wifi_action_show(POOM_WIFI_ACTION_SAE_COMMIT); run_ui(); assert(scan_calls == 3 && start_calls == 1);
 
-    reset(3); menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG_TARGETED); run_ui(); assert(monitor_starts == 1 && monitor_stops == 1);
-    reset(4); menu_wifi_action_show(POOM_WIFI_ACTION_ASSOC_SLEEP); run_ui(); assert(monitor_starts == 2 && monitor_stops == 2);
+    reset(3); menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG); run_ui(); assert(monitor_starts == 1 && monitor_stops == 1 && start_calls == 1);
+    reset(4); menu_wifi_action_show(POOM_WIFI_ACTION_ASSOC_SLEEP); run_ui(); assert(monitor_starts == 3 && monitor_stops == 3);
     reset(5); script_before_scan = true; menu_wifi_action_show(POOM_WIFI_ACTION_QUIET); run_ui(); assert(!scan_calls && scan_stop_calls);
     reset(6); scan_error = ESP_FAIL; menu_wifi_action_show(POOM_WIFI_ACTION_QUIET); run_ui(); assert(scan_calls == 2);
     reset(7); fail_task = 2; menu_wifi_action_show(POOM_WIFI_ACTION_QUIET); run_ui(); assert(!scan_calls);
@@ -271,10 +361,12 @@ int main(void)
     assert(!menu_wifi_action_is_active() && !scan_calls && !start_calls && resumes == 1);
     reset(10); request_stop_in_scan = true; menu_wifi_action_show(POOM_WIFI_ACTION_QUIET); run_ui(); assert(scan_calls == 1 && !start_calls);
     reset(11); fail_task = 1; menu_wifi_action_show(POOM_WIFI_ACTION_QUIET); assert(!s_action && resumes == 1 && !pending_ui);
-    reset(12); fixture_clients = 0; menu_wifi_action_show(POOM_WIFI_ACTION_ASSOC_SLEEP); run_ui(); assert(!start_calls && monitor_starts == 2 && monitor_stops == 2);
+    reset(12); fixture_clients = 0; menu_wifi_action_show(POOM_WIFI_ACTION_ASSOC_SLEEP); run_ui(); assert(!start_calls && monitor_starts == 1 && monitor_stops == 1);
     reset(13); menu_wifi_action_show(POOM_WIFI_ACTION_CHANNEL_SWITCH); run_ui(); assert(start_calls == 1);
     reset(14); channel_error = ESP_FAIL; menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG); run_ui(); assert(monitor_starts == 1 && monitor_stops == 1);
+    reset(15); menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG); run_ui(); assert(!start_calls && monitor_starts == 1 && monitor_stops == 1);
+    reset(16); test_selection_capacity();
 
-    puts("Wi-Fi action UI: discovery, target identity, clients, navigation, errors, cancellation and CLI stop passed");
+    puts("Wi-Fi action UI: discovery, scope, MAC multiselection/reordering, navigation, errors, cancellation and CLI stop passed");
     return 0;
 }

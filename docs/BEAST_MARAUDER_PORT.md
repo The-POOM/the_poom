@@ -16,10 +16,8 @@ its exact screen flow are present.
 
 | Beast entry | Target selection | Current behavior |
 | --- | --- | --- |
-| `BAD MSG` | One AP, then its observed clients | Sends the adapted Bad Msg frame format in a round-robin across the copied client set. |
-| `BAD MSG TARGETED` | One AP, then one observed client | Uses the same format for the selected station MAC. |
-| `ASSOC SLEEP` | One AP, then its observed clients | Sends the adapted association/power-management frame format across the copied client set. |
-| `ASSOC SLEEP TARGETED` | One AP, then one observed client | Uses that format for the selected station MAC. |
+| `BAD MSG` | One AP, then all observed clients or a chosen client set | Sends the adapted Bad Msg frame format in a round-robin across the copied client set. |
+| `ASSOC SLEEP` | One AP, then all observed clients or a chosen client set | Sends the adapted association/power-management frame format across the copied client set. |
 | `QUIET TIME` | One AP | Sends a beacon-format Quiet element for the selected BSSID. |
 | `CHANNEL SWITCH` | One AP and a different channel in the same band | Sends a beacon-format Channel Switch Announcement. The run remains on the selected AP's current channel. |
 | `SAE COMMIT FLOOD` | One WPA3-Personal or WPA2/WPA3-Personal transition AP | Sends bounded initial group-19 SAE Commit frames. It does not complete SAE authentication or implement anti-clogging-token retries. |
@@ -29,15 +27,19 @@ shows channel, RSSI and a BSSID suffix. Hidden SSIDs remain selectable. The
 selected AP is copied into the session, so a later scan-cache update cannot
 silently change an already chosen target.
 
+Bad Msg and Association Sleep each have one Beast entry. After choosing an AP,
+choose **ALL CLIENTS** or **CHOOSE CLIENTS** within that action. This is a choice
+of stations on one network, not a multi-network operation.
+
 Client discovery listens on the selected AP's channel and derives station MACs
 from observed traffic involving that BSSID. It does not prove that every
-associated client is visible. Targeted actions let UP/DOWN choose one observed
-station; the other Bad Msg and Association Sleep entries use the displayed set,
-up to 16 clients. Those all-client variants advance to the ready screen after
-three seconds once at least one client is present; **A:USE CLIENTS** can accept
-the current set earlier. With no observed clients they keep listening. Targeted
-variants retain manual station selection. Client discovery stops when the set
-is copied, and a separate **A:START** is still required to begin transmission.
+associated client is visible. CHOOSE CLIENTS uses UP/DOWN to browse and A to
+toggle each MAC; RIGHT continues with the marked set, up to 16 clients. Client
+selection remains attached to MAC addresses across refreshed snapshots.
+ALL CLIENTS advances to the ready screen after three seconds once at least one
+client is present; **A:USE CLIENTS** can accept the current set earlier. With no
+observed clients it keeps listening. Discovery stops before the ready screen,
+and a separate **A:START** is still required to begin transmission.
 
 On the ready screen, UP/DOWN chooses 15, 30 or 60 seconds; the initial selection
 is 30 seconds. Channel Switch also uses LEFT/RIGHT to choose its destination
@@ -74,7 +76,7 @@ output equivalence.
 | BLE discovery/capture | Existing BLE scan, tracker, detector and PCAP services | Includes tracker/wearable classifications such as AirTag, SmartTag, Tile and smart-glasses heuristics. It does not establish exact parity with Marauder's skimmer, Flipper, iBeacon or BLE Flock workflows. |
 | Remote ID | Existing drone scan features | Existing POOM implementation; this change does not revalidate every transport. |
 | PineScan, multi-SSID detection, CSI motion and follow detection | No dedicated counterparts identified in this port | Not implemented by this change. |
-| ARP, ping and port/service scans | Existing `SCAN NET` ARP discovery | Marauder's complete ping/port/service suite is not ported. |
+| ARP, ping and port/service scans | Existing `SCAN NET` ARP discovery, TCP/UDP port probes, SSH checks and common-service host probes | ICMP ping and a complete 1..65535 TCP port sweep remain separate gaps; existing native probes should be reused. |
 | GPS tracking and wardriving | Existing `WARDRIVING NODE` forwards records to an external core | The external core owns GPS/logging. Standalone GPS tracking and station/BLE wardriving orchestration are not added. |
 
 Existing deauthentication, Wi-Fi Clone/Combine, Karma, Wi-Fi/BLE spam and captive
@@ -164,7 +166,7 @@ not a record of completed hardware testing.
    Exercise scan cancellation, empty scans, rescan, back navigation and reopen.
 3. Use one owned AP and controlled clients. Confirm client discovery only lists
    stations observed with that BSSID; check the chosen station MAC in the
-   targeted variants and the copied client count in the other variants.
+   chosen-client scope and the copied count in the all-client scope.
 4. Verify the ready screen reflects the intended AP, client set, duration and
    destination channel. Observe that discovery alone does not start an action.
 5. Begin with the shortest run and a separate receiver on the AP's channel.

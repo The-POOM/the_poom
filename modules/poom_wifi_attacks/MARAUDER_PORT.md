@@ -5,9 +5,9 @@ MIT notice is in `MARAUDER_LICENSE.txt`.
 
 The caller first stops other radio services, discovers a selected AP and any
 required stations, then supplies that snapshot to `poom_wifi_marauder_start`.
-Bad Msg and Assoc Sleep cycle the supplied client list. Their "all" and
-"targeted" UI actions differ only in which discovered clients the UI supplies;
-neither mode discovers clients inside the transmit worker. Quiet Time and
+Bad Msg and Assoc Sleep cycle the supplied client list. Each has a single UI
+action with an all-client or chosen-client scope inside it. Neither scope
+discovers clients inside the transmit worker. Quiet Time and
 Channel Switch use the selected AP's identity/channel. SAE Commit accepts
 WPA3-Personal or WPA2/WPA3-Personal transition APs.
 

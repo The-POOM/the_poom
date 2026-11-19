@@ -451,9 +451,7 @@ static void action_wifi_(poom_wifi_action_t action)
     menu_wifi_action_show(action);
 }
 static void action_bad_msg_(void) { action_wifi_(POOM_WIFI_ACTION_BAD_MSG); }
-static void action_bad_msg_targeted_(void) { action_wifi_(POOM_WIFI_ACTION_BAD_MSG_TARGETED); }
 static void action_assoc_sleep_(void) { action_wifi_(POOM_WIFI_ACTION_ASSOC_SLEEP); }
-static void action_assoc_sleep_targeted_(void) { action_wifi_(POOM_WIFI_ACTION_ASSOC_SLEEP_TARGETED); }
 static void action_quiet_time_(void) { action_wifi_(POOM_WIFI_ACTION_QUIET); }
 static void action_channel_switch_(void) { action_wifi_(POOM_WIFI_ACTION_CHANNEL_SWITCH); }
 static void action_sae_commit_(void) { action_wifi_(POOM_WIFI_ACTION_SAE_COMMIT); }
@@ -1172,9 +1170,7 @@ static const poom_menu_item_t s_apps_beast[] = {
 #endif
     {"DEAUTH", action_deauth_},
     {"BAD MSG", action_bad_msg_},
-    {"BAD MSG TARGETED", action_bad_msg_targeted_},
     {"ASSOC SLEEP", action_assoc_sleep_},
-    {"ASSOC SLEEP TARGETED", action_assoc_sleep_targeted_},
     {"QUIET TIME", action_quiet_time_},
     {"CHANNEL SWITCH", action_channel_switch_},
     {"SAE COMMIT FLOOD", action_sae_commit_},
