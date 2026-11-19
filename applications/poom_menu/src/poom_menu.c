@@ -70,6 +70,7 @@
 #include "menu_spectrum.h"
 #include "menu_device_inspector.h"
 #include "menu_wifi_guard.h"
+#include "menu_wifi_action.h"
 #include "menu_wardrive_node.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
@@ -442,6 +443,20 @@ static void action_deauth_(void)
     vTaskDelay(pdMS_TO_TICKS(180U));
     app_deauth();
 }
+
+static void action_wifi_(poom_wifi_action_t action)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_action_show(action);
+}
+static void action_bad_msg_(void) { action_wifi_(POOM_WIFI_ACTION_BAD_MSG); }
+static void action_bad_msg_targeted_(void) { action_wifi_(POOM_WIFI_ACTION_BAD_MSG_TARGETED); }
+static void action_assoc_sleep_(void) { action_wifi_(POOM_WIFI_ACTION_ASSOC_SLEEP); }
+static void action_assoc_sleep_targeted_(void) { action_wifi_(POOM_WIFI_ACTION_ASSOC_SLEEP_TARGETED); }
+static void action_quiet_time_(void) { action_wifi_(POOM_WIFI_ACTION_QUIET); }
+static void action_channel_switch_(void) { action_wifi_(POOM_WIFI_ACTION_CHANNEL_SWITCH); }
+static void action_sae_commit_(void) { action_wifi_(POOM_WIFI_ACTION_SAE_COMMIT); }
 
 /**
  * @brief Internal helper for `action_deauth_detector`.
@@ -1156,6 +1171,13 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"OPENTHREAD CLI", action_cli_ot_},
 #endif
     {"DEAUTH", action_deauth_},
+    {"BAD MSG", action_bad_msg_},
+    {"BAD MSG TARGETED", action_bad_msg_targeted_},
+    {"ASSOC SLEEP", action_assoc_sleep_},
+    {"ASSOC SLEEP TARGETED", action_assoc_sleep_targeted_},
+    {"QUIET TIME", action_quiet_time_},
+    {"CHANNEL SWITCH", action_channel_switch_},
+    {"SAE COMMIT FLOOD", action_sae_commit_},
     {"DEAUTH DET", action_deauth_detector_},
     {"FOX HUNT", action_fox_hunt_},
     {"KARMA", action_karma_},
@@ -1240,7 +1262,7 @@ static const poom_menu_submenu_t s_submenus[] = {
 };
 
 /* Persist independent permutations, never application data or targets. */
-#define MENU_MAX_ITEMS 32
+#define MENU_MAX_ITEMS 48
 #define MENU_ORDER_MODES 5
 static uint8_t s_order[MENU_ORDER_MODES][MENU_MAX_ITEMS];
 static bool s_reordering = false;
@@ -1254,13 +1276,13 @@ static void menu_order_defaults_(uint8_t mode)
 }
 static bool menu_order_valid_(uint8_t mode)
 {
-    uint32_t seen = 0;
+    uint64_t seen = 0;
     const uint8_t n = s_submenus[mode].count;
     if (n > MENU_MAX_ITEMS) return false;
     for (uint8_t i = 0; i < n; ++i) {
         uint8_t v = s_order[mode][i];
-        if (v >= n || (seen & (1UL << v))) return false;
-        seen |= 1UL << v;
+        if (v >= n || (seen & (1ULL << v))) return false;
+        seen |= 1ULL << v;
     }
     return true;
 }

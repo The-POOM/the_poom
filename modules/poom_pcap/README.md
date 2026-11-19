@@ -18,6 +18,8 @@
 - Capture types:
   - WiFi (adds radiotap)
   - WiFi Handshake mode (Beacon/Probe Response + EAPOL, Hashcat 22000 sidecar export)
+  - WiFi SAE mode (passive capture of SAE Authentication frames, including commit,
+    confirm and status responses; it does not generate authentication traffic)
   - Bluetooth (DLT configured by the manager; payload is user-provided)
   - IEEE 802.15.4 (NOFCS)
 

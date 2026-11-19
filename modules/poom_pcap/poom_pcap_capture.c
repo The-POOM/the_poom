@@ -9,6 +9,7 @@
  */
 
 #include "poom_pcap_manager.h"
+#include "poom_pcap_sae_filter.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -1257,6 +1258,9 @@ static bool poom_pcap_wifi_should_capture_(const uint8_t *frame, size_t len)
                    poom_pcap_wifi_is_eapol_any_(frame, len);
         case POOM_PCAP_WIFI_CAPTURE_WPS:
             return poom_pcap_wifi_is_wps_eap_(frame, len);
+        case POOM_PCAP_WIFI_CAPTURE_SAE:
+            /* ESP-IDF sig_len includes the four-byte FCS. */
+            return (len >= 4U) && poom_pcap_wifi_is_sae_auth(frame, len - 4U);
         case POOM_PCAP_WIFI_CAPTURE_RAW:
         default:
             return true;

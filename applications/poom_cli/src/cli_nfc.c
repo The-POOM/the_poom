@@ -951,7 +951,7 @@ static esp_err_t poom_isodep_capture_save_sd_(const poom_nfc_profile_t* p,
 
     if((out_rel_path != NULL) && (out_rel_path_len > 0U))
     {
-        (void)snprintf(out_rel_path, out_rel_path_len, "%s", rel_path);
+        (void)strlcpy(out_rel_path, rel_path, out_rel_path_len);
     }
 
     (void)snprintf(abs_path, sizeof(abs_path), "%s%s", SD_CARD_PATH, rel_path);
@@ -991,7 +991,7 @@ static esp_err_t poom_isodep_capture_save_sd_(const poom_nfc_profile_t* p,
 
     if((out_rel_path != NULL) && (out_rel_path_len > 0U))
     {
-        (void)snprintf(out_rel_path, out_rel_path_len, "%s", rel_path);
+        (void)strlcpy(out_rel_path, rel_path, out_rel_path_len);
     }
 
     if(f == NULL)

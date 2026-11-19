@@ -195,7 +195,7 @@ static esp_err_t poom_sd_browser_storage_append_item_(
     storage->items = new_items;
     item = &storage->items[storage->items_count];
 
-    snprintf(item->name, sizeof(item->name), "%s", name);
+    (void)strlcpy(item->name, name, sizeof(item->name));
     item->is_directory = is_directory;
     item->file_size_bytes = file_size_bytes;
 

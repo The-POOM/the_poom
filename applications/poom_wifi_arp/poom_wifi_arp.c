@@ -409,7 +409,7 @@ static bool poom_wifi_arp_scan_add_host_(poom_wifi_arp_scan_ctx_t *ctx, const ch
 
     poom_wifi_arp_scan_host_t *host = &ctx->hosts[ctx->num_active_hosts];
     (void)memset(host, 0, sizeof(*host));
-    (void)snprintf(host->ip, sizeof(host->ip), "%s", ip);
+    (void)strlcpy(host->ip, ip, sizeof(host->ip));
     memcpy(host->mac, mac, 6);
     host->is_active = true;
     ctx->num_active_hosts++;
