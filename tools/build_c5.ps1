@@ -72,13 +72,22 @@ try {
     $idfArguments = @($idfScript, '-C', $sourceDir, '-B', $BuildDir,
                       '-D', 'IDF_TARGET=esp32c5',
                       '-D', "SDKCONFIG=$BuildDir\sdkconfig",
-                      '-D', "SDKCONFIG_DEFAULTS=$defaults", $Action)
+                      '-D', "SDKCONFIG_DEFAULTS=$defaults")
+    # CMake does not track changes to the firmware-version environment variable.
+    if ($Action -ne 'reconfigure' -and $env:POOM_FIRMWARE_VERSION) {
+        $idfArguments += 'reconfigure'
+    }
+    $idfArguments += $Action
     & $idfPython @idfArguments
     if ($LASTEXITCODE -ne 0) {
         throw "ESP-IDF $Action failed with exit code $LASTEXITCODE"
     }
 } finally {
     foreach ($name in $environmentNames) {
-        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+        if ($null -eq $savedEnvironment[$name]) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+        }
     }
 }

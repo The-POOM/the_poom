@@ -16,7 +16,7 @@ static poom_wifi_detector_record_t client_fixture[ACTION_CLIENTS];
 static size_t fixture_clients;
 static poom_marauder_status_t backend_status;
 static poom_marauder_config_t last_started;
-static esp_err_t scan_error, start_error, monitor_error, snapshot_error;
+static esp_err_t scan_error, start_error, monitor_error, snapshot_error, channel_error;
 static unsigned scan_calls, scan_stop_calls, start_calls, monitor_starts, monitor_stops;
 static unsigned resumes, receives, phase, test_case, fail_task;
 static uint64_t clock_ms;
@@ -92,6 +92,8 @@ bool poom_sbus_publish(const char *topic, const void *data, size_t len, uint32_t
 { (void)wait; assert(strcmp(topic, "poom/menu/resume") == 0 && len == 1U && *(const uint8_t *)data == 1U); ++resumes; return true; }
 void poom_wifi_attacks_stop_all(void) {}
 esp_err_t poom_wifi_ctrl_deinit(void) { return ESP_OK; }
+esp_err_t poom_wifi_ctrl_set_channel(uint8_t channel)
+{ assert(channel == s_action->config.ap.primary); return channel_error; }
 bool poom_wifi_ctrl_channel_is_valid(uint8_t ch) { return ch >= 1U && ch <= 165U; }
 esp_err_t esp_wifi_scan_stop(void) { ++scan_stop_calls; return ESP_OK; }
 esp_err_t poom_wifi_scanner_scan_configured(const wifi_scan_config_t *cfg)
@@ -133,7 +135,7 @@ static void reset(unsigned which)
     assert(!s_action && !pending_ui && !pending_scan);
     test_case = which; phase = receives = 0; clock_ms = 1000;
     scan_calls = scan_stop_calls = start_calls = monitor_starts = monitor_stops = resumes = 0;
-    fail_task = 0; scan_error = start_error = monitor_error = snapshot_error = ESP_OK;
+    fail_task = 0; scan_error = start_error = monitor_error = snapshot_error = channel_error = ESP_OK;
     script_before_scan = request_stop_in_scan = false;
     memset(&backend_status, 0, sizeof(backend_status));
     memset(&last_started, 0, sizeof(last_started));
@@ -235,6 +237,12 @@ static int scripted_input(action_event_t *event)
         case 6: event->button = ACTION_B; break;
         default: assert(false);
         }
+    } else if(test_case == 14U) {
+        switch(step) {
+        case 0: event->button = ACTION_A; break;
+        case 1: assert(s->view == VIEW_ERROR && s->error == ESP_FAIL && !s->monitoring && !start_calls); event->button = ACTION_B; break;
+        default: assert(false);
+        }
     } else assert(false);
     return pdTRUE;
 }
@@ -265,6 +273,7 @@ int main(void)
     reset(11); fail_task = 1; menu_wifi_action_show(POOM_WIFI_ACTION_QUIET); assert(!s_action && resumes == 1 && !pending_ui);
     reset(12); fixture_clients = 0; menu_wifi_action_show(POOM_WIFI_ACTION_ASSOC_SLEEP); run_ui(); assert(!start_calls && monitor_starts == 2 && monitor_stops == 2);
     reset(13); menu_wifi_action_show(POOM_WIFI_ACTION_CHANNEL_SWITCH); run_ui(); assert(start_calls == 1);
+    reset(14); channel_error = ESP_FAIL; menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG); run_ui(); assert(monitor_starts == 1 && monitor_stops == 1);
 
     puts("Wi-Fi action UI: discovery, target identity, clients, navigation, errors, cancellation and CLI stop passed");
     return 0;

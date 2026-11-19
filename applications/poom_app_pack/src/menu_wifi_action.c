@@ -312,6 +312,9 @@ static void discover_clients_(action_session_t *s)
                                                    NULL, 0U, ACTION_CLIENTS);
     s->monitoring = err == ESP_OK;
     if(err == ESP_OK) err = poom_wifi_detector_monitor_select_ap(s->config.ap.primary, s->config.ap.bssid);
+    /* The monitor retries tuning internally; surface an initially rejected
+     * channel instead of leaving this screen listening indefinitely. */
+    if(err == ESP_OK) err = poom_wifi_ctrl_set_channel(s->config.ap.primary);
     if(err != ESP_OK) {
         stop_monitor_(s);
         s->error = err;

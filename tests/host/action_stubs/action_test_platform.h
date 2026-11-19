@@ -48,6 +48,7 @@ typedef struct {
 } wifi_scan_config_t;
 esp_err_t esp_wifi_scan_stop(void);
 esp_err_t poom_wifi_ctrl_deinit(void);
+esp_err_t poom_wifi_ctrl_set_channel(uint8_t channel);
 bool poom_wifi_ctrl_channel_is_valid(uint8_t channel);
 
 typedef struct { uint8_t button, event; } button_event_msg_t;

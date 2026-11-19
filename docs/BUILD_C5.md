@@ -55,7 +55,9 @@ An existing generated `sdkconfig` takes precedence over defaults. Use a fresh
 `-BuildDir` when changing the profile and verify the generated configuration
 before packaging. Set `-FirmwareVersion` consistently for all actions in a
 release build; omitting it uses `POOM_FIRMWARE_VERSION` if already set, or the
-repository's automatic version calculation.
+repository's automatic version calculation. An explicit or inherited firmware
+version forces CMake reconfiguration so an incremental build cannot retain an
+earlier version in the application descriptor.
 
 ## Use an isolated SDK installation
 
