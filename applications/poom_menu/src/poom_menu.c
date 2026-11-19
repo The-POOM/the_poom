@@ -71,6 +71,7 @@
 #include "menu_device_inspector.h"
 #include "menu_wifi_guard.h"
 #include "menu_wifi_action.h"
+#include "menu_findmy_beep.h"
 #include "menu_wardrive_node.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
@@ -457,6 +458,12 @@ static void action_channel_switch_(void) { action_wifi_(POOM_WIFI_ACTION_CHANNEL
 static void action_sae_commit_(void) { action_wifi_(POOM_WIFI_ACTION_SAE_COMMIT); }
 static void action_probe_flood_(void) { action_wifi_(POOM_WIFI_ACTION_PROBE_REQUEST); }
 static void action_ap_clone_spam_(void) { action_wifi_(POOM_WIFI_ACTION_AP_CLONE); }
+static void action_findmy_beep_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_findmy_beep_show();
+}
 
 /**
  * @brief Internal helper for `action_deauth_detector`.
@@ -1186,6 +1193,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"CAPTIVE PORTAL", action_captive_},
     {"TV OFF", action_tv_off_},
     {"BLE DETECT", action_ble_detector_},
+    {"FIND MY BEEP", action_findmy_beep_},
     {"WIFI DETECT", action_wifi_detector_},
     {"CRACK HS", action_handshake_crack_},
     {"POOMGOTCHI", action_poomgotchi_},

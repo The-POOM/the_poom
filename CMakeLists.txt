@@ -85,6 +85,7 @@ set(MODULES
     # Local modules
     nfcal
     poom_ble_scan
+    poom_findmy_beep
     poom_boot_policy
     poom_buz_theme
     poom_button_sound
@@ -154,6 +155,7 @@ set(COMPONENTS ${MODULES})
 
 set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_scan
+    ${CMAKE_SOURCE_DIR}/modules/poom_findmy_beep
     ${CMAKE_SOURCE_DIR}/modules/poom_boot_policy
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_client
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_dynamic

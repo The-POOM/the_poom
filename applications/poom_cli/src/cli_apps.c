@@ -46,10 +46,12 @@
  * dependency on poom_app_pack while allowing an acknowledged radio handoff. */
 extern void menu_wifi_action_stop(void) __attribute__((weak));
 extern bool menu_wifi_action_is_active(void) __attribute__((weak));
+extern void menu_findmy_beep_stop(void) __attribute__((weak));
 
 static void cli_apps_stop_wifi_action_(void)
 {
     if(menu_wifi_action_stop != NULL) menu_wifi_action_stop();
+    if(menu_findmy_beep_stop != NULL) menu_findmy_beep_stop();
 }
 
 #define CLI_APPS_BLE_NAME_MAX       (31U)

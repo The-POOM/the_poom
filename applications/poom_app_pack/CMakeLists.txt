@@ -51,6 +51,7 @@ set(POOM_APP_PACK_REQUIRES
     poom_ble_plot
     poom_ble_gatt_client
     poom_ble_scan
+    poom_findmy_beep
     poom_ble_spam
     poom_ble_tracker
     poom_ble_detector
