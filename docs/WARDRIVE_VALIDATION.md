@@ -103,7 +103,7 @@ sessions, and working BLE Detect after exiting Wardrive. This accepts the
 scrolling fix; earlier full recording/GPS/export acceptance is recorded above.
 Only acceptance documentation changed after this hardware test.
 
-## Maintainer scope revision (hardware check pending)
+## Maintainer scope revision and radio handoff
 
 The application now uses upstream `sdkconfig.esp32c5.ram_optimization`; the
 app-specific profile is removed. Optional host test modules and FreeRTOS/SDK
@@ -115,14 +115,23 @@ stream helper. The helper performs receiver-style reads without a register
 write, using a temporary device handle when required; existing I²C APIs and
 callers are unchanged. No Wi-Fi/BLE, SD, boot or partition changes are included.
 
-Fresh generation on the pinned SDK changes Wi-Fi RX/BA from 10/6 to 16/16
-and moves mbedTLS allocation to PSRAM. External BSS, the malloc threshold and
-internal reserve remain enabled. Earlier hardware tests do not certify this
-new configuration. Repeat recording, GPS/time, CSV/local download, cancellation
-and app transitions before merge. Keep TLS verification enabled; no live WiGLE
-upload is needed for that smoke test.
+Fresh config generation on the pinned release SDK selects static Wi-Fi RX16
+and BA16. Published POOM 1.0.16 and 1.0.17 binaries use RX10 and BA6. A
+stock-only hardware comparison failed at 16/16 and passed at 10/6 with
+external mbedTLS allocation retained. The passing stock 1.0.16 ELF has
+SHA-256 `2c8c14a4b2c2dfebd9b027a4f9d1def264b45933cbc637b686f247de703df1c3`.
+The upstream RAM profile remains unchanged. Fresh 16/16 generation remains
+unvalidated for Wardrive hardware use.
 
-Maintainer-review build check: full ESP32-C5 build on the pinned release SDK
-with the unmodified upstream RAM profile passed. Image 0x37fd50 retains 3% app-slot headroom.
-The optional Wardrive host suite passed (1240 UI frames, ASan/UBSan).
-Hardware acceptance of this revised profile remains pending.
+With the passing generated stock config, the handoff firmware built on the
+pinned release SDK with 3% of the app partition free. The optional ASan/UBSan
+host suite passed. Handoff-specific optional tests are on
+`validation/wardrive-idle-radio-handoff`.
+
+On 19 November 2026, the device tester reported successful repeat transitions
+between Wardrive and the stock radio apps on
+`2bd5071384822a5ff46bf68b6a80ad39b05be5e0`, using Windows build
+`build-handoff-20261119-180810`. Wardrive Wi-Fi and BLE collection and the
+Device Inspector, Spectrum, BLE Detect and Fox Hunt BLE checks were accepted
+based on the tester's report. The COM5 monitor excerpt independently shows
+Spectrum starting its scanner successfully.

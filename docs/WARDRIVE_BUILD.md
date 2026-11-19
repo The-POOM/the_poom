@@ -19,12 +19,19 @@ BSS and external mbedTLS allocation. TLS certificate verification is unchanged.
 On the pinned release SDK, fresh generation selects static Wi-Fi RX 16 and RX
 BA window 16. Published POOM 1.0.16 and 1.0.17 binaries instead use 10/6,
 with external mbedTLS allocation. A controlled stock-only hardware comparison
-failed at 16/16 and passed at 10/6. Current Wardrive handoff testing reuses the
-passing generated stock configuration, retaining external mbedTLS allocation.
-This does not establish hardware acceptance of fresh 16/16 defaults.
+failed at 16/16 and passed at 10/6. The hardware-accepted Wardrive handoff build reused the passing generated
+stock configuration, retaining external mbedTLS allocation. Hardware
+acceptance applies to that 10/6 build.
 Do not modify the shared profile or disable Wi-Fi IRAM options for this app.
 
-## Fresh build
+## Reproduce the hardware-accepted build
+
+Copy the passing stock generated config into a new build directory as
+`sdkconfig` and pass its absolute path as `-DSDKCONFIG`. Verify
+`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10`, `CONFIG_ESP_WIFI_RX_BA_WIN=6`,
+and external mbedTLS allocation before flashing.
+
+## Fresh config generation
 
 Use a new build directory and a separate generated sdkconfig. Defaults do not
 reliably override an existing generated configuration.
@@ -64,5 +71,4 @@ of the application PR and are not firmware dependencies. That branch retains
 matching source and the harness; its instructions are for optional development
 validation. It uses synthetic data and offline HTTP/TLS mocks only.
 
-The application PR needs only the standard ESP-IDF build above. See
-[validation](WARDRIVE_VALIDATION.md) for build and hardware-test limits.
+See [validation](WARDRIVE_VALIDATION.md) for build and hardware-test results.
