@@ -36,7 +36,7 @@ typedef struct {
     uint8_t clients[POOM_MARAUDER_MAX_CLIENTS][6];
     size_t client_count;
     uint32_t duration_ms; /* Zero selects 60 seconds; larger values are rejected. */
-    uint32_t interval_ms; /* Zero selects 100 ms; accepted range 100..5000 ms. */
+    uint32_t interval_ms; /* Minimum/default 100 ms, or 10 ms for beacon lists; max 5000 ms. */
     uint8_t csa_channel;  /* Zero selects a different channel in the same band. */
     uint8_t beacon_count;
     char beacon_ssids[POOM_MARAUDER_MAX_BEACONS][33];
@@ -45,6 +45,7 @@ typedef struct {
 
 typedef struct {
     bool running;
+    bool radio_released;
     poom_marauder_mode_t mode;
     uint32_t attempted;
     uint32_t sent;   /* Driver-accepted frames, not proof of reception or effect. */
@@ -59,8 +60,8 @@ typedef struct {
  * per interval, round-robin across clients. Unsupported driver operations
  * terminate the run and are reported in status. No automatic retries. */
 esp_err_t poom_wifi_marauder_start(const poom_marauder_config_t *config);
-/* Returns only after the worker has stopped and its radio cleanup completed. */
-void poom_wifi_marauder_stop(void);
+/* Waits for the worker. ESP_OK confirms radio release; failed release blocks starts. */
+esp_err_t poom_wifi_marauder_stop(void);
 void poom_wifi_marauder_get_status(poom_marauder_status_t *status);
 
 #ifdef __cplusplus

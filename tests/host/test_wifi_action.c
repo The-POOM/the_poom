@@ -121,7 +121,7 @@ esp_err_t poom_wifi_detector_monitor_snapshot(poom_wifi_detector_record_t *const
     for(size_t i = 0; i < fixture_clients; ++i) { assert(records[i]); *records[i] = client_fixture[i]; }
     *count = fixture_clients; return ESP_OK;
 }
-void poom_wifi_marauder_stop(void) { backend_status.running = false; }
+esp_err_t poom_wifi_marauder_stop(void) { backend_status.running = false; backend_status.radio_released = true; return ESP_OK; }
 void poom_wifi_marauder_get_status(poom_marauder_status_t *status) { *status = backend_status; }
 esp_err_t poom_wifi_marauder_start(const poom_marauder_config_t *config)
 {

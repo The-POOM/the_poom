@@ -6,7 +6,7 @@
 #include "mock_idf.h"
 
 static LONG tx_count, init_count, cleanup_count, generated_count, destroyed_count;
-static int fail_init, fail_channel, fail_tx, fail_task, fail_crypto;
+static int fail_init, fail_channel, fail_tx, fail_task, fail_crypto, fail_cleanup;
 static uint8_t captured[256];
 static size_t captured_length;
 static uint8_t history[64][256];
@@ -24,7 +24,7 @@ esp_err_t esp_wifi_80211_tx(int interface_index, const void *frame, int length, 
 }
 esp_err_t esp_wifi_set_ps(int mode) { (void)mode; return ESP_OK; }
 esp_err_t poom_wifi_ctrl_init_sta(void) {InterlockedIncrement(&init_count); return fail_init ? ESP_FAIL : ESP_OK;}
-esp_err_t poom_wifi_ctrl_deinit(void) {InterlockedIncrement(&cleanup_count); return ESP_OK;}
+esp_err_t poom_wifi_ctrl_deinit(void) {InterlockedIncrement(&cleanup_count); return fail_cleanup ? ESP_FAIL : ESP_OK;}
 esp_err_t poom_wifi_ctrl_set_channel(uint8_t channel) {(void)channel; return fail_channel ? ESP_ERR_INVALID_ARG : ESP_OK;}
 esp_err_t poom_wifi_ctrl_set_promiscuous(bool enabled) {(void)enabled; return ESP_OK;}
 bool poom_wifi_ctrl_channel_is_valid(uint8_t channel) {return (channel >= 1 && channel <= 13) || channel == 36 || channel == 40 || channel == 44;}
@@ -173,6 +173,11 @@ int main(void)
     reset_mocks(); c.random_beacon_cycles=false; fail_tx=1;
     CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
     CHECK(s.sent==0 && s.errors==1 && cleanup_count==1);
+    reset_mocks(); c=config_for(POOM_MARAUDER_QUIET); c.duration_ms=60; fail_cleanup=1;
+    CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
+    CHECK(!s.running && !s.radio_released && s.last_error==ESP_FAIL);
+    CHECK(poom_wifi_marauder_stop()==ESP_FAIL);
+    CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_STATE && init_count==1);
     printf("Marauder mocked lifecycle: %u checks passed; no device/radio I/O.\n",checks);
     return 0;
 }

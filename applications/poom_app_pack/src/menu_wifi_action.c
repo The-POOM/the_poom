@@ -329,7 +329,8 @@ static void scan_task_(void *arg)
 static void begin_scan_(action_session_t *s)
 {
     stop_monitor_(s);
-    poom_wifi_marauder_stop();
+    s->error = poom_wifi_marauder_stop();
+    if(s->error != ESP_OK) { s->view = VIEW_ERROR; return; }
     s->selected_ap = 0U;
     portENTER_CRITICAL(&s_input_lock);
     s->cancel_scan = false;

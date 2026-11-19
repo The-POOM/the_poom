@@ -239,7 +239,9 @@ esp_err_t poom_wifi_spam_start(void)
 
 esp_err_t poom_wifi_spam_stop(void)
 {
-    if(poom_wifi_spam_is_running_()) poom_wifi_marauder_stop();
+    poom_marauder_status_t status;
+    poom_wifi_marauder_get_status(&status);
+    if(status.mode == POOM_MARAUDER_BEACON_LIST) return poom_wifi_marauder_stop();
     return ESP_OK;
 }
 

@@ -20,7 +20,7 @@ static SemaphoreHandle_t s_control;
 static bool s_busy;
 static bool s_stop_requested;
 static int64_t s_start_us;
-static poom_marauder_status_t s_status;
+static poom_marauder_status_t s_status = {.radio_released = true};
 
 /* API callers serialize initialization and synchronous stop. The worker never
  * takes this mutex, so cleanup cannot deadlock a caller waiting for its exit. */
@@ -269,6 +269,7 @@ static void attack_worker(void *argument)
     const uint32_t duration = elapsed_ms();
     taskENTER_CRITICAL(&s_lock);
     s_status.elapsed_ms = duration;
+    s_status.radio_released = cleanup_error == ESP_OK;
     s_status.running = false;
     s_busy = false;
     taskEXIT_CRITICAL(&s_lock);
@@ -285,7 +286,7 @@ esp_err_t poom_wifi_marauder_start(const poom_marauder_config_t *input)
     if (mutex == NULL) return ESP_ERR_NO_MEM;
     xSemaphoreTake(mutex, portMAX_DELAY);
     taskENTER_CRITICAL(&s_lock);
-    bool busy = s_busy;
+    bool busy = s_busy || !s_status.radio_released;
     taskEXIT_CRITICAL(&s_lock);
     if (busy) { xSemaphoreGive(mutex); return ESP_ERR_INVALID_STATE; }
 
@@ -294,12 +295,19 @@ esp_err_t poom_wifi_marauder_start(const poom_marauder_config_t *input)
     *argument = config;
     taskENTER_CRITICAL(&s_lock);
     memset(&s_status, 0, sizeof(s_status));
+    s_status.radio_released = true;
     s_status.mode = config.mode;
     s_stop_requested = false;
     taskEXIT_CRITICAL(&s_lock);
     if (config.mode == POOM_MARAUDER_SAE_COMMIT) error = crypto_error(psa_crypto_init());
     bool radio_attempted = false;
-    if (error == ESP_OK) { radio_attempted = true; error = poom_wifi_ctrl_init_sta(); }
+    if (error == ESP_OK) {
+        radio_attempted = true;
+        taskENTER_CRITICAL(&s_lock);
+        s_status.radio_released = false;
+        taskEXIT_CRITICAL(&s_lock);
+        error = poom_wifi_ctrl_init_sta();
+    }
     if (error == ESP_OK) error = poom_wifi_ctrl_set_channel(config.ap.primary);
     if (error == ESP_OK) error = esp_wifi_set_ps(WIFI_PS_NONE);
     if (error == ESP_OK) error = poom_wifi_ctrl_set_promiscuous(true);
@@ -316,7 +324,11 @@ esp_err_t poom_wifi_marauder_start(const poom_marauder_config_t *input)
         free(argument);
         if (radio_attempted) {
             (void)poom_wifi_ctrl_set_promiscuous(false);
-            (void)poom_wifi_ctrl_deinit();
+            const esp_err_t cleanup = poom_wifi_ctrl_deinit();
+            taskENTER_CRITICAL(&s_lock);
+            s_status.radio_released = cleanup == ESP_OK;
+            taskEXIT_CRITICAL(&s_lock);
+            if(cleanup != ESP_OK) record_error(cleanup);
         }
         record_error(error);
         taskENTER_CRITICAL(&s_lock);
@@ -328,10 +340,10 @@ esp_err_t poom_wifi_marauder_start(const poom_marauder_config_t *input)
     return error;
 }
 
-void poom_wifi_marauder_stop(void)
+esp_err_t poom_wifi_marauder_stop(void)
 {
     SemaphoreHandle_t mutex = control_mutex();
-    if (mutex == NULL) return; /* No successful start can precede mutex creation. */
+    if (mutex == NULL) return ESP_OK; /* No successful start can precede mutex creation. */
     xSemaphoreTake(mutex, portMAX_DELAY);
     taskENTER_CRITICAL(&s_lock);
     s_stop_requested = true;
@@ -343,7 +355,12 @@ void poom_wifi_marauder_stop(void)
         busy = s_busy;
         taskEXIT_CRITICAL(&s_lock);
     }
+    taskENTER_CRITICAL(&s_lock);
+    const esp_err_t error = s_status.radio_released ? ESP_OK :
+        (s_status.last_error != ESP_OK ? s_status.last_error : ESP_ERR_INVALID_STATE);
+    taskEXIT_CRITICAL(&s_lock);
     xSemaphoreGive(mutex);
+    return error;
 }
 
 void poom_wifi_marauder_get_status(poom_marauder_status_t *status)
