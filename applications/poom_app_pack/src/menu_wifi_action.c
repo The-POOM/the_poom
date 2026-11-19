@@ -76,10 +76,12 @@ static const char s_input_user[] = "menu_wifi_action";
 
 static const char *const s_titles[] = {
     "BAD MSG", "ASSOC SLEEP", "QUIET TIME", "CHANNEL SWITCH", "SAE COMMIT FLOOD",
+    "PROBE REQUEST FLOOD", "AP CLONE SPAM",
 };
 static const poom_marauder_mode_t s_modes[] = {
     POOM_MARAUDER_BAD_MSG, POOM_MARAUDER_ASSOC_SLEEP,
     POOM_MARAUDER_QUIET, POOM_MARAUDER_CSA, POOM_MARAUDER_SAE_COMMIT,
+    POOM_MARAUDER_PROBE_REQUEST, POOM_MARAUDER_AP_CLONE,
 };
 static const uint8_t s_channels[] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
@@ -311,6 +313,8 @@ static void scan_task_(void *arg)
         const poom_wifi_scanner_ap_records_t *found = poom_wifi_scanner_get_ap_records();
         for(uint16_t i = 0U; i < found->count && s->ap_count < POOM_WIFI_SCANNER_MAX_AP; ++i) {
             if(s->action == POOM_WIFI_ACTION_SAE_COMMIT && !supports_sae_(&found->records[i])) continue;
+            if((s->action == POOM_WIFI_ACTION_PROBE_REQUEST || s->action == POOM_WIFI_ACTION_AP_CLONE) &&
+               found->records[i].ssid[0] == 0) continue;
             /* Keep equal SSIDs on different BSSIDs/bands as distinct targets. */
             s->aps[s->ap_count++] = found->records[i];
         }

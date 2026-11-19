@@ -9,6 +9,8 @@ static LONG tx_count, init_count, cleanup_count, generated_count, destroyed_coun
 static int fail_init, fail_channel, fail_tx, fail_task, fail_crypto;
 static uint8_t captured[256];
 static size_t captured_length;
+static uint8_t history[64][256];
+static size_t history_count;
 static unsigned checks;
 #define CHECK(expression) do { ++checks; assert(expression); } while (0)
 
@@ -16,6 +18,7 @@ esp_err_t esp_wifi_80211_tx(int interface_index, const void *frame, int length, 
 {
     assert(interface_index == WIFI_IF_STA && !system_sequence && length > 0 && length <= 256);
     memcpy(captured, frame, (size_t)length); captured_length = (size_t)length;
+    if(history_count < 64) memcpy(history[history_count++], frame, (size_t)length);
     InterlockedIncrement(&tx_count);
     return fail_tx ? ESP_ERR_NOT_SUPPORTED : ESP_OK;
 }
@@ -76,7 +79,7 @@ static poom_marauder_status_t wait_stopped(void)
 static void reset_mocks(void)
 {
     poom_wifi_marauder_stop(); tx_count=init_count=cleanup_count=generated_count=destroyed_count=0;
-    fail_init=fail_channel=fail_tx=fail_task=fail_crypto=0; captured_length=0;
+    fail_init=fail_channel=fail_tx=fail_task=fail_crypto=0; captured_length=0; history_count=0;
 }
 
 int main(void)
@@ -133,6 +136,43 @@ int main(void)
     c.csa_channel=36; CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_ARG);
     c.csa_channel=1; c.duration_ms=60;
     CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped(); CHECK(s.sent==1 && cleanup_count==1);
+    reset_mocks(); c=config_for(POOM_MARAUDER_PROBE_REQUEST); c.duration_ms=60;
+    CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
+    CHECK(s.sent==1 && captured[0]==0x40 && (captured[10]&3)==2 && captured[4]==255);
+    c.ap.ssid[0]=0; CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_ARG);
+    reset_mocks(); c=config_for(POOM_MARAUDER_AP_CLONE); c.duration_ms=60;
+    CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
+    CHECK(s.sent==1 && captured[0]==0x80 && captured[34]==1 && captured[35]==0);
+    CHECK(memcmp(captured+10,c.ap.bssid,6)!=0 && (captured[10]&3)==2);
+    CHECK(memcmp(captured+38,c.ap.ssid,strlen((const char*)c.ap.ssid))==0);
+    reset_mocks(); c=config_for(POOM_MARAUDER_BEACON_LIST); c.client_count=0;
+    CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_ARG);
+    c.beacon_count=33; CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_ARG);
+    c.beacon_count=2; CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_SIZE);
+    memcpy(c.beacon_ssids[0],"first",6); memcpy(c.beacon_ssids[1],"second",7);
+    c.interval_ms=9; CHECK(poom_wifi_marauder_start(&c)==ESP_ERR_INVALID_ARG);
+    c.interval_ms=10; c.duration_ms=65;
+    CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
+    CHECK(s.sent>=3 && s.errors==0 && cleanup_count==1);
+    CHECK(history[0][37]==5 && memcmp(history[0]+38,"first",5)==0);
+    CHECK(history[1][37]==6 && memcmp(history[1]+38,"second",6)==0);
+    CHECK(memcmp(history[0]+10,history[1]+10,6)!=0);
+    CHECK(history[0][22]==0 && history[1][22]==0 && history[2][22]==16);
+    reset_mocks(); c.random_beacon_cycles=true; c.beacon_count=32; c.duration_ms=400;
+    for(unsigned i=0;i<32;++i) memcpy(c.beacon_ssids[i],"placeholder",12);
+    CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
+    CHECK(s.sent>=3 && s.errors==0);
+    CHECK(memcmp(c.beacon_ssids[0],"placeholder",12)==0);
+    for(size_t i=0;i<history_count && i<32;++i) {
+        CHECK(history[i][37]>=9 && history[i][37]<=15 && (history[i][10]&3)==2);
+        for(size_t j=0;j<i;++j) {
+            CHECK(memcmp(history[i]+10,history[j]+10,6)!=0);
+            CHECK(memcmp(history[i]+38,history[j]+38,history[i][37])!=0);
+        }
+    }
+    reset_mocks(); c.random_beacon_cycles=false; fail_tx=1;
+    CHECK(poom_wifi_marauder_start(&c)==ESP_OK); s=wait_stopped();
+    CHECK(s.sent==0 && s.errors==1 && cleanup_count==1);
     printf("Marauder mocked lifecycle: %u checks passed; no device/radio I/O.\n",checks);
     return 0;
 }

@@ -455,6 +455,8 @@ static void action_assoc_sleep_(void) { action_wifi_(POOM_WIFI_ACTION_ASSOC_SLEE
 static void action_quiet_time_(void) { action_wifi_(POOM_WIFI_ACTION_QUIET); }
 static void action_channel_switch_(void) { action_wifi_(POOM_WIFI_ACTION_CHANNEL_SWITCH); }
 static void action_sae_commit_(void) { action_wifi_(POOM_WIFI_ACTION_SAE_COMMIT); }
+static void action_probe_flood_(void) { action_wifi_(POOM_WIFI_ACTION_PROBE_REQUEST); }
+static void action_ap_clone_spam_(void) { action_wifi_(POOM_WIFI_ACTION_AP_CLONE); }
 
 /**
  * @brief Internal helper for `action_deauth_detector`.
@@ -1174,6 +1176,8 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"QUIET TIME", action_quiet_time_},
     {"CHANNEL SWITCH", action_channel_switch_},
     {"SAE COMMIT FLOOD", action_sae_commit_},
+    {"PROBE REQUEST FLOOD", action_probe_flood_},
+    {"AP CLONE SPAM", action_ap_clone_spam_},
     {"DEAUTH DET", action_deauth_detector_},
     {"FOX HUNT", action_fox_hunt_},
     {"KARMA", action_karma_},

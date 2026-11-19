@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 #define POOM_MARAUDER_MAX_CLIENTS 16U
+#define POOM_MARAUDER_MAX_BEACONS 32U
 #define POOM_MARAUDER_DEFAULT_DURATION_MS 60000U
 #define POOM_MARAUDER_MAX_DURATION_MS 60000U
 #define POOM_MARAUDER_DEFAULT_INTERVAL_MS 100U
@@ -24,6 +25,9 @@ typedef enum {
     POOM_MARAUDER_QUIET,
     POOM_MARAUDER_CSA,
     POOM_MARAUDER_SAE_COMMIT,
+    POOM_MARAUDER_PROBE_REQUEST,
+    POOM_MARAUDER_AP_CLONE,
+    POOM_MARAUDER_BEACON_LIST,
 } poom_marauder_mode_t;
 
 typedef struct {
@@ -34,6 +38,9 @@ typedef struct {
     uint32_t duration_ms; /* Zero selects 60 seconds; larger values are rejected. */
     uint32_t interval_ms; /* Zero selects 100 ms; accepted range 100..5000 ms. */
     uint8_t csa_channel;  /* Zero selects a different channel in the same band. */
+    uint8_t beacon_count;
+    char beacon_ssids[POOM_MARAUDER_MAX_BEACONS][33];
+    bool random_beacon_cycles; /* Renew random identities every ten seconds. */
 } poom_marauder_config_t;
 
 typedef struct {

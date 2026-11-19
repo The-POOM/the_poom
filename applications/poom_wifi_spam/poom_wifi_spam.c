@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_wifi.h"
@@ -15,6 +16,8 @@
 #include "nvs.h"
 #include "poom_secrets_store.h"
 #include "poom_wifi_ctrl.h"
+#include "poom_wifi_marauder.h"
+#include "esp_random.h"
 
 #if POOM_WIFI_SPAM_ENABLE_LOG
     static const char *POOM_WIFI_SPAM_TAG = "poom_wifi_spam";
@@ -37,45 +40,9 @@
     #define POOM_WIFI_SPAM_PRINTF_D(...) do { } while (0)
 #endif
 
-#define POOM_WIFI_SPAM_SRCADDR_OFFSET      (10U)
-#define POOM_WIFI_SPAM_BSSID_OFFSET        (16U)
-#define POOM_WIFI_SPAM_SEQNUM_OFFSET       (22U)
-#define POOM_WIFI_SPAM_SSID_LEN_OFFSET     (37U)
-#define POOM_WIFI_SPAM_SSID_VALUE_OFFSET   (38U)
-
-#define POOM_WIFI_SPAM_TASK_STACK          (4096U)
-#define POOM_WIFI_SPAM_TASK_PRIO           (5U)
-#define POOM_WIFI_SPAM_TASK_INTERVAL_MS    (100U)
-#define POOM_WIFI_SPAM_MAX_BEACON_LEN      (256U)
-#define POOM_WIFI_SPAM_MAX_SSID_LEN        (POOM_WIFI_SPAM_SSID_MAX_LEN)
-
 #define POOM_WIFI_SPAM_SSIDS_KEY "wifi_spam_ssids"
-#define POOM_WIFI_SPAM_SSIDS_MAGIC (0x57535331UL) /* WSS1 */
+#define POOM_WIFI_SPAM_SSIDS_MAGIC (0x57535331UL)
 #define POOM_WIFI_SPAM_SSIDS_VERSION (1U)
-
-static const uint8_t s_poom_wifi_spam_beacon_template[] = {
-    0x80, 0x00,
-    0x00, 0x00,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xba, 0xde, 0xaf, 0xfe, 0x00, 0x06,
-    0xba, 0xde, 0xaf, 0xfe, 0x00, 0x06,
-    0x00, 0x00,
-    0x00, 0x01, 0x02, 0x03,
-    0x04, 0x05, 0x06, 0x07,
-    0x64, 0x00,
-    0x31, 0x04,
-    0x00, 0x00,
-    0x01, 0x08,
-    0x82, 0x84, 0x8b, 0x96,
-    0x0c, 0x12, 0x18, 0x24,
-    0x03, 0x01, 0x01,
-    0x05, 0x04, 0x01, 0x02, 0x00, 0x00,
-    0x32, 0x04,
-    0x30, 0x48, 0x60, 0x6c,
-    0x07, 0x06,
-    'U', 'S', ' ',
-    0x01, 0x0b, 0x14
-};
 
 static const char *const s_poom_wifi_spam_default_ssids[] = {
     "Starbucks_Free_WiFi",
@@ -96,8 +63,12 @@ static const char *const s_poom_wifi_spam_default_ssids[] = {
     "Wireless_Internet_Guest"
 };
 
-static TaskHandle_t s_poom_wifi_spam_task_handle = NULL;
-static bool s_poom_wifi_spam_running = false;
+static bool poom_wifi_spam_is_running_(void)
+{
+    poom_marauder_status_t status;
+    poom_wifi_marauder_get_status(&status);
+    return status.mode == POOM_MARAUDER_BEACON_LIST && status.running;
+}
 
 typedef struct __attribute__((packed))
 {
@@ -229,267 +200,68 @@ static void poom_wifi_spam_ssids_ensure_loaded_(void)
     (void)poom_wifi_spam_ssids_load_();
 }
 
-/**
- * @brief Writes the 12-bit sequence number in beacon header format.
- * @param[in/out] header Beacon frame header buffer.
- * @param[in] sequence Sequence number to write.
- * @return esp_err_t
- */
-static esp_err_t poom_wifi_spam_set_seqnum_(uint8_t *header, uint16_t sequence)
+/* Beacon sources share the checked native TX worker. There is no separate
+ * AP/forced-delete task and no mutation of the persisted SSID list. */
+esp_err_t poom_wifi_spam_start_mode(poom_wifi_spam_mode_t mode, uint8_t channel, uint32_t duration_ms)
 {
-    if(header == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
+    if(mode < POOM_WIFI_SPAM_SAVED || mode >= POOM_WIFI_SPAM_MODE_COUNT) return ESP_ERR_INVALID_ARG;
+    if(poom_wifi_spam_is_running_()) return ESP_ERR_INVALID_STATE;
+    poom_wifi_spam_ssid_list_t *list = calloc(1, sizeof(*list));
+    poom_marauder_config_t *config = calloc(1, sizeof(*config));
+    if(!list || !config) { free(list); free(config); return ESP_ERR_NO_MEM; }
+    esp_err_t err = ESP_OK;
+    if(mode == POOM_WIFI_SPAM_SAVED) err = poom_wifi_spam_ssids_get(list);
+    else if(!poom_wifi_spam_preset(mode, list)) err = ESP_ERR_INVALID_ARG;
+    if(err == ESP_OK && !list->count) err = ESP_ERR_INVALID_STATE;
+    if(err == ESP_OK) {
+        config->mode = POOM_MARAUDER_BEACON_LIST;
+        config->ap.primary = channel;
+        esp_fill_random(config->ap.bssid, sizeof(config->ap.bssid));
+        config->ap.bssid[0] = (config->ap.bssid[0] & 0xfcU) | 0x02U;
+        config->ap.authmode = WIFI_AUTH_OPEN;
+        config->beacon_count = list->count;
+        memcpy(config->beacon_ssids, list->ssids, sizeof(config->beacon_ssids));
+        config->random_beacon_cycles = mode == POOM_WIFI_SPAM_RANDOM;
+        config->duration_ms = duration_ms;
+        config->interval_ms = 10U;
+        err = poom_wifi_marauder_start(config);
     }
-
-    sequence &= 0x0fffU;
-    header[POOM_WIFI_SPAM_SEQNUM_OFFSET] = (uint8_t)((sequence & 0x000fU) << 4U);
-    header[POOM_WIFI_SPAM_SEQNUM_OFFSET + 1U] = (uint8_t)((sequence & 0x0ff0U) >> 4U);
-    return ESP_OK;
+    free(config);
+    free(list);
+    return err;
 }
 
-/**
- * @brief Builds one beacon frame using a dynamic SSID and virtual MAC suffix.
- * @param[in] ssid SSID string to inject into the beacon.
- * @param[in] line_index SSID list index used as MAC suffix.
- * @param[in] sequence Sequence number for this beacon.
- * @param[in/out] out_buffer Output frame buffer.
- * @param[in/out] out_len Output frame length.
- * @return esp_err_t
- */
-static esp_err_t poom_wifi_spam_build_beacon_(const char *ssid,
-                                              uint8_t line_index,
-                                              uint16_t sequence,
-                                              uint8_t *out_buffer,
-                                              size_t *out_len)
-{
-    size_t ssid_len;
-    size_t tail_len;
-    size_t packet_len;
-    esp_err_t status;
-
-    if((ssid == NULL) || (out_buffer == NULL) || (out_len == NULL))
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    ssid_len = strlen(ssid);
-    if(ssid_len > POOM_WIFI_SPAM_MAX_SSID_LEN)
-    {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    memcpy(out_buffer, s_poom_wifi_spam_beacon_template, POOM_WIFI_SPAM_SSID_LEN_OFFSET);
-    out_buffer[POOM_WIFI_SPAM_SSID_LEN_OFFSET] = (uint8_t)ssid_len;
-    memcpy(&out_buffer[POOM_WIFI_SPAM_SSID_VALUE_OFFSET], ssid, ssid_len);
-
-    tail_len = sizeof(s_poom_wifi_spam_beacon_template) - POOM_WIFI_SPAM_SSID_VALUE_OFFSET;
-    memcpy(&out_buffer[POOM_WIFI_SPAM_SSID_VALUE_OFFSET + ssid_len],
-           &s_poom_wifi_spam_beacon_template[POOM_WIFI_SPAM_SSID_VALUE_OFFSET],
-           tail_len);
-
-    packet_len = POOM_WIFI_SPAM_SSID_VALUE_OFFSET + ssid_len + tail_len;
-    if(packet_len > POOM_WIFI_SPAM_MAX_BEACON_LEN)
-    {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    out_buffer[POOM_WIFI_SPAM_SRCADDR_OFFSET + 5U] = line_index;
-    out_buffer[POOM_WIFI_SPAM_BSSID_OFFSET + 5U] = line_index;
-
-    status = poom_wifi_spam_set_seqnum_(out_buffer, sequence);
-    if(status != ESP_OK)
-    {
-        return status;
-    }
-
-    *out_len = packet_len;
-    return ESP_OK;
-}
-
-/**
- * @brief Starts AP mode required to transmit raw spoofed beacon frames.
- * @param[in/out] none Not used.
- * @return esp_err_t
- */
-static esp_err_t poom_wifi_spam_prepare_ap_(void)
-{
-    esp_err_t status;
-    wifi_config_t ap_config = {
-        .ap = {
-            .ssid = "wifi-spam",
-            .ssid_len = 0,
-            .password = "dummypassword",
-            .channel = 1,
-            .authmode = WIFI_AUTH_WPA2_PSK,
-            .ssid_hidden = 1,
-            .max_connection = 4,
-            .beacon_interval = 60000
-        }
-    };
-
-    status = poom_wifi_ctrl_ap_start(&ap_config);
-    if(status != ESP_OK)
-    {
-        POOM_WIFI_SPAM_PRINTF_E("poom_wifi_ctrl_ap_start failed: %s", esp_err_to_name(status));
-        return status;
-    }
-
-    status = esp_wifi_set_ps(WIFI_PS_NONE);
-    if(status != ESP_OK)
-    {
-        POOM_WIFI_SPAM_PRINTF_W("esp_wifi_set_ps failed: %s", esp_err_to_name(status));
-    }
-
-    return ESP_OK;
-}
-
-/**
- * @brief FreeRTOS task that continuously transmits spoofed beacons.
- * @param[in/out] task_arg Task argument (unused).
- * @return esp_err_t
- */
-static void poom_wifi_spam_task_(void *task_arg)
-{
-    uint8_t line_index = 0U;
-    uint16_t sequence_numbers[POOM_WIFI_SPAM_SSIDS_MAX] = {0};
-    uint8_t beacon_buffer[POOM_WIFI_SPAM_MAX_BEACON_LEN];
-    const uint32_t total_lines = (uint32_t)s_poom_wifi_spam_ssids.count;
-    uint32_t per_line_ms = POOM_WIFI_SPAM_TASK_INTERVAL_MS / total_lines;
-
-    (void)task_arg;
-
-    if(per_line_ms == 0U)
-    {
-        per_line_ms = 1U;
-    }
-
-    while(s_poom_wifi_spam_running)
-    {
-        const char *ssid = s_poom_wifi_spam_ssids.ssids[line_index];
-        size_t packet_len = 0U;
-        esp_err_t status;
-
-        vTaskDelay(pdMS_TO_TICKS(per_line_ms));
-
-        status = poom_wifi_spam_build_beacon_(ssid,
-                                              line_index,
-                                              sequence_numbers[line_index]++,
-                                              beacon_buffer,
-                                              &packet_len);
-        if(status != ESP_OK)
-        {
-            POOM_WIFI_SPAM_PRINTF_W("Beacon build failed for line %u", (unsigned)line_index);
-        }
-        else
-        {
-            status = esp_wifi_80211_tx(WIFI_IF_AP, beacon_buffer, packet_len, false);
-            if(status != ESP_OK)
-            {
-                POOM_WIFI_SPAM_PRINTF_E("esp_wifi_80211_tx failed: %s", esp_err_to_name(status));
-            }
-        }
-
-        line_index++;
-        if(line_index >= total_lines)
-        {
-            line_index = 0U;
-        }
-    }
-
-    s_poom_wifi_spam_task_handle = NULL;
-    vTaskDelete(NULL);
-}
-
-/**
- * @brief Starts the Wi-Fi spam module.
- * @param[in/out] none Not used.
- * @return esp_err_t
- */
 esp_err_t poom_wifi_spam_start(void)
 {
-    esp_err_t status;
-
-    if(s_poom_wifi_spam_running)
-    {
-        return ESP_OK;
-    }
-
-    poom_wifi_spam_ssids_ensure_loaded_();
-    if(s_poom_wifi_spam_ssids.count == 0U)
-    {
-        POOM_WIFI_SPAM_PRINTF_E("SSID list is empty (configure via CLI)");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    status = poom_wifi_spam_prepare_ap_();
-    if(status != ESP_OK)
-    {
-        return status;
-    }
-
-    s_poom_wifi_spam_running = true;
-    if(xTaskCreate(poom_wifi_spam_task_,
-                   "poom_wifi_spam",
-                   POOM_WIFI_SPAM_TASK_STACK,
-                   NULL,
-                   POOM_WIFI_SPAM_TASK_PRIO,
-                   &s_poom_wifi_spam_task_handle) != pdPASS)
-    {
-        s_poom_wifi_spam_running = false;
-        (void)poom_wifi_ctrl_ap_stop();
-        POOM_WIFI_SPAM_PRINTF_E("xTaskCreate failed");
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
+    if(poom_wifi_spam_is_running_()) return ESP_OK;
+    return poom_wifi_spam_start_mode(POOM_WIFI_SPAM_SAVED, 1U, 60000U);
 }
 
-/**
- * @brief Stops the Wi-Fi spam module.
- * @param[in/out] none Not used.
- * @return esp_err_t
- */
 esp_err_t poom_wifi_spam_stop(void)
 {
-    esp_err_t status = ESP_OK;
-
-    if(!s_poom_wifi_spam_running)
-    {
-        return ESP_OK;
-    }
-
-    s_poom_wifi_spam_running = false;
-
-    if(s_poom_wifi_spam_task_handle != NULL)
-    {
-        vTaskDelete(s_poom_wifi_spam_task_handle);
-        s_poom_wifi_spam_task_handle = NULL;
-    }
-
-    status = poom_wifi_ctrl_ap_stop();
-    if(status != ESP_OK)
-    {
-        POOM_WIFI_SPAM_PRINTF_W("poom_wifi_ctrl_ap_stop failed: %s", esp_err_to_name(status));
-    }
-
-    return status;
+    if(poom_wifi_spam_is_running_()) poom_wifi_marauder_stop();
+    return ESP_OK;
 }
 
-/**
- * @brief Reads the running state of the Wi-Fi spam module.
- * @param[in/out] out_running Output running flag pointer.
- * @return esp_err_t
- */
 esp_err_t poom_wifi_spam_get_running(bool *out_running)
 {
-    if(out_running == NULL)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    *out_running = s_poom_wifi_spam_running;
+    if(!out_running) return ESP_ERR_INVALID_ARG;
+    *out_running = poom_wifi_spam_is_running_();
     return ESP_OK;
+}
+
+void poom_wifi_spam_get_status(poom_wifi_spam_status_t *out)
+{
+    if(!out) return;
+    poom_marauder_status_t status;
+    poom_wifi_marauder_get_status(&status);
+    memset(out, 0, sizeof(*out));
+    if(status.mode != POOM_MARAUDER_BEACON_LIST) return;
+    out->running = status.running;
+    out->sent = status.sent;
+    out->errors = status.errors;
+    out->last_error = status.last_error;
+    out->elapsed_ms = status.elapsed_ms;
 }
 
 esp_err_t poom_wifi_spam_ssids_get(poom_wifi_spam_ssid_list_t* out_list)
@@ -510,7 +282,7 @@ esp_err_t poom_wifi_spam_ssids_set(const poom_wifi_spam_ssid_list_t* list)
     {
         return ESP_ERR_INVALID_ARG;
     }
-    if(s_poom_wifi_spam_running)
+    if(poom_wifi_spam_is_running_())
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -547,7 +319,7 @@ esp_err_t poom_wifi_spam_ssids_set(const poom_wifi_spam_ssid_list_t* list)
 
 esp_err_t poom_wifi_spam_ssids_remove(uint8_t index)
 {
-    if(s_poom_wifi_spam_running)
+    if(poom_wifi_spam_is_running_())
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -572,7 +344,7 @@ esp_err_t poom_wifi_spam_ssids_remove(uint8_t index)
 
 esp_err_t poom_wifi_spam_ssids_add(const char* ssid)
 {
-    if(s_poom_wifi_spam_running)
+    if(poom_wifi_spam_is_running_())
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -601,7 +373,7 @@ esp_err_t poom_wifi_spam_ssids_add(const char* ssid)
 
 esp_err_t poom_wifi_spam_ssids_reset_defaults(void)
 {
-    if(s_poom_wifi_spam_running)
+    if(poom_wifi_spam_is_running_())
     {
         return ESP_ERR_INVALID_STATE;
     }

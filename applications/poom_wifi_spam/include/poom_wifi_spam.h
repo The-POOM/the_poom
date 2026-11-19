@@ -23,6 +23,26 @@ typedef struct
     char ssids[POOM_WIFI_SPAM_SSIDS_MAX][POOM_WIFI_SPAM_SSID_MAX_LEN + 1U];
 } poom_wifi_spam_ssid_list_t;
 
+typedef enum {
+    POOM_WIFI_SPAM_SAVED = 0,
+    POOM_WIFI_SPAM_RANDOM,
+    POOM_WIFI_SPAM_FUNNY,
+    POOM_WIFI_SPAM_RICKROLL,
+    POOM_WIFI_SPAM_MODE_COUNT,
+} poom_wifi_spam_mode_t;
+
+typedef struct {
+    bool running;
+    uint32_t sent, errors, elapsed_ms;
+    esp_err_t last_error;
+} poom_wifi_spam_status_t;
+
+/* Presets are session-local; the saved SSID list is never overwritten. */
+esp_err_t poom_wifi_spam_start_mode(poom_wifi_spam_mode_t mode, uint8_t channel, uint32_t duration_ms);
+void poom_wifi_spam_get_status(poom_wifi_spam_status_t *status);
+const char *poom_wifi_spam_mode_label(poom_wifi_spam_mode_t mode);
+bool poom_wifi_spam_preset(poom_wifi_spam_mode_t mode, poom_wifi_spam_ssid_list_t *list);
+
 /**
  * @brief Starts the Wi-Fi spam module.
  * @param[in/out] none Not used.

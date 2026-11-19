@@ -27,6 +27,53 @@ static bool valid_target(const poom_marauder_frame_target_t *ap)
     return ap != NULL && ap->ssid_len <= sizeof(ap->ssid) && ap->channel != 0;
 }
 
+/* Native adaptation of Marauder BeaconFrame.cpp: no fabricated security,
+ * country or HT capability elements; rates and DS elements follow the band. */
+static size_t append_rates(uint8_t *out, uint8_t channel)
+{
+    static const uint8_t rates24[] = {1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24};
+    static const uint8_t rates5[] = {1, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c};
+    static const uint8_t extended[] = {50, 4, 0x30, 0x48, 0x60, 0x6c};
+    memcpy(out, channel > 14 ? rates5 : rates24, sizeof(rates24));
+    if(channel > 14) return sizeof(rates5);
+    out[10] = 3; out[11] = 1; out[12] = channel;
+    memcpy(out + 13, extended, sizeof(extended));
+    return 19U;
+}
+
+size_t poom_marauder_frame_probe(uint8_t *out, size_t capacity,
+    const poom_marauder_frame_target_t *ap, const uint8_t source[6], uint16_t sequence)
+{
+    static const uint8_t broadcast[6] = {255, 255, 255, 255, 255, 255};
+    if(!valid_target(ap) || !out || !source || !ap->ssid_len) return 0;
+    const size_t length = 26U + ap->ssid_len + (ap->channel > 14 ? 10U : 19U);
+    if(capacity < length) return 0;
+    memset(out, 0, length);
+    header(out, 0x40, 0, broadcast, source, broadcast, sequence);
+    out[25] = (uint8_t)ap->ssid_len;
+    memcpy(out + 26, ap->ssid, ap->ssid_len);
+    (void)append_rates(out + 26 + ap->ssid_len, ap->channel);
+    return length;
+}
+
+size_t poom_marauder_frame_advert(uint8_t *out, size_t capacity,
+    const poom_marauder_frame_target_t *ap, uint16_t sequence, uint64_t timestamp_us)
+{
+    static const uint8_t broadcast[6] = {255, 255, 255, 255, 255, 255};
+    if(!valid_target(ap) || !out) return 0;
+    const size_t length = 38U + ap->ssid_len + (ap->channel > 14 ? 10U : 19U);
+    if(capacity < length) return 0;
+    memset(out, 0, length);
+    header(out, 0x80, 0, broadcast, ap->bssid, ap->bssid, sequence);
+    for(size_t i = 0U; i < 8U; ++i) out[24 + i] = (uint8_t)(timestamp_us >> (i * 8U));
+    le16(out + 32, 100);
+    le16(out + 34, 1); /* ESS, open identity. No AP service is hosted. */
+    out[37] = (uint8_t)ap->ssid_len;
+    memcpy(out + 38, ap->ssid, ap->ssid_len);
+    (void)append_rates(out + 38 + ap->ssid_len, ap->channel);
+    return length;
+}
+
 size_t poom_marauder_frame_bad_msg(uint8_t *out, size_t capacity,
     const poom_marauder_frame_target_t *ap, const uint8_t client[6],
     uint16_t sequence, uint64_t replay, const uint8_t nonce[32])

@@ -29,4 +29,9 @@ size_t poom_marauder_frame_beacon(uint8_t *out, size_t capacity,
 size_t poom_marauder_frame_sae(uint8_t *out, size_t capacity,
     const poom_marauder_frame_target_t *ap, const uint8_t source[6],
     uint16_t sequence, const uint8_t scalar[32], const uint8_t point[64]);
+size_t poom_marauder_frame_probe(uint8_t *out, size_t capacity,
+    const poom_marauder_frame_target_t *ap, const uint8_t source[6], uint16_t sequence);
+/* An open beacon identity, not a hosted AP or a copy of negotiated security. */
+size_t poom_marauder_frame_advert(uint8_t *out, size_t capacity,
+    const poom_marauder_frame_target_t *identity, uint16_t sequence, uint64_t timestamp_us);
 #endif

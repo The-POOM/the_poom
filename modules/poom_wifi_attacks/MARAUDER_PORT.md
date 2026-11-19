@@ -1,4 +1,4 @@
-This module ports five Wi-Fi frame families from ESP32 Marauder develop
+This module adapts Wi-Fi test frame families from ESP32 Marauder develop
 `ef9a4bbb0ea53a2d0d3ed5b6c7bca590dadc20da` into POOM's native ESP-IDF runtime.
 Credit belongs to Just Call Me Koko for the original implementations; the full
 MIT notice is in `MARAUDER_LICENSE.txt`.
@@ -12,7 +12,7 @@ Channel Switch use the selected AP's identity/channel. SAE Commit accepts
 WPA3-Personal or WPA2/WPA3-Personal transition APs.
 
 Runs default to 60 seconds and cannot exceed 60 seconds. One frame is attempted
-per interval (minimum/default 100 ms), round-robin for a client list. Stop waits
+per interval (minimum/default 100 ms, or 10 ms for beacon lists), round-robin for a client list. Stop waits
 for worker cleanup before returning. The worker stops at the first transmit,
 frame-build, or crypto failure. `sent` counts successful Wi-Fi driver returns;
 it does not prove over-air reception, association disruption, or client behavior.
@@ -54,6 +54,20 @@ Compatibility limits:
   sends initial group-19 commits. It does not implement anti-clogging token
   retries, H2E/password-element negotiation, or complete SAE authentication.
   A target requiring any of those can reject the initial commits.
+- Probe Request sends a directed SSID probe using a fresh locally administered
+  source address. The native action first scans for the SSID/channel; hidden
+  names cannot be chosen. Marauder calls this operation `WIFI_ATTACK_AUTH`,
+  although it emits probe requests rather than authentication frames.
+- AP Clone copies the chosen AP's SSID and channel into an open beacon under a
+  distinct locally administered BSSID. It does not host a usable AP or reproduce
+  the original security configuration. `BeaconFrame.cpp` is the upstream format
+  reference; the native builder emits current sequence/timestamp and band rates.
+- SPAM WIFI uses the same checked worker with Saved, Random, Funny and Rick Roll
+  sources. Presets never replace the persisted list. Random creates 30 unique
+  identities per 10-second cycle; each beacon identity has its own sequence.
+  Rick Roll contains a title/link preset, not song lyrics. The OLED starts an
+  explicitly selected source/channel for 30 seconds; legacy CLI start uses the
+  saved list, channel 1 and a 60-second cap. B stops and waits for radio cleanup.
 
 No automatic scan, packet capture, anti-clogging receiver, or background network
 selection is hidden in this backend. Those are separate UI/scanner services.

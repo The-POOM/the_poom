@@ -1953,7 +1953,12 @@ static int cmd_wifi_spam_status(int argc, char** argv)
         return 1;
     }
 
-    printf("wifi-spam: %s | ssids=%u\n", running ? "RUNNING" : "STOPPED", (unsigned)list.count);
+    poom_wifi_spam_status_t status;
+    poom_wifi_spam_get_status(&status);
+    printf("wifi-spam: %s | saved_ssids=%u | sent=%lu errors=%lu elapsed_ms=%lu last_error=%s\n",
+           running ? "RUNNING" : "STOPPED", (unsigned)list.count,
+           (unsigned long)status.sent, (unsigned long)status.errors,
+           (unsigned long)status.elapsed_ms, esp_err_to_name(status.last_error));
     return 0;
 }
 

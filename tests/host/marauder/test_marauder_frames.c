@@ -130,11 +130,45 @@ static void test_sae_and_invalid(void)
     CHECK(poom_marauder_frame_sae(frame, 256, &ap, client, 0, scalar, NULL) == 0);
 }
 
+static void test_probe_and_open_beacon(void)
+{
+    poom_marauder_frame_target_t ap = {.bssid = {2, 3, 4, 5, 6, 7}, .channel = 6};
+    const uint8_t source[6] = {2, 1, 2, 3, 4, 5};
+    uint8_t frame[256];
+    memset(ap.ssid, 'Q', sizeof(ap.ssid));
+    for(size_t len = 1; len <= 32; ++len) for(unsigned band = 0; band < 2; ++band) {
+        ap.ssid_len = len; ap.channel = band ? 36 : 6;
+        memset(frame, 0xcc, sizeof(frame));
+        size_t n = poom_marauder_frame_probe(frame, sizeof(frame), &ap, source, 0xabc);
+        CHECK(n == 26 + len + (band ? 10U : 19U) && frame[n] == 0xcc);
+        CHECK(frame[0] == 0x40 && frame[1] == 0 && frame[25] == len);
+        CHECK(memcmp(frame + 10, source, 6) == 0);
+        CHECK(frame[4] == 255 && frame[16] == 255);
+        CHECK(frame[22] == 0xc0 && frame[23] == 0xab);
+        check_ies(frame, n, 24);
+        CHECK(poom_marauder_frame_probe(frame, n - 1, &ap, source, 0) == 0);
+        memset(frame, 0xcc, sizeof(frame));
+        n = poom_marauder_frame_advert(frame, sizeof(frame), &ap, 4096, UINT64_C(0x0102030405060708));
+        CHECK(n == 38 + len + (band ? 10U : 19U) && frame[n] == 0xcc);
+        CHECK(frame[0] == 0x80 && frame[34] == 1 && frame[35] == 0);
+        CHECK(frame[22] == 0 && frame[23] == 0 && frame[24] == 8 && frame[31] == 1);
+        CHECK(memcmp(frame + 10, ap.bssid, 6) == 0 && memcmp(frame + 16, ap.bssid, 6) == 0);
+        check_ies(frame, n, 36);
+        CHECK(poom_marauder_frame_advert(frame, n - 1, &ap, 0, 0) == 0);
+    }
+    ap.ssid_len = 0;
+    CHECK(poom_marauder_frame_probe(frame, sizeof(frame), &ap, source, 0) == 0);
+    ap.ssid_len = 33;
+    CHECK(poom_marauder_frame_probe(frame, sizeof(frame), &ap, source, 0) == 0);
+    CHECK(poom_marauder_frame_advert(frame, sizeof(frame), &ap, 0, 0) == 0);
+}
+
 int main(void)
 {
     test_bad_message();
     test_association_and_beacons();
     test_sae_and_invalid();
+    test_probe_and_open_beacon();
     printf("Marauder frame builders: %u checks passed; no radio I/O.\n", checks);
     return 0;
 }

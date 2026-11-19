@@ -33,6 +33,14 @@ $lifecycleArguments = $common + @(
 if ($LASTEXITCODE -ne 0) { throw "Lifecycle test compilation failed: $LASTEXITCODE" }
 & $lifecycleExecutable
 if ($LASTEXITCODE -ne 0) { throw "Lifecycle tests failed: $LASTEXITCODE" }
+$spamDirectory = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../applications/poom_wifi_spam'))
+$presetExecutable = Join-Path $BuildDirectory 'test_spam_presets.exe'
+$presetArguments = $common + @("-I$(Join-Path $PSScriptRoot 'mocks')", "-I$spamDirectory/include",
+    (Join-Path $PSScriptRoot 'test_spam_presets.c'), (Join-Path $spamDirectory 'poom_wifi_spam_presets.c'), '-o', $presetExecutable)
+& $compilerPath @presetArguments
+if ($LASTEXITCODE -ne 0) { throw "Preset test compilation failed: $LASTEXITCODE" }
+& $presetExecutable
+if ($LASTEXITCODE -ne 0) { throw "Preset tests failed: $LASTEXITCODE" }
 } finally {
     $env:PATH = $originalPath
 }
