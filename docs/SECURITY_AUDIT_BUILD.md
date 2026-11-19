@@ -24,8 +24,8 @@ hardware comparison failed at 16/16 and passed at 10/6 with external mbedTLS
 allocation enabled. For release-matched hardware testing, seed a separate
 build directory with the passing generated stock config and pass its absolute
 path as `SDKCONFIG`. Check the generated values before flashing. This keeps
-the upstream profile files unchanged. Security Audit needs its own hardware
-acceptance with that configuration.
+the upstream profile files unchanged. Security Audit passed its standalone smoke test with that configuration.
+See the [validation notes](SECURITY_AUDIT_VALIDATION.md).
 
 ## Build with the upstream profile
 
@@ -56,7 +56,7 @@ The optional host harness, tests and stubs are preserved at source commit
 `320f0e8` on the local `validation/security-audit-pr51` branch. The firmware
 build has no host-test dependency.
 
-## Hardware acceptance still required
+## Hardware regression checks
 
 On an owned test network, verify entry/exit, cancel and hold-B during each
 scan/audit phase, reconnect after offline lookup, repeated sessions, missing

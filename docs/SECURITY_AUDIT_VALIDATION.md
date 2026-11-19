@@ -54,8 +54,19 @@ heap headroom or app-transition behavior.
   mounted state. Existing mount and format entry points keep four file
   slots.
 
-A full firmware build and standalone hardware regression checks are pending
-for this revision. The checks below apply to the earlier combined build.
+### Standalone ESP32-C5 smoke test
+
+On 19 November 2026 the pinned POOM release SDK built and linked revision
+`9d39dbffb4d70e3293a68c1c3b2f3d0b6b0b4330` as Windows build
+`build-pr51-review-20261119-203521`. The image was `0x37b9e0` bytes, leaving
+4% of the smallest app partition free. The generated config checks passed
+for RX10, BA6 and external mbedTLS allocation.
+
+The owner reported that the standalone smoke checks passed, including SD
+report saving, returning to existing apps and reopening Security Audit
+without rebooting. The serial excerpt confirms a successful SD mount,
+indexed lookup and normal audit exit. Wi-Fi startup fault injection was
+outside the reported smoke test.
 
 ## Owner hardware checks
 
@@ -68,9 +79,8 @@ responsive main menu on exit.
 
 These are owner-reported hardware results; the cloud environment has no device.
 The hardware build also contained the separate handshake and Wardrive features,
-and enabled Wardrive diagnostics. The standalone branch was built separately
-but was not separately flashed. Hardware checks with diagnostics disabled and
-ESP32-C6 validation are not claimed.
+and enabled Wardrive diagnostics. The standalone smoke test above was performed separately. ESP32-C6 validation
+remains pending.
 
 ## Integration note
 
