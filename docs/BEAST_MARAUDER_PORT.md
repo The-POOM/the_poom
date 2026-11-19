@@ -1,7 +1,7 @@
 # Native Beast Wi-Fi actions and Marauder feature mapping
 
-The Beast menu adds Bad Msg, Association Sleep, Quiet Time, Channel Switch and
-SAE Commit actions using POOM's ESP-IDF radio services and OLED controls. Each
+The Beast menu adds Wi-Fi actions, BLE profiles/advertising, Find My sound,
+passive recon and CSI views using POOM's ESP-IDF radio services and OLED controls. Each targeted Wi-Fi
 action starts its own discovery flow: choose the action, choose a network,
 choose clients when needed, review the run settings, and press **A:START**.
 There is no prerequisite scan elsewhere in the menu.
@@ -76,14 +76,17 @@ output equivalence.
 | PMKID | Existing handshake parser and `.22000` sidecar export | The presence of a PMKID/export is distinct from recovering a password. |
 | WPS | Existing WFA EAP-Expanded capture | This is not a WPS-capable-AP discovery display or a WPS enrollment workflow. |
 | SAE capture | New SNIFFER `SAE` mode | Passive capture of SAE Authentication commit, confirm and status/token responses. No group/token detail UI or token-retry state machine is added. |
-| Pwnagotchi discovery | No dedicated advertisement decoder | POOMGOTCHI is POOM's handshake-capture app; its name does not mean it detects Pwnagotchi advertisements. |
+| Pwnagotchi discovery | WIFI GUARD bounded JSON advertisement parser | Shows observed Pwnagotchi fields; does not authenticate device identity. |
 | Espressif discovery | Existing OUI/vendor labels | No dedicated Espressif-only scan/filter is added. |
 | Channel activity, packet rates and signal views | `SCAN CHANNELS`, `SPECTRUM`, frame-mix statistics and Fox Hunt | Related native views, not identical Marauder data presentation. |
 | BLE discovery/capture | BLE DETECT now includes FindMy monitor, iBeacon detail, Flipper/Flock/Meta/HC-name candidate filters and measured report-rate view | Native paged selection, strict AD parsing and existing Fox Hunt/GATT handoff; see [scope and provenance](../applications/poom_ble_detector/MARAUDER_PASSIVE_BLE.md). HC-name matches do not prove a skimmer; C5 does not support Classic-only inquiry. |
 | FindMy sound | FIND MY BEEP, selected tag or one-pass batch | AirTag/FMNA/DULT services must be discovered. ATT acknowledgment is separate from audible output; physical tag compatibility remains a device acceptance item. |
 | Remote ID | Existing drone scan features | Existing POOM implementation; this change does not revalidate every transport. |
-| PineScan, multi-SSID detection, CSI motion and follow detection | No dedicated counterparts identified in this port | Not implemented by this change. |
-| ARP, ping and port/service scans | Existing `SCAN NET` ARP discovery, TCP/UDP port probes, SSH checks and common-service host probes | ICMP ping and a complete 1..65535 TCP port sweep remain separate gaps; existing native probes should be reused. |
+| PineScan, multi-SSID and Wi-Fi Flock candidates | WIFI GUARD pages and direct AP Fox Hunt handoff | Bounded history, explicit heuristic reasons and SD JSONL reports; see [observer documentation](WIFI_OBSERVER.md). |
+| Wi-Fi recon | WIFI RECON AP/station/probe sessions | Relationships, observation-window changes, repeats, overflow and explicit report export. |
+| CSI motion | CSI RF MOTION | C5 signed 12-bit samples, selected AP, 30-second calibration and RF-change model; [limits](CSI_RF_MOTION.md). Physical reception/calibration remains unverified. |
+| ARP, ping and port/service scans | SCAN NET adds ICMP discovery and selected-host TCP ports 1..65535 with eight concurrent sockets | Cooperative cancellation, complete open-port bitmap and named TCP presets; [scope](../applications/poom_wifi_arp/CONNECTED_SCAN.md). |
+| BLE advertising modes | SPAM BLE explicit-start mode chooser | Apple Devices/Juice, Sour Apple, Swift Pair, Samsung, Fast Pair, Flipper and All; bounded runs and checked stop. [Details](../applications/poom_ble_spam/README.md). |
 | GPS tracking and wardriving | Existing `WARDRIVING NODE` forwards records to an external core | The external core owns GPS/logging. Standalone GPS tracking and station/BLE wardriving orchestration are not added. |
 
 Existing deauthentication, Wi-Fi Clone/Combine, Karma, Wi-Fi/BLE spam and captive
@@ -141,6 +144,21 @@ POOM components retain their own license notices and attribution. This document
 does not imply upstream endorsement or that the resulting firmware is Marauder.
 
 ## Verification and lab acceptance
+
+Preview 3 (`1.0-r17-beast3`) was flashed and every application byte was read back
+and matched to the packaged image. On the owned Apple AirTag, the owner confirmed
+individual selection produced an audible beep and Back worked. A separate
+BEEP ALL check beeped and finished, and BLE DETECT scanned afterward. These
+results apply to that AirTag and preview; multi-tag diversity, FMNA/DULT and later
+integrated-build acceptance are not inferred from them.
+
+This snapshot does not claim complete Marauder parity. Separate BLE Recon
+missions, selected AirTag advertisement replay, standalone GPS/geofence/POI
+workflows, service uploads, generalized AP/MAC settings and Marauder-compatible
+inventory import/export remain outside the submitted implementation. C5 cannot
+perform Bluetooth Classic-only inquiry. Existing native features are reused
+where they already cover an operation, and radio-dependent effects need physical
+acceptance beyond compilation and mocked APIs.
 
 Host checks exercise frame construction, parsing and cache behavior without
 using a radio. The passive checks are documented in

@@ -16,6 +16,8 @@ per interval (minimum/default 100 ms, or 10 ms for beacon lists), round-robin fo
 for worker cleanup before returning. The worker stops at the first transmit,
 frame-build, or crypto failure. `sent` counts successful Wi-Fi driver returns;
 it does not prove over-air reception, association disruption, or client behavior.
+`radio_released` is true only after successful driver deinitialization. A failed
+release remains visible, blocks subsequent starts, and makes stop return an error.
 
 The native port uses the existing POOM raw-transmit driver environment. Driver
 acceptance of arbitrary data/authentication frames is SDK- and device-dependent;

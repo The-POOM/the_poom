@@ -4,6 +4,10 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (!$CJsonDirectory) { $CJsonDirectory = Join-Path $repoRoot 'managed_components\espressif__cjson\cJSON' }
 if (!$OutputDirectory) { $OutputDirectory = Join-Path $env:TEMP 'poom-observer-tests' }
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+$savedPath = $env:PATH
+try {
+    $compilerPath = (Get-Command $Compiler).Source
+    $env:PATH = "$(Split-Path $compilerPath);$savedPath"
 $exe = Join-Path $OutputDirectory 'wifi_observer.exe'
 & $Compiler -std=c11 -Wall -Wextra -Werror -Wno-misleading-indentation -O1 -g `
     "-I$repoRoot\modules\poom_wifi_observer\include" "-I$CJsonDirectory" `
@@ -11,10 +15,6 @@ $exe = Join-Path $OutputDirectory 'wifi_observer.exe'
     (Join-Path $repoRoot 'modules\poom_wifi_observer\poom_wifi_observer_model.c') `
     (Join-Path $CJsonDirectory 'cJSON.c') -lm -o $exe
 if ($LASTEXITCODE -ne 0) { throw 'Observer host compilation failed' }
-$savedPath = $env:PATH
-try {
-    $compilerPath = (Get-Command $Compiler).Source
-    $env:PATH = "$(Split-Path $compilerPath);$savedPath"
     & $exe
     if ($LASTEXITCODE -ne 0) { throw 'Observer host tests failed' }
     $lifecycle = Join-Path $OutputDirectory 'observer_lifecycle.exe'
