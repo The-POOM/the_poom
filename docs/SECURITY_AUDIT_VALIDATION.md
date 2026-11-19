@@ -17,16 +17,16 @@ worktree. The original source branch is preserved at
 - Document and supply the opt-in Wardrive-verified release memory profile.
 - Correct SD mount comments to describe two file slots (CSV and index).
 
-## Completed checks
+## Checks completed before the maintainer revision
 
 - Six existing host suites: audit logic, rules, checks, index, scan logic and
   identification; ASan/UBSan enabled, zero failures.
 - GCC 14.2 and Clang 19.1 compile-only checks: C23, warnings as errors.
 - Harness regression: injected compiler and executable failures both stop the
   suite, preserve diagnostics and clean temporary files.
-- Full ESP32-C5 firmware build and size check with the exact SDK and profile in
-  [build instructions](SECURITY_AUDIT_BUILD.md), including the real lwIP backend,
-  shared Wi-Fi controller, SD driver and menu integration.
+- Full ESP32-C5 firmware build and size check with the pinned SDK and the former
+  standalone audit profile, including the real lwIP backend, shared Wi-Fi
+  controller, SD driver and menu integration.
 - All 16 explicit release-profile settings verified in generated sdkconfig.
 - Upstream defaults, partitions, dependency versions, Device Inspector and
   Wi-Fi Guard sources unchanged. No Wardrive feature code included.
@@ -36,6 +36,26 @@ The build has warnings in upstream/third-party code and SDK component dependency
 validation; it is not a warning-free build. Host compiler checks for the scanner
 are strict. The build's static memory/partition checks do not establish runtime
 heap headroom or app-transition behavior.
+
+## Maintainer revision
+
+- Reuse the upstream RAM optimization profile and remove the app-specific
+  profile. Record the fresh RX16 / BA16 versus release RX10 / BA6 difference
+  in the build notes.
+- Preserve the optional host infrastructure at source commit `320f0e8`.
+  Remove the test suites and stubs from the firmware PR diff.
+- Restore the stock Wi-Fi controller. Verify on hardware that a failed audit
+  Wi-Fi startup and subsequent exit leave the next Wi-Fi app usable.
+- Keep shared changes to build/menu registration and the SD driver. The
+  two-file mount reduces contiguous allocation pressure for the audit's CSV
+  and index. Raw mount status lets the audit distinguish memory pressure
+  from a missing or unreadable volume. The SD handle is cleared after FAT
+  unmount succeeds so a subsequent SPI cleanup failure cannot leave a stale
+  mounted state. Existing mount and format entry points keep four file
+  slots.
+
+A full firmware build and standalone hardware regression checks are pending
+for this revision. The checks below apply to the earlier combined build.
 
 ## Owner hardware checks
 

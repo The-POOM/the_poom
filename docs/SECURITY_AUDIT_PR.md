@@ -28,7 +28,7 @@ Without the CSV, discovery, port scanning, identification and exposure checks st
 ### Notes
 
 - Based on upstream **1.0.16**. Stock defaults, partitions and dependency versions are unchanged.
-- Release build: ESP-IDF `95b6f32350e1118181d1a1c375972cbcd85a6540` (`v6.1-dev-1391-g95b6f32350e`), with the optional `sdkconfig.security_audit_release` PSRAM/external-BSS profile verified during Wardrive work.
+- Release build: ESP-IDF `95b6f32350e1118181d1a1c375972cbcd85a6540` (`v6.1-dev-1391-g95b6f32350e`), with POOM’s existing `sdkconfig.esp32c5.ram_optimization` profile. See the build notes for the RX10 / BA6 hardware test configuration.
 - **Authorized use only** — for networks and devices the user owns or has permission to assess. The app does not run exploits or attempt passwords.
 - TCP Connect scanning only; HTTPS service identification and HTTP exposure checks over TLS are not supported.
 - **Tested:** standalone ESP32-C5 build and partition-size checks; six ASan/UBSan host suites; GCC/Clang compile checks and harness-failure tests. The owner flashed and tested the feature in a combined ESP32-C5 QA build, including audits, indexed lookup, report saving, renamed screens and app transitions. The standalone branch was not separately flashed; ESP32-C6 hardware is unverified.

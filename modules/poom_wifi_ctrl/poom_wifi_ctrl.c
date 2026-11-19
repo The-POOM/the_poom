@@ -380,7 +380,6 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
         }
     }
 
-    bool inited_here = false;
     if (!s_wifi.wifi_initialized)
     {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -392,16 +391,14 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
             return err;
         }
 
-        s_wifi.wifi_initialized = true;
-        inited_here = true;
-
         err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
         if (err != ESP_OK)
         {
             POOM_PRINTF_E("wifi set storage failed: %s", esp_err_to_name(err));
-            goto fail_cleanup;
+            return err;
         }
 
+        s_wifi.wifi_initialized = true;
         POOM_PRINTF_D("Wi-Fi driver initialized");
     }
 
@@ -409,7 +406,7 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
     if (err != ESP_OK)
     {
         POOM_PRINTF_E("wifi set mode failed: %s", esp_err_to_name(err));
-        goto fail_cleanup;
+        return err;
     }
 
     if (((mode == WIFI_MODE_AP) || (mode == WIFI_MODE_APSTA)) && (!s_wifi.default_ap_mac_saved))
@@ -430,24 +427,10 @@ static esp_err_t poom_wifi_ctrl_common_init_(wifi_mode_t mode)
     if (err != ESP_OK)
     {
         POOM_PRINTF_E("wifi start failed: %s", esp_err_to_name(err));
-        goto fail_cleanup;
+        return err;
     }
 
     return ESP_OK;
-
-fail_cleanup:
-    /* A driver THIS call initialised but could not bring up (typically
-     * ESP_ERR_NO_MEM on a fragmented heap) is torn down again, so it neither
-     * strands its buffers nor leaves a half-initialised driver that every
-     * later Wi-Fi app trips over. A driver someone else initialised is left
-     * as it was. */
-    if (inited_here)
-    {
-        (void)esp_wifi_stop();
-        (void)esp_wifi_deinit();
-        s_wifi.wifi_initialized = false;
-    }
-    return err;
 }
 
 /* =========================

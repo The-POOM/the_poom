@@ -14,19 +14,20 @@ Keep the upstream dependency versions.
 
 ## Memory profile
 
-`sdkconfig.security_audit_release` reproduces the Wardrive-verified memory
-settings from `feature/wardrive-pr-1.0.16` at `41509ed`:
-quad PSRAM at 80 MHz, malloc enabled, internal threshold 512 bytes,
-internal reserve 32768 bytes, Wi-Fi/LWIP allocations in PSRAM, external BSS,
-static RX 10, dynamic RX 32, static TX 16, cache TX 32 and RX BA window 6.
+Use POOM's existing `sdkconfig.esp32c5.ram_optimization` alongside
+`sdkconfig.defaults`. The profile enables PSRAM allocation, external BSS,
+Wi-Fi/LWIP external allocation and external mbedTLS allocation.
 
-External BSS is required for memory equivalence with that verified profile.
-This is opt-in: stock defaults, partitions, TLS and Wi-Fi IRAM settings are
-unchanged. The broader `sdkconfig.esp32c5.ram_optimization` profile is not
-this acceptance configuration. Wardrive's hardware acceptance does not
-establish hardware acceptance of Security Audit.
+Fresh generation on the pinned SDK selects static Wi-Fi RX16 and BA16.
+Published POOM 1.0.16 and 1.0.17 binaries use RX10 and BA6. A stock-only
+hardware comparison failed at 16/16 and passed at 10/6 with external mbedTLS
+allocation enabled. For release-matched hardware testing, seed a separate
+build directory with the passing generated stock config and pass its absolute
+path as `SDKCONFIG`. Check the generated values before flashing. This keeps
+the upstream profile files unchanged. Security Audit needs its own hardware
+acceptance with that configuration.
 
-## Fresh build
+## Build with the upstream profile
 
 Use a fresh build directory with its own generated sdkconfig; defaults do
 not reliably override an existing configuration.
@@ -35,13 +36,14 @@ not reliably override an existing configuration.
 git submodule update --init --recursive
 idf.py -B build-security-audit-release -D IDF_TARGET=esp32c5 \
   -D SDKCONFIG=build-security-audit-release/sdkconfig \
-  '-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.security_audit_release' build size
+  '-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.esp32c5.ram_optimization' build size
 ```
 
-Verify the generated sdkconfig contains every setting in the profile,
-especially `SPIRAM_USE_MALLOC=y`,
+Verify the generated PSRAM and allocator settings, including
+`SPIRAM_USE_MALLOC=y`,
 `SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`, `ALWAYSINTERNAL=512` and
-`RESERVE_INTERNAL=32768`. Flash only the intended test device:
+`RESERVE_INTERNAL=32768`. For the hardware run, also verify static RX10,
+BA6 and external mbedTLS allocation before flashing.
 
 ```sh
 idf.py -B build-security-audit-release -p YOUR_PORT flash
@@ -50,19 +52,9 @@ idf.py -B build-security-audit-release -p YOUR_PORT monitor --no-reset
 
 ## Host checks
 
-With GCC, Clang and sanitizer runtimes installed:
-
-```sh
-sh tools/security_audit_hostcheck/check.sh
-sh tools/security_audit_hostcheck/test_harness.sh
-```
-
-The harness runs six pure-logic suites under ASan/UBSan and compile checks
-with both GCC and Clang in C23 mode with warnings as errors. It uses isolated
-temporary files, propagates compiler and test failures, and may be run from
-any working directory. The separate harness regression injects compiler and
-test failures. Host stubs do not verify lwIP, drivers or radio transitions;
-the full firmware build is required for those source files.
+The optional host harness, tests and stubs are preserved at source commit
+`320f0e8` on the local `validation/security-audit-pr51` branch. The firmware
+build has no host-test dependency.
 
 ## Hardware acceptance still required
 
