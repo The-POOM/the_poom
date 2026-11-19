@@ -755,16 +755,15 @@ static void power_off_enter_deep_sleep_(void)
         (void)sd_card_unmount();
     }
 
-    bool wake_ok = (gpio_config(&wake_cfg) == ESP_OK) &&
-                   (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) == ESP_OK);
-    /* 1.0.15 used esp_deep_sleep_enable_gpio_wakeup(), which ESP-IDF v6.1.0
-     * (the version 1.0.15 targets) does not expose for the esp32c5. Use the
-     * GPIO-wakeup API that v6.1.0 does have. On this chip/IDF that may only
-     * wake from light sleep; from deep sleep the device wakes on reset. */
-    (void)wake_mask;
-    wake_ok = wake_ok &&
-              (gpio_wakeup_enable(wake_pin, GPIO_INTR_LOW_LEVEL) == ESP_OK) &&
-              (esp_sleep_enable_gpio_wakeup() == ESP_OK);
+    const bool wake_ok =
+        (gpio_config(&wake_cfg) == ESP_OK) &&
+        (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) == ESP_OK) &&
+#if SOC_GPIO_SUPPORT_HP_PERIPH_PD_SLEEP_WAKEUP
+        (esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(wake_mask, ESP_GPIO_WAKEUP_GPIO_LOW) == ESP_OK);
+#else
+        /* The POOM release SDK snapshot predates the API rename. */
+        (esp_deep_sleep_enable_gpio_wakeup(wake_mask, ESP_GPIO_WAKEUP_GPIO_LOW) == ESP_OK);
+#endif
     if (!wake_ok)
     {
         /* Re-enable the screen so a configuration failure is visible. */
