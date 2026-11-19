@@ -15,7 +15,12 @@ stream transaction helper for the GPS receiver.
   the app is open. Completed radio/file workers are suspended and joined by
   their owner before their state is reused or released.
 - Wi-Fi uses a Wardrive-private adapter, handler instances and callback slot.
-  It refuses an already-initialised driver or active Bluetooth controller;
+  On menu entry it asks the stock manager to release its own idle NULL-mode
+  driver, provided promiscuous capture is off and Bluetooth is idle. Unknown
+  owners and active STA/AP connections or captures are refused. The manager
+  performs teardown so its bookkeeping stays consistent; Wardrive waits 200 ms
+  for deferred task cleanup. Private operation then refuses an already-initialised
+  driver or active Bluetooth controller;
   it does not disconnect somebody else's connection to obtain ownership.
 - Private Wi-Fi initialisation uses RAM configuration storage. Its scan/transfer
   buffers apply only to that driver instance. Cleanup stops scans, clears the

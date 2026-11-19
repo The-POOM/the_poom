@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "wardrive_debug.h"
+#include "wardrive_wifi.h"
 #include "menu_wardrive.h"
 #include "poom_gps_capture.h"
 #include <errno.h>
@@ -1200,8 +1201,10 @@ void menu_wardrive_show(void) {
         uint8_t token=1; poom_sbus_publish("poom/menu/resume",&token,sizeof(token),0);
         return;
     }
+    esp_err_t entry_radio=wd_wifi_release_idle_stock();
     ui->presented_screen=UINT_MAX; ui->presented_gps_page=UINT_MAX;
     ui->screen=WD_SCREEN_MAIN; ui->selection=0; ui->exiting=false; ui->stopping=false; ui->mounted_here=false; ui->raw=false; ui->message[0]=0;
+    if(entry_radio!=ESP_OK) strcpy(ui->message,"RADIO BUSY");
     ui->had_fix=false; wd_hold_cancel(&ui->hold); memset(ui->suppress_click,0,sizeof(ui->suppress_click));
     buttons=xQueueCreate(16,sizeof(wd_key_event_t));
     if(buttons&&poom_sbus_subscribe_cb("input/button",button,NULL)) {

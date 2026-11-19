@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 /* Private station lifecycle. Never modifies the stock Wi-Fi manager's state,
- * callback slot, mDNS service or profiles. Never takes over an existing driver. */
+ * callback slot, mDNS service or profiles during private operation. Menu entry
+ * can ask the stock manager to release its own inactive cached driver. */
 #include "wardrive_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_wifi_default.h"
 #include "esp_bt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <stdatomic.h>
 #include <string.h>
 static bool owned, loop_owned, netif_owned, wifi_handler, ip_handler;
@@ -95,6 +98,32 @@ esp_err_t wd_wifi_deinit(void)
     if(loop_owned) { result = esp_event_loop_delete_default(); if(result != ESP_OK) return result; loop_owned = false; }
     atomic_store(&has_ip, false);
     return result;
+}
+esp_err_t wd_wifi_release_idle_stock(void)
+{
+    if(wd_wifi_owned()) return ESP_ERR_INVALID_STATE;
+    wifi_mode_t mode;
+    esp_err_t err=esp_wifi_get_mode(&mode);
+    if(err==ESP_ERR_WIFI_NOT_INIT) return ESP_OK;
+    if(err!=ESP_OK) return err;
+    /* NULL has no station/AP interface. Promiscuous capture must also be off;
+     * otherwise this may still belong to an active sniffer. */
+    if(mode!=WIFI_MODE_NULL || esp_bt_controller_get_status()!=ESP_BT_CONTROLLER_STATUS_IDLE)
+        return ESP_ERR_INVALID_STATE;
+    bool promiscuous;
+    err=esp_wifi_get_promiscuous(&promiscuous);
+    if(err!=ESP_OK) return err;
+    if(promiscuous) return ESP_ERR_INVALID_STATE;
+    /* Cooperate through the manager, not raw esp_wifi_deinit: its initialized
+     * flag and event-handler bookkeeping must stay consistent. If it does not
+     * own this driver it leaves it alone, and the mode check below refuses it. */
+    err=poom_wifi_ctrl_deinit();
+    if(esp_wifi_get_mode(&mode)==ESP_ERR_WIFI_NOT_INIT) {
+        /* Driver task stack reclamation is deferred to the FreeRTOS idle task. */
+        vTaskDelay(pdMS_TO_TICKS(200));
+        return ESP_OK;
+    }
+    return err==ESP_OK?ESP_ERR_INVALID_STATE:err;
 }
 esp_err_t wd_wifi_init_sta_with_config(const wifi_init_config_t *config)
 {

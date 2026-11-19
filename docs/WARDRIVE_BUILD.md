@@ -17,10 +17,11 @@ threshold, a 32 KiB internal reserve, Wi-Fi/LWIP external allocation, external
 BSS and external mbedTLS allocation. TLS certificate verification is unchanged.
 
 On the pinned release SDK, fresh generation selects static Wi-Fi RX 16 and RX
-BA window 16. Those differ from the earlier hardware-tested custom profile's
-10/6; mbedTLS also now allocates externally. Earlier hardware acceptance is
-historical evidence, not proof of the revised configuration. Repeat the app
-transition, GPS/recording and transfer smoke tests after this change.
+BA window 16. Published POOM 1.0.16 and 1.0.17 binaries instead use 10/6,
+with external mbedTLS allocation. A controlled stock-only hardware comparison
+failed at 16/16 and passed at 10/6. Current Wardrive handoff testing reuses the
+passing generated stock configuration, retaining external mbedTLS allocation.
+This does not establish hardware acceptance of fresh 16/16 defaults.
 Do not modify the shared profile or disable Wi-Fi IRAM options for this app.
 
 ## Fresh build
