@@ -502,15 +502,16 @@ static void fox_ble_cb_(const esp_ble_gap_cb_param_t *scan_result)
     {
         char name[20];
         poom_ble_detector_record_t classified;
-        size_t adv_len = (size_t)scan_result->scan_rst.adv_data_len +
-                         (size_t)scan_result->scan_rst.scan_rsp_len;
+        const size_t adv_len = scan_result->scan_rst.adv_data_len;
+        const size_t response_len = scan_result->scan_rst.scan_rsp_len;
 
-        if(adv_len > sizeof(scan_result->scan_rst.ble_adv))
+        if(adv_len > 31U || response_len > 31U ||
+           adv_len + response_len > sizeof(scan_result->scan_rst.ble_adv))
         {
-            adv_len = sizeof(scan_result->scan_rst.ble_adv);
+            return;
         }
-        if(poom_ble_detector_parse(scan_result->scan_rst.ble_adv,
-                                   adv_len,
+        if(poom_ble_detector_parse_parts(scan_result->scan_rst.ble_adv, adv_len,
+                                   scan_result->scan_rst.ble_adv + adv_len, response_len,
                                    scan_result->scan_rst.bda,
                                    scan_result->scan_rst.rssi,
                                    &classified) &&
