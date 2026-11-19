@@ -1,288 +1,192 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 THE POOM
-
 #include "menu_ble_spam.h"
-
-#include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
 #include "Arduboy2.h"
 #include "button_driver.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "input_events.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "poom_ble_spam.h"
+#include "poom_ble_tracker.h"
+#include "poom_ble_scan.h"
+#include "poom_ble_detector.h"
+#include "poom_ble_gatt_client.h"
 #include "poom_sbus.h"
 
-#define POOM_MENU_RESUME_TOPIC "poom/menu/resume"
+enum {KEY_A,KEY_B,KEY_LEFT,KEY_RIGHT,KEY_UP,KEY_DOWN};
+typedef struct {
+    QueueHandle_t input;
+    bool subscribed;
+    bool has_run;
+    bool awaiting_result;
+    poom_ble_spam_config_t config;
+    poom_ble_spam_status_t status;
+    esp_err_t error;
+} session_t;
+static portMUX_TYPE input_lock=portMUX_INITIALIZER_UNLOCKED;
+static QueueHandle_t input_queue;
+static session_t *session;
+static bool stopping;
+static const char subscriber[]="menu_ble_spam";
 
-#ifndef BUTTON_SINGLE_CLICK
-#define BUTTON_SINGLE_CLICK (4U)
-#endif
-
-#define MENU_BLE_SPAM_REFRESH_MS (250U)
-#define MENU_BLE_SPAM_TASK_STACK (3072U)
-#define MENU_BLE_SPAM_TASK_PRIO (4U)
-
-#define HEADER_H (11)
-#define BOX_Y (12)
-#define BOX_H (40)
-
-#define TEXT_X (4)
-#define ROW0_Y (16)
-#define ROW_STEP (8)
-
-static bool s_menu_ble_spam_active = false;
-static bool s_menu_ble_spam_running = false;
-static bool s_menu_ble_spam_buttons_subscribed = false;
-static bool s_menu_ble_spam_exit_requested = false;
-static TaskHandle_t s_menu_ble_spam_task = NULL;
-static char s_menu_ble_spam_sbus_user[] = "menu_ble_spam";
-static char s_menu_ble_spam_status[22] = "Starting...";
-static char s_menu_ble_spam_name[22] = "scanning...";
-
-static void menu_ble_spam_draw_(void);
-static void menu_ble_spam_exit_(void);
-static void menu_ble_spam_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
-
-/**
- * @brief Internal helper for `menu_ble_spam_on_name`.
- *
- * @param[in] name Parameter passed to the helper.
- * @return void
- */
-static void menu_ble_spam_on_name_(const char *name)
+static void print_(int y,const char *text)
 {
-    if (name == NULL)
-    {
-        return;
-    }
-
-    (void)snprintf(s_menu_ble_spam_name, sizeof(s_menu_ble_spam_name), "%.14s", name);
+    char line[22];
+    (void)snprintf(line,sizeof(line),"%.21s",text);
+    poom_arduboy_set_cursor(1,y);
+    (void)poom_arduboy_print(line);
 }
-
-/**
- * @brief Draws the menu header.
- *
- * @return void
- */
-static void menu_ble_spam_draw_header_(void)
+static void draw_(session_t *s)
 {
-    poom_arduboy_set_cursor(40, 2);
-    (void)poom_arduboy_print(F("BLE SPAM"));
-    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, HEADER_H, INVERT);
-}
-
-/**
- * @brief Draws the current menu state.
- *
- * @return void
- */
-static void menu_ble_spam_draw_(void)
-{
-    char line_state[22];
-
-    (void)snprintf(line_state, sizeof(line_state), "State: %s", s_menu_ble_spam_running ? "RUNNING" : "PAUSED");
-
+    char text[64];
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-
-    menu_ble_spam_draw_header_();
-
-    poom_arduboy_draw_rect(0, BOX_Y, ARDUBOY_WIDTH, BOX_H, WHITE);
-
-    poom_arduboy_set_cursor(TEXT_X, ROW0_Y);
-    (void)poom_arduboy_print(line_state);
-
-    poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + ROW_STEP));
-    (void)poom_arduboy_print(F("Name:"));
-
-    poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + 2 * ROW_STEP));
-    (void)poom_arduboy_print(s_menu_ble_spam_name);
-
-    poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + 3 * ROW_STEP));
-    (void)poom_arduboy_print(s_menu_ble_spam_status);
-
-    poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print(F("A:TOGGLE"));
-    poom_arduboy_set_cursor(72, 56);
-    (void)poom_arduboy_print(F("B:BACK"));
-
+    print_(1,"BLE ADVERTISING");
+    poom_arduboy_fill_rect(0,0,ARDUBOY_WIDTH,10,INVERT);
+    print_(14,poom_ble_spam_mode_name(s->status.active?s->status.mode:s->config.mode));
+    if(s->status.active) {
+        print_(25,s->status.label[0]?s->status.label:"Starting Bluetooth...");
+        (void)snprintf(text,sizeof(text),"%lu cycles %lu/%lus",(unsigned long)s->status.cycles,
+                       (unsigned long)(s->status.elapsed_ms/1000U),(unsigned long)(s->status.duration_ms/1000U));
+        print_(36,text);
+        print_(46,"Receiver effect unknown");
+        print_(56,"A:STOP B:BACK");
+    } else {
+        (void)snprintf(text,sizeof(text),"%lus  LEFT/RIGHT: time",(unsigned long)(s->config.duration_ms/1000U));
+        print_(25,text);
+        if(s->error!=ESP_OK) print_(36,esp_err_to_name(s->error));
+        else if(s->has_run) {
+            (void)snprintf(text,sizeof(text),"Finished: %lu cycles",(unsigned long)s->status.cycles);
+            print_(36,text);
+        } else print_(36,"UP/DOWN: choose mode");
+        print_(46,s->has_run && !s->status.radio_released?"BT release failed":"A starts selected mode");
+        print_(56,"A:START B:BACK");
+    }
     poom_arduboy_display();
 }
-
-/**
- * @brief Runs the internal task for this menu module.
- *
- * @param[in] arg Parameter passed to the helper.
- * @return void
- */
-static void menu_ble_spam_task_(void *arg)
+static void input_(const poom_sbus_msg_t *msg,void *user)
 {
-    (void)arg;
-
-    while (s_menu_ble_spam_active)
-    {
-        if (s_menu_ble_spam_exit_requested)
-        {
-            menu_ble_spam_exit_();
-            break;
-        }
-
-        menu_ble_spam_draw_();
-        vTaskDelay(pdMS_TO_TICKS(MENU_BLE_SPAM_REFRESH_MS));
-    }
-
-    s_menu_ble_spam_task = NULL;
-    vTaskDelete(NULL);
+    (void)user;
+    button_event_msg_t button;
+    if(!msg || msg->len<sizeof(button))return;
+    memcpy(&button,msg->data,sizeof(button));
+    if(button.event!=BUTTON_SINGLE_CLICK)return;
+    const uint8_t key=button.button;
+    portENTER_CRITICAL(&input_lock);
+    if(input_queue)(void)xQueueSend(input_queue,&key,0);
+    portEXIT_CRITICAL(&input_lock);
 }
-
-/**
- * @brief Releases internal state before leaving this menu.
- *
- * @return void
- */
-static void menu_ble_spam_exit_(void)
+bool menu_ble_spam_is_active(void)
 {
-    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
-
-    s_menu_ble_spam_active = false;
-    s_menu_ble_spam_exit_requested = false;
-
+    portENTER_CRITICAL(&input_lock);
+    const bool active=session!=NULL;
+    portEXIT_CRITICAL(&input_lock);
+    return active;
+}
+void menu_ble_spam_stop(void)
+{
+    portENTER_CRITICAL(&input_lock);
+    stopping=true;
+    portEXIT_CRITICAL(&input_lock);
+    while(menu_ble_spam_is_active())vTaskDelay(pdMS_TO_TICKS(10));
+}
+static esp_err_t release_previous_(void)
+{
+    const esp_err_t advertiser_error=poom_ble_spam_stop();
+    if(advertiser_error!=ESP_OK)return advertiser_error;
+    poom_ble_tracker_stop();
+    esp_err_t error=poom_ble_detector_stop();
+    if(error==ESP_OK)error=poom_ble_scan_stop();
+    if(error==ESP_OK)error=poom_ble_gatt_client_stop();
+    return error;
+}
+static bool key_(session_t *s,uint8_t key)
+{
+    if(key==KEY_B)return false;
+    if(key==KEY_A) {
+        if(s->status.active) {
+            s->error=poom_ble_spam_stop();
+            poom_ble_spam_get_status(&s->status);
+        } else {
+            s->error=release_previous_();
+            if(s->error==ESP_OK)s->error=poom_ble_spam_start_mode(&s->config);
+            s->awaiting_result=s->error==ESP_OK;
+            s->has_run=true;
+            poom_ble_spam_get_status(&s->status);
+            if(s->awaiting_result && !s->status.active) {
+                s->error=s->status.error;
+                s->awaiting_result=false;
+            }
+        }
+    } else if(!s->status.active) {
+        if(key==KEY_UP || key==KEY_DOWN) {
+            s->config.mode=(poom_ble_spam_mode_t)((s->config.mode+(key==KEY_DOWN?1:POOM_BLE_SPAM_MODE_COUNT-1))%POOM_BLE_SPAM_MODE_COUNT);
+            s->has_run=false;s->error=ESP_OK;
+        } else if(key==KEY_LEFT || key==KEY_RIGHT) {
+            s->config.duration_ms=s->config.duration_ms==15000U?30000U:s->config.duration_ms==30000U?60000U:15000U;
+        }
+    }
+    return true;
+}
+static void finish_(session_t *s)
+{
+    portENTER_CRITICAL(&input_lock);
+    input_queue=NULL;
+    portEXIT_CRITICAL(&input_lock);
+    if(s->subscribed)(void)poom_sbus_unsubscribe_cb("input/button",input_,(void *)subscriber);
     poom_ble_spam_register_cb(NULL);
     poom_ble_spam_app_stop();
-    s_menu_ble_spam_running = false;
-
-    if (s_menu_ble_spam_task != NULL)
-    {
-        if (s_menu_ble_spam_task != current_task)
-        {
-            TaskHandle_t task = s_menu_ble_spam_task;
-            s_menu_ble_spam_task = NULL;
-            vTaskDelete(task);
-        }
-        else
-        {
-            s_menu_ble_spam_task = NULL;
-        }
-    }
-
-    if (s_menu_ble_spam_buttons_subscribed)
-    {
-        (void)poom_sbus_unsubscribe_cb("input/button", menu_ble_spam_button_cb_, s_menu_ble_spam_sbus_user);
-        s_menu_ble_spam_buttons_subscribed = false;
-    }
-
-    const uint8_t token = 1;
-    (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    if(s->input)vQueueDelete(s->input);
+    portENTER_CRITICAL(&input_lock);
+    session=NULL;
+    portEXIT_CRITICAL(&input_lock);
+    free(s);
+    const uint8_t resume=1;
+    (void)poom_sbus_publish("poom/menu/resume",&resume,sizeof(resume),0);
 }
-
-/**
- * @brief Toggles the current runtime state.
- *
- * @return void
- */
-static void menu_ble_spam_toggle_(void)
+static void task_(void *arg)
 {
-    if (s_menu_ble_spam_running)
-    {
-        poom_ble_spam_app_stop();
-        s_menu_ble_spam_running = false;
-        (void)snprintf(s_menu_ble_spam_status, sizeof(s_menu_ble_spam_status), "Paused");
-        (void)snprintf(s_menu_ble_spam_name, sizeof(s_menu_ble_spam_name), "-");
-        return;
-    }
-
-    poom_ble_spam_start();
-    s_menu_ble_spam_running = true;
-    (void)snprintf(s_menu_ble_spam_status, sizeof(s_menu_ble_spam_status), "Running");
-}
-
-/**
- * @brief Handles button events for this menu module.
- *
- * @param[in] msg Parameter passed to the helper.
- * @param[in] user_ctx Parameter passed to the helper.
- * @return void
- */
-static void menu_ble_spam_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)
-{
-    (void)user_ctx;
-
-    if ((msg == NULL) || (msg->len < sizeof(button_event_msg_t)))
-    {
-        return;
-    }
-
-    button_event_msg_t ev;
-    (void)memcpy(&ev, msg->data, sizeof(ev));
-
-    if (ev.event != BUTTON_SINGLE_CLICK)
-    {
-        return;
-    }
-
-    if (ev.button == BUTTON_B)
-    {
-        if (s_menu_ble_spam_task == NULL)
-        {
-            menu_ble_spam_exit_();
+    session_t *s=arg;
+    /* Entering the menu is read-only. Only A requests advertising. */
+    for(;;) {
+        portENTER_CRITICAL(&input_lock);
+        const bool stop=stopping;
+        portEXIT_CRITICAL(&input_lock);
+        if(stop)break;
+        poom_ble_spam_get_status(&s->status);
+        if(s->awaiting_result && !s->status.active) {
+            s->error=s->status.error;
+            s->awaiting_result=false;
         }
-        else
-        {
-            s_menu_ble_spam_exit_requested = true;
-        }
-        return;
+        uint8_t key;
+        if(xQueueReceive(s->input,&key,pdMS_TO_TICKS(100))==pdTRUE && !key_(s,key))break;
+        draw_(s);
     }
-
-    if (ev.button == BUTTON_A)
-    {
-        menu_ble_spam_toggle_();
-        menu_ble_spam_draw_();
-    }
+    finish_(s);
+    vTaskDelete(NULL);
 }
-
 void menu_ble_spam_display(void)
 {
-    s_menu_ble_spam_active = true;
-    s_menu_ble_spam_exit_requested = false;
-
-    s_menu_ble_spam_running = true;
-    (void)snprintf(s_menu_ble_spam_status, sizeof(s_menu_ble_spam_status), "Running");
-    (void)snprintf(s_menu_ble_spam_name, sizeof(s_menu_ble_spam_name), "scanning...");
-
-    poom_ble_spam_register_cb(menu_ble_spam_on_name_);
-    poom_ble_spam_start();
-
-    if (!s_menu_ble_spam_buttons_subscribed)
-    {
-        if (poom_sbus_subscribe_cb("input/button", menu_ble_spam_button_cb_, s_menu_ble_spam_sbus_user))
-        {
-            s_menu_ble_spam_buttons_subscribed = true;
-        }
-        else
-        {
-            s_menu_ble_spam_active = false;
-            (void)snprintf(s_menu_ble_spam_status, sizeof(s_menu_ble_spam_status), "Btn sub error");
-            menu_ble_spam_draw_();
-
-            const uint8_t token = 1;
-            (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
-            return;
-        }
+    if(menu_ble_spam_is_active())return;
+    session_t *s=calloc(1,sizeof(*s));
+    if(!s) {
+        const uint8_t resume=1;
+        (void)poom_sbus_publish("poom/menu/resume",&resume,sizeof(resume),0);
+        return;
     }
-
-    if (s_menu_ble_spam_task == NULL)
-    {
-        (void)xTaskCreate(menu_ble_spam_task_,
-                          "menu_ble_spam",
-                          MENU_BLE_SPAM_TASK_STACK,
-                          NULL,
-                          MENU_BLE_SPAM_TASK_PRIO,
-                          &s_menu_ble_spam_task);
-    }
-
-    menu_ble_spam_draw_();
+    s->config.duration_ms=30000U;
+    portENTER_CRITICAL(&input_lock);
+    session=s;stopping=false;
+    portEXIT_CRITICAL(&input_lock);
+    s->input=xQueueCreate(12,sizeof(uint8_t));
+    if(!s->input){finish_(s);return;}
+    portENTER_CRITICAL(&input_lock);
+    input_queue=s->input;
+    portEXIT_CRITICAL(&input_lock);
+    s->subscribed=poom_sbus_subscribe_cb("input/button",input_,(void *)subscriber);
+    if(!s->subscribed || xTaskCreate(task_,"ble_spam_ui",3072,s,4,NULL)!=pdPASS)finish_(s);
 }
