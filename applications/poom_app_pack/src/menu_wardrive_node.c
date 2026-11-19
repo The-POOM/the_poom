@@ -8,19 +8,31 @@
  *
  *     BSSID,SSID,[AUTH],CHANNEL,RSSI,W
  *
- * Two flavours of the same "ENOW" wire protocol are supported:
+ * Three cores speak the same "ENOW" wire protocol.  The core kind is read
+ * from its CORE_REPLY, so every mode works with every core; the mode picks
+ * which core to prefer when several answer, and the screen.
  *
  *  - JCMK NODE: JustCallMeKoko ESP32 dual-band wardriver core.  The core
  *    answers CORE_REQUEST with CORE_REPLY and assigns a slice of its shared
  *    40-entry channel table with a 10-byte binary ADMIN message.  Records and
- *    heartbeats are broadcast, exactly like a stock JCMK node.
+ *    heartbeats are broadcast, exactly like a stock JCMK node.  The node
+ *    scans as soon as it is paired.
  *  - BISCUIT NODE: Biscuit Shop core in plain-reply mode ("encrypt=0" in its
  *    CORE_REPLY).  The node introduces itself (type 7), acknowledges the role
  *    assignment (type 5 -> 15) and the channel plan (type 10 -> 11), and sends
- *    unicast to the core.  The plan is a list of channel numbers plus dwell.
+ *    unicast to the core.  Like a Biscuit node it stays idle on the home
+ *    channel until the core assigns it the Wi-Fi role, and stops scanning
+ *    when the core takes the role away.
+ *  - PIGLET NODE: Hamspiced Piglet in Core mode ("PIGLET1" marker in its
+ *    CORE_REPLY).  A Piglet core assigns the channel plan Biscuit-style
+ *    (type 5 + type 10), records go unicast, and the node scans as soon as
+ *    it is paired, like a PigletNode.  The node identifies itself with the
+ *    same marker but no board type or version, so a core never offers it a
+ *    Piglet firmware update.
  *
- * Wire behaviour follows justcallmekoko/ESP32DualBandWardriver and the
- * Biscuit handshake contributed by Biscuit Shop to Hamspiced/piglet.
+ * Wire behaviour follows justcallmekoko/ESP32DualBandWardriver,
+ * Hamspiced/piglet and the Biscuit handshake contributed by Biscuit Shop to
+ * Piglet.  The pig on the PIGLET NODE screen is original POOM pixel art.
  *
  * The radio is shared between scanning and ESP-NOW, so the core can only be
  * heard on the home channel (6).  After every channel scan the node is back
@@ -53,6 +65,7 @@
 #include "poom_sbus.h"
 #include "poom_wifi_ctrl.h"
 #include "wardrive_node_logos.h"
+#include "wardrive_node_pig.h"
 
 #define POOM_MENU_RESUME_TOPIC "poom/menu/resume"
 
@@ -75,7 +88,7 @@
 /* ---- Tasks ------------------------------------------------------------ */
 #define WDN_UI_STACK       (3072U)
 #define WDN_UI_PRIO        (4U)
-#define WDN_UI_TICK_MS     (120U)
+#define WDN_UI_TICK_MS     (100U)
 #define WDN_NODE_STACK     (4096U)
 #define WDN_NODE_PRIO      (5U)
 #define WDN_STOP_WAIT_MS   (3000U)
@@ -95,12 +108,20 @@
 #define WDN_MSG_CONFIG_ACK   (11U)
 #define WDN_MSG_ROLE_ACK     (15U)
 
+/* Piglet identification, carried in the text of CORE_REQUEST, CORE_REPLY
+ * and HEARTBEAT: "PIGLET1", a board-type byte and an 8-byte version. */
+#define WDN_PIGLET_MARKER      "PIGLET1"
+#define WDN_PIGLET_MARKER_LEN  (7U)
+#define WDN_PIGLET_ID_LEN      (16U)
+#define WDN_PIGLET_BOARD_NONE  (0xFFU) /* not a Piglet board: never updated */
+
 /* ---- Timing ----------------------------------------------------------- */
 #define WDN_REQ_INIT_MS      (300U)   /* CORE_REQUEST backoff start */
 #define WDN_REQ_MAX_MS       (5000U)  /* and cap (matches JCMK nodes) */
 #define WDN_PREFER_WAIT_MS   (1500U)  /* wait for the preferred core kind */
 #define WDN_HANDSHAKE_MS     (1500U)  /* Biscuit role/config window */
 #define WDN_ADMIN_WIN_MS     (300U)   /* listen window after each cycle */
+#define WDN_IDLE_WIN_MS      (2000U)  /* heartbeat period while waiting to start */
 #define WDN_PROBE_AFTER_MS   (30000U) /* silent core: probe with CORE_REQUEST */
 #define WDN_LOST_AFTER_MS    (120000U)/* silent core: search again */
 #define WDN_DWELL_DEFAULT_MS (80U)    /* JCMK CHANNEL_TIMER */
@@ -117,8 +138,16 @@
 typedef enum {
     WDN_KIND_BISCUIT = 0,
     WDN_KIND_JCMK,
+    WDN_KIND_PIGLET,
     WDN_KIND_COUNT,
 } wdn_kind_t;
+
+/* What the paired core turned out to be (from its CORE_REPLY). */
+typedef enum {
+    WDN_CORE_JCMK = 0,
+    WDN_CORE_BISCUIT,
+    WDN_CORE_PIGLET,
+} wdn_core_t;
 
 typedef enum {
     WDN_VIEW_PICK = 0,
@@ -128,6 +157,7 @@ typedef enum {
 typedef enum {
     WDN_LINK_SEARCHING = 0,
     WDN_LINK_LINKED,
+    WDN_LINK_WAITING,   /* Biscuit: paired, waiting for the core to start us */
     WDN_LINK_QUIET,
     WDN_LINK_RADIO_ERROR,
 } wdn_link_t;
@@ -159,14 +189,17 @@ typedef enum {
     WDN_EVT_JCMK_ADMIN,
     WDN_EVT_BISCUIT_ROLE,
     WDN_EVT_BISCUIT_CONFIG,
+    WDN_EVT_OTHER,           /* anything else from the core: logged */
 } wdn_evt_kind_t;
 
 /* Events copied out of the Wi-Fi task by the receive callback. */
 typedef struct {
     uint8_t kind;
     uint8_t mac[6];
-    uint8_t plain_biscuit;   /* REPLY: carried "encrypt=0" */
+    uint8_t core;            /* REPLY: wdn_core_t */
     uint8_t role;            /* BISCUIT_ROLE */
+    uint8_t type;            /* OTHER: message type */
+    uint16_t len;            /* OTHER: frame length */
     wdn_admin_msg_t admin;   /* JCMK_ADMIN */
     uint8_t text_len;        /* BISCUIT_CONFIG */
     char text[WDN_TEXT_MAX + 1U];
@@ -194,7 +227,8 @@ typedef struct {
     /* link (written by node task, read by rx callback and ui) */
     volatile wdn_link_t link;
     volatile bool have_core;
-    volatile bool biscuit_plain;
+    volatile wdn_core_t core;
+    volatile bool scan_enabled;  /* Biscuit: once the core assigns a Wi-Fi role. Others: once paired */
     uint8_t core_mac[6];
     volatile uint32_t core_heard_ms;
 
@@ -222,6 +256,19 @@ typedef struct {
     uint64_t *seen;
     uint32_t seen_cap;
     uint32_t seen_used;
+
+    /* PIGLET NODE pig (ui task only) */
+    struct {
+        int16_t x;
+        bool left;
+        uint8_t mode;          /* WARDRIVE_NODE_PIG_WALK / _DANCE / _TWERK */
+        uint8_t tick;
+        uint32_t until_ms;     /* end of the current dance or twerk */
+        uint32_t next_dance_ms;
+        uint32_t next_twerk_ms;
+        uint32_t last_count;
+        wdn_link_t last_link;
+    } pig;
 } wdn_session_t;
 
 static const char *TAG = "wardrive_node";
@@ -239,8 +286,10 @@ static const uint8_t s_wdn_jcmk_channels[] = {
 };
 #define WDN_JCMK_CHANNEL_COUNT ((uint8_t)(sizeof(s_wdn_jcmk_channels) / sizeof(s_wdn_jcmk_channels[0])))
 
-static const char *const s_wdn_titles[WDN_KIND_COUNT] = {"BISCUIT NODE", "JCMK NODE"};
-static const char *const s_wdn_hints[WDN_KIND_COUNT] = {"PAIR WITH A BISCUIT CORE", "PAIR WITH A JCMK WARDRIVER"};
+static const char *const s_wdn_titles[WDN_KIND_COUNT] = {"BISCUIT NODE", "JCMK NODE", "PIGLET NODE"};
+static const char *const s_wdn_hints[WDN_KIND_COUNT] = {"PAIR WITH A BISCUIT CORE", "PAIR WITH A JCMK WARDRIVER",
+                                                        "PAIR WITH A PIGLET CORE"};
+static const char *const s_wdn_core_names[] = {"jcmk", "biscuit", "piglet"};
 
 /* Exists only while WARDRIVING NODE is open. */
 static wdn_session_t *s_wdn = NULL;
@@ -427,9 +476,13 @@ static void wdn_rx_(const esp_now_recv_info_t *info, const uint8_t *data, int le
     memset(&evt, 0, offsetof(wdn_evt_t, text));
     memcpy(evt.mac, info->src_addr, 6U);
     if(type == WDN_MSG_CORE_REPLY) {
+        const wdn_text_msg_t *msg = (const wdn_text_msg_t *)data;
+        const bool full = len >= (int)sizeof(wdn_text_msg_t);
         evt.kind = WDN_EVT_REPLY;
-        evt.plain_biscuit = (len >= (int)sizeof(wdn_text_msg_t)) &&
-                            wdn_text_has_((const wdn_text_msg_t *)data, "encrypt=0");
+        if(full && msg->len >= WDN_PIGLET_MARKER_LEN &&
+           memcmp(msg->text, WDN_PIGLET_MARKER, WDN_PIGLET_MARKER_LEN) == 0) evt.core = WDN_CORE_PIGLET;
+        else if(full && wdn_text_has_(msg, "encrypt=0")) evt.core = WDN_CORE_BISCUIT;
+        else evt.core = WDN_CORE_JCMK;
     } else if(type == WDN_MSG_ADMIN && len >= (int)sizeof(wdn_text_msg_t)) {
         const wdn_text_msg_t *msg = (const wdn_text_msg_t *)data;
         evt.kind = WDN_EVT_BISCUIT_ROLE;
@@ -444,6 +497,23 @@ static void wdn_rx_(const esp_now_recv_info_t *info, const uint8_t *data, int le
         evt.text_len = (uint8_t)n;
         memcpy(evt.text, msg->text, n);
         evt.text[n] = '\0';
+    } else if(from_core && type != WDN_MSG_HEARTBEAT && type != WDN_MSG_RECORD_ACK) {
+        /* Not part of the documented handshake: hand it to the node task so
+         * it shows up in the serial log. */
+        evt.kind = WDN_EVT_OTHER;
+        evt.type = type;
+        evt.len = (uint16_t)len;
+        if(len >= (int)offsetof(wdn_text_msg_t, text)) {
+            const wdn_text_msg_t *msg = (const wdn_text_msg_t *)data;
+            uint16_t n = (msg->len < 48U) ? msg->len : 48U;
+            if((int)(offsetof(wdn_text_msg_t, text) + n) > len) n = (uint16_t)(len - (int)offsetof(wdn_text_msg_t, text));
+            evt.text_len = (uint8_t)n;
+            for(uint16_t i = 0U; i < n; ++i) {
+                const char c = msg->text[i];
+                evt.text[i] = (c >= 0x20 && c < 0x7F) ? c : '.';
+            }
+            evt.text[n] = '\0';
+        }
     } else {
         return;
     }
@@ -481,11 +551,12 @@ static esp_err_t wdn_send_(wdn_session_t *s, const uint8_t dst[6], uint8_t type,
     return wdn_send_raw_(dst, &msg, sizeof(msg));
 }
 
-/* Records and heartbeats: unicast for a plain-reply Biscuit core, broadcast
- * otherwise (what stock JCMK nodes do when encryption is off). */
+/* Records and heartbeats: unicast to Biscuit and Piglet cores (they peer
+ * their nodes and ack), broadcast to a JCMK core (what stock JCMK nodes do
+ * when encryption is off). */
 static const uint8_t *wdn_data_dst_(const wdn_session_t *s)
 {
-    return s->biscuit_plain ? s->core_mac : s_wdn_bcast;
+    return (s->core == WDN_CORE_JCMK) ? s_wdn_bcast : s->core_mac;
 }
 
 static void wdn_home_(wdn_session_t *s)
@@ -577,7 +648,7 @@ static void wdn_forward_(wdn_session_t *s, const wifi_ap_record_t *ap)
     ssid[n] = '\0';
     len = snprintf(line, sizeof(line), "%02X:%02X:%02X:%02X:%02X:%02X,%s,%s,%u,%d,W",
                    ap->bssid[0], ap->bssid[1], ap->bssid[2], ap->bssid[3], ap->bssid[4], ap->bssid[5],
-                   ssid, wdn_auth_label_(s->biscuit_plain, ap->authmode), (unsigned)ap->primary, (int)ap->rssi);
+                   ssid, wdn_auth_label_(s->core == WDN_CORE_BISCUIT, ap->authmode), (unsigned)ap->primary, (int)ap->rssi);
     if(len <= 0) return;
     if(wdn_send_(s, wdn_data_dst_(s), WDN_MSG_TEXT, ++s->text_counter, line,
                  ((size_t)len < sizeof(line)) ? (size_t)len : sizeof(line) - 1U) == ESP_OK) {
@@ -622,16 +693,33 @@ static bool wdn_scan_channel_(wdn_session_t *s, uint8_t channel)
  * Node state machine (own task, owns the radio)
  * ====================================================================== */
 
+/* PIGLET NODE introduces itself as a Piglet-family node.  Board type
+ * "none" and an empty version keep a Piglet core from ever trying to push
+ * Piglet firmware to the POOM.  Other modes send an empty text, as stock
+ * JCMK nodes do. */
+static size_t wdn_id_text_(const wdn_session_t *s, char out[WDN_PIGLET_ID_LEN])
+{
+    if(s->kind != WDN_KIND_PIGLET) return 0U;
+    memset(out, 0, WDN_PIGLET_ID_LEN);
+    memcpy(out, WDN_PIGLET_MARKER, WDN_PIGLET_MARKER_LEN);
+    out[WDN_PIGLET_MARKER_LEN] = (char)WDN_PIGLET_BOARD_NONE;
+    return WDN_PIGLET_ID_LEN;
+}
+
 static void wdn_send_core_request_(wdn_session_t *s)
 {
+    char id[WDN_PIGLET_ID_LEN];
+    const size_t n = wdn_id_text_(s, id);
     wdn_home_(s);
-    (void)wdn_send_(s, s_wdn_bcast, WDN_MSG_CORE_REQUEST, 0U, NULL, 0U);
+    (void)wdn_send_(s, s_wdn_bcast, WDN_MSG_CORE_REQUEST, 0U, n ? id : NULL, n);
 }
 
 static void wdn_send_heartbeat_(wdn_session_t *s)
 {
+    char id[WDN_PIGLET_ID_LEN];
+    const size_t n = wdn_id_text_(s, id);
     wdn_home_(s);
-    (void)wdn_send_(s, wdn_data_dst_(s), WDN_MSG_HEARTBEAT, s->hb_counter++, NULL, 0U);
+    (void)wdn_send_(s, wdn_data_dst_(s), WDN_MSG_HEARTBEAT, s->hb_counter++, n ? id : NULL, n);
 }
 
 static void wdn_handle_event_(wdn_session_t *s, const wdn_evt_t *evt)
@@ -653,15 +741,31 @@ static void wdn_handle_event_(wdn_session_t *s, const wdn_evt_t *evt)
             }
             break;
         case WDN_EVT_BISCUIT_ROLE:
+            /* A Biscuit node sits in "waiting for role" until its core
+             * assigns one; ROLE_WIFI (1) starts Wi-Fi scanning.  Any role
+             * without the Wi-Fi bit (0 = none, 2 = BLE only) parks us. */
             wdn_home_(s);
             (void)wdn_send_(s, s->core_mac, WDN_MSG_ROLE_ACK, evt->role, NULL, 0U);
+            if(s->core == WDN_CORE_BISCUIT) {
+                const bool wifi = (evt->role & 0x01U) != 0U;
+                if(wifi != s->scan_enabled) {
+                    ESP_LOGI(TAG, "Biscuit role %u: %s", (unsigned)evt->role, wifi ? "scanning" : "waiting");
+                }
+                s->scan_enabled = wifi;
+                s->link = wifi ? WDN_LINK_LINKED : WDN_LINK_WAITING;
+            }
             break;
         case WDN_EVT_BISCUIT_CONFIG:
-            if(s->biscuit_plain && wdn_plan_biscuit_(s, evt->text)) {
-                ESP_LOGI(TAG, "Biscuit plan: %u ch, dwell %u ms", (unsigned)s->plan_len, (unsigned)s->dwell_ms);
+            /* Biscuit and Piglet cores both plan with channel numbers. */
+            if(s->core != WDN_CORE_JCMK && wdn_plan_biscuit_(s, evt->text)) {
+                s->assigned = true;
+                ESP_LOGI(TAG, "Channel plan: %u ch, dwell %u ms", (unsigned)s->plan_len, (unsigned)s->dwell_ms);
             }
             wdn_home_(s);
             (void)wdn_send_(s, s->core_mac, WDN_MSG_CONFIG_ACK, 0U, NULL, 0U);
+            break;
+        case WDN_EVT_OTHER:
+            ESP_LOGI(TAG, "Core msg type %u len %u \"%s\"", (unsigned)evt->type, (unsigned)evt->len, evt->text);
             break;
         default:
             break;
@@ -688,29 +792,33 @@ static void wdn_drain_events_(wdn_session_t *s)
     while(s->running && xQueueReceive(s->events, &evt, 0U) == pdTRUE) wdn_handle_event_(s, &evt);
 }
 
-static void wdn_link_core_(wdn_session_t *s, const uint8_t mac[6], bool plain_biscuit,
+static void wdn_link_core_(wdn_session_t *s, const uint8_t mac[6], wdn_core_t core,
                            const wdn_evt_t *early, uint8_t early_count)
 {
+    const bool biscuit = core == WDN_CORE_BISCUIT;
     char hello[40];
     portENTER_CRITICAL(&s->lock);
     memcpy(s->core_mac, mac, 6U);
     s->have_core = true;
     portEXIT_CRITICAL(&s->lock);
-    s->biscuit_plain = plain_biscuit;
+    s->core = core;
+    /* JCMK and Piglet nodes scan as soon as they are paired; a Biscuit node
+     * waits for the core (and its manager app) to assign it a role. */
+    s->scan_enabled = !biscuit;
     s->core_heard_ms = wdn_now_ms_();
     s->admin_version = 0U;
     s->assigned = false;
     s->dwell_ms = WDN_DWELL_DEFAULT_MS;
     wdn_plan_jcmk_range_(s, 0U, (uint8_t)(WDN_JCMK_CHANNEL_COUNT - 1U)); /* until the core assigns */
-    if(!plain_biscuit && s_wdn_last_jcmk.valid && memcmp(s_wdn_last_jcmk.core_mac, mac, 6U) == 0) {
+    if(core == WDN_CORE_JCMK && s_wdn_last_jcmk.valid && memcmp(s_wdn_last_jcmk.core_mac, mac, 6U) == 0) {
         s->admin_version = s_wdn_last_jcmk.admin.assignment_version;
         wdn_plan_jcmk_range_(s, s_wdn_last_jcmk.admin.start_channel_idx, s_wdn_last_jcmk.admin.end_channel_idx);
     }
     wdn_add_peer_(mac);
-    s->link = WDN_LINK_LINKED;
+    s->link = biscuit ? WDN_LINK_WAITING : WDN_LINK_LINKED;
     ESP_LOGI(TAG, "Core %02X:%02X:%02X:%02X:%02X:%02X (%s)", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-             plain_biscuit ? "biscuit" : "jcmk");
-    if(plain_biscuit) {
+             s_wdn_core_names[core]);
+    if(biscuit) {
         const esp_app_desc_t *app = esp_app_get_description();
         const int n = snprintf(hello, sizeof(hello), "POOM:%s", (app != NULL) ? app->version : "?");
         wdn_home_(s);
@@ -718,9 +826,9 @@ static void wdn_link_core_(wdn_session_t *s, const uint8_t mac[6], bool plain_bi
     }
     /* Core messages that arrived while we were deciding between cores. */
     for(uint8_t i = 0U; i < early_count; ++i) wdn_handle_event_(s, &early[i]);
-    /* Let the core finish its handshake (JCMK ADMIN or Biscuit role+plan)
-     * before the first scan takes the radio off the home channel. */
-    wdn_listen_(s, plain_biscuit ? WDN_HANDSHAKE_MS : WDN_ADMIN_WIN_MS);
+    /* Let the core finish its handshake (JCMK ADMIN, or role + plan) before
+     * the first scan takes the radio off the home channel. */
+    wdn_listen_(s, (core == WDN_CORE_JCMK) ? WDN_ADMIN_WIN_MS : WDN_HANDSHAKE_MS);
 }
 
 static void wdn_unlink_(wdn_session_t *s)
@@ -731,7 +839,8 @@ static void wdn_unlink_(wdn_session_t *s)
     if(esp_now_is_peer_exist(s->core_mac) && memcmp(s->core_mac, s_wdn_bcast, 6U) != 0) {
         (void)esp_now_del_peer(s->core_mac);
     }
-    s->biscuit_plain = false;
+    s->core = WDN_CORE_JCMK;
+    s->scan_enabled = false;
     s->link = WDN_LINK_SEARCHING;
 }
 
@@ -744,7 +853,7 @@ static void wdn_search_(wdn_session_t *s)
     uint32_t fallback_until = 0U;
     bool have_fallback = false;
     uint8_t fallback_mac[6] = {0};
-    bool fallback_plain = false;
+    wdn_core_t fallback_core = WDN_CORE_JCMK;
     wdn_evt_t early[2];
     uint8_t early_count = 0U;
     s->link = WDN_LINK_SEARCHING;
@@ -758,7 +867,7 @@ static void wdn_search_(wdn_session_t *s)
             interval = (interval * 2U > WDN_REQ_MAX_MS) ? WDN_REQ_MAX_MS : interval * 2U;
         }
         if(have_fallback && (int32_t)(now - fallback_until) >= 0) {
-            wdn_link_core_(s, fallback_mac, fallback_plain, early, early_count);
+            wdn_link_core_(s, fallback_mac, fallback_core, early, early_count);
             return;
         }
         if(xQueueReceive(s->events, &evt, pdMS_TO_TICKS(50U)) != pdTRUE) continue;
@@ -769,15 +878,15 @@ static void wdn_search_(wdn_session_t *s)
             continue;
         }
         {
-            const bool preferred = (s->kind == WDN_KIND_BISCUIT) ? (evt.plain_biscuit != 0U) : (evt.plain_biscuit == 0U);
-            if(preferred) {
-                wdn_link_core_(s, evt.mac, evt.plain_biscuit != 0U, NULL, 0U);
+            static const wdn_core_t prefer[WDN_KIND_COUNT] = {WDN_CORE_BISCUIT, WDN_CORE_JCMK, WDN_CORE_PIGLET};
+            if((wdn_core_t)evt.core == prefer[s->kind]) {
+                wdn_link_core_(s, evt.mac, (wdn_core_t)evt.core, NULL, 0U);
                 return;
             }
             if(!have_fallback) {
                 have_fallback = true;
                 memcpy(fallback_mac, evt.mac, 6U);
-                fallback_plain = evt.plain_biscuit != 0U;
+                fallback_core = (wdn_core_t)evt.core;
                 fallback_until = now + WDN_PREFER_WAIT_MS;
             }
         }
@@ -795,20 +904,23 @@ static void wdn_node_task_(void *arg)
             continue;
         }
 
-        /* One full pass over the assigned channels. */
-        for(uint8_t i = 0U; i < s->plan_len && s->running && s->have_core; ++i) {
-            const uint8_t ch = s->plan[s->plan_pos];
-            s->plan_pos = (uint8_t)((s->plan_pos + 1U) % s->plan_len);
-            if(wdn_channel_bad_(s, ch)) continue;
-            if(!wdn_scan_channel_(s, ch)) {
-                ESP_LOGW(TAG, "Channel %u not allowed here, skipping", (unsigned)ch);
-                wdn_channel_mark_bad_(s, ch);
+        if(s->scan_enabled) {
+            /* One full pass over the assigned channels. */
+            for(uint8_t i = 0U; i < s->plan_len && s->running && s->have_core && s->scan_enabled; ++i) {
+                const uint8_t ch = s->plan[s->plan_pos];
+                s->plan_pos = (uint8_t)((s->plan_pos + 1U) % s->plan_len);
+                if(wdn_channel_bad_(s, ch)) continue;
+                if(!wdn_scan_channel_(s, ch)) {
+                    ESP_LOGW(TAG, "Channel %u not allowed here, skipping", (unsigned)ch);
+                    wdn_channel_mark_bad_(s, ch);
+                }
+                wdn_drain_events_(s);
             }
-            wdn_drain_events_(s);
         }
         if(!s->running) break;
 
-        /* Check in with the core and give it a window to reassign us. */
+        /* Check in with the core and give it a window to reassign us.  While
+         * a Biscuit core has not started us, stay on the home channel. */
         {
             const uint32_t quiet = wdn_now_ms_() - s->core_heard_ms;
             wdn_send_heartbeat_(s);
@@ -822,11 +934,11 @@ static void wdn_node_task_(void *arg)
                  * always earns a CORE_REPLY, which proves they are still there. */
                 s->link = WDN_LINK_QUIET;
                 wdn_send_core_request_(s);
-            } else {
-                s->link = WDN_LINK_LINKED;
             }
-            wdn_listen_(s, WDN_ADMIN_WIN_MS + (esp_random() % 64U));
-            if((wdn_now_ms_() - s->core_heard_ms) < WDN_PROBE_AFTER_MS) s->link = WDN_LINK_LINKED;
+            wdn_listen_(s, (s->scan_enabled ? WDN_ADMIN_WIN_MS : WDN_IDLE_WIN_MS) + (esp_random() % 64U));
+            if((wdn_now_ms_() - s->core_heard_ms) < WDN_PROBE_AFTER_MS) {
+                s->link = s->scan_enabled ? WDN_LINK_LINKED : WDN_LINK_WAITING;
+            }
         }
     }
     s->node_alive = false;
@@ -845,15 +957,15 @@ static void wdn_draw_pick_(const wdn_session_t *s)
     (void)poom_arduboy_print(F("WARDRIVING NODE"));
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
     for(uint8_t i = 0U; i < (uint8_t)WDN_KIND_COUNT; ++i) {
-        const int16_t y = (int16_t)(17 + (i * 12));
+        const int16_t y = (int16_t)(14 + (i * 10));
         poom_arduboy_set_cursor(6, y);
         (void)poom_arduboy_print(s_wdn_titles[i]);
-        if(i == s->pick) poom_arduboy_fill_rect(0, (int16_t)(y - 2), ARDUBOY_WIDTH, 11, INVERT);
+        if(i == s->pick) poom_arduboy_fill_rect(0, (int16_t)(y - 1), ARDUBOY_WIDTH, 9, INVERT);
     }
     {
         const char *hint = s_wdn_hints[s->pick];
         const int16_t w = poom_arduboy_tiny_text_width(hint);
-        poom_arduboy_draw_tiny_text((int16_t)((ARDUBOY_WIDTH - w) / 2), 44, hint, WHITE);
+        poom_arduboy_draw_tiny_text((int16_t)((ARDUBOY_WIDTH - w) / 2), 46, hint, WHITE);
     }
     poom_arduboy_set_cursor(0, 56);
     (void)poom_arduboy_print(F("A:START"));
@@ -869,7 +981,96 @@ static void wdn_format_count_(char *out, size_t size, uint32_t value)
     else (void)snprintf(out, size, "%luM", (unsigned long)(value / 1000000U));
 }
 
-static void wdn_draw_run_(const wdn_session_t *s)
+/* Draws one pig frame; clear bits are transparent.  `left` mirrors it. */
+static void wdn_draw_pig_frame_(int16_t x, int16_t y, uint8_t frame, bool left)
+{
+    const uint8_t *rows = s_wardrive_node_pig[frame];
+    for(int16_t yy = 0; yy < WARDRIVE_NODE_PIG_H; ++yy) {
+        for(int16_t xx = 0; xx < WARDRIVE_NODE_PIG_W; ++xx) {
+            const uint8_t b = rows[(yy * (WARDRIVE_NODE_PIG_W / 8)) + (xx / 8)];
+            if((b >> (7 - (xx & 7))) & 1U) {
+                poom_arduboy_draw_pixel((int16_t)(x + (left ? (WARDRIVE_NODE_PIG_W - 1 - xx) : xx)),
+                                        (int16_t)(y + yy), WHITE);
+            }
+        }
+    }
+}
+
+/* PIGLET NODE stage (left 64x64): the pig walks the floor, dances when a
+ * core pairs and every so often, and twerks when new networks come in. */
+static void wdn_draw_pig_(wdn_session_t *s)
+{
+    const uint32_t now = wdn_now_ms_();
+    const int16_t floor_y = 58;
+    const int16_t max_x = 64 - WARDRIVE_NODE_PIG_W;
+    const uint32_t count = s->unique_count;
+    const wdn_link_t link = s->link;
+    int16_t y = (int16_t)(floor_y - WARDRIVE_NODE_PIG_H);
+    uint8_t frame;
+
+    ++s->pig.tick;
+    if(s->pig.mode != WARDRIVE_NODE_PIG_WALK && (int32_t)(now - s->pig.until_ms) >= 0) {
+        s->pig.mode = WARDRIVE_NODE_PIG_WALK;
+        s->pig.next_dance_ms = now + 20000U;
+        s->pig.next_twerk_ms = now + 4000U;
+    }
+    if(link == WDN_LINK_LINKED && s->pig.last_link != WDN_LINK_LINKED) {
+        s->pig.mode = WARDRIVE_NODE_PIG_DANCE;     /* paired */
+        s->pig.until_ms = now + 3000U;
+    } else if(count > s->pig.last_count && s->pig.mode == WARDRIVE_NODE_PIG_WALK &&
+              (int32_t)(now - s->pig.next_twerk_ms) >= 0) {
+        s->pig.mode = WARDRIVE_NODE_PIG_TWERK;     /* new networks */
+        s->pig.until_ms = now + 1500U;
+    } else if(s->pig.mode == WARDRIVE_NODE_PIG_WALK && link == WDN_LINK_LINKED &&
+              (int32_t)(now - s->pig.next_dance_ms) >= 0) {
+        s->pig.mode = WARDRIVE_NODE_PIG_DANCE;
+        s->pig.until_ms = now + 2500U;
+    }
+    s->pig.last_link = link;
+    if(s->pig.mode == WARDRIVE_NODE_PIG_WALK) s->pig.last_count = count;
+
+    switch(s->pig.mode) {
+        case WARDRIVE_NODE_PIG_TWERK:
+            frame = (uint8_t)(WARDRIVE_NODE_PIG_TWERK + (s->pig.tick & 1U));
+            poom_arduboy_draw_tiny_text((int16_t)(s->pig.left ? s->pig.x + 2 : s->pig.x + 12), 26, "OINK", WHITE);
+            break;
+        case WARDRIVE_NODE_PIG_DANCE:
+            /* Hop on the beat and turn around every other hop. */
+            frame = (uint8_t)(WARDRIVE_NODE_PIG_DANCE + ((s->pig.tick >> 1) & 1U));
+            if(((s->pig.tick >> 1) & 1U) != 0U) y = (int16_t)(y - 3);
+            if((s->pig.tick & 7U) == 0U) s->pig.left = !s->pig.left;
+            {
+                /* a little note bouncing over the pig */
+                const int16_t nx = (int16_t)(s->pig.x + ((s->pig.tick & 4U) ? 4 : 24));
+                const int16_t ny = (int16_t)(y - 8 - ((s->pig.tick >> 1) & 1U));
+                poom_arduboy_fill_rect(nx, (int16_t)(ny + 4), 2, 2, WHITE);
+                poom_arduboy_draw_fast_vline((int16_t)(nx + 1), ny, 5, WHITE);
+                poom_arduboy_draw_pixel((int16_t)(nx + 2), ny, WHITE);
+                poom_arduboy_draw_pixel((int16_t)(nx + 3), (int16_t)(ny + 1), WHITE);
+            }
+            break;
+        default:
+            /* Trot while scanning, amble while searching, stand when stuck. */
+            frame = (uint8_t)(WARDRIVE_NODE_PIG_WALK + (s->pig.tick & 1U));
+            if(link == WDN_LINK_RADIO_ERROR || link == WDN_LINK_WAITING) {
+                frame = WARDRIVE_NODE_PIG_WALK + 1U;
+            } else if(link == WDN_LINK_LINKED || (s->pig.tick & 1U) == 0U) {
+                s->pig.x = (int16_t)(s->pig.x + (s->pig.left ? -1 : 1));
+                if(s->pig.x <= 0) { s->pig.x = 0; s->pig.left = false; }
+                if(s->pig.x >= max_x) { s->pig.x = max_x; s->pig.left = true; }
+            }
+            break;
+    }
+    wdn_draw_pig_frame_(s->pig.x, y, frame, s->pig.left);
+    poom_arduboy_draw_fast_hline(0, floor_y, 64, WHITE);
+    {
+        static const char title[] = "PIGLET";
+        poom_arduboy_set_cursor((int16_t)((64 - 36) / 2), 4);
+        (void)poom_arduboy_print(title);
+    }
+}
+
+static void wdn_draw_run_(wdn_session_t *s)
 {
     const int16_t px = 66;      /* right panel origin */
     const int16_t pw = ARDUBOY_WIDTH - px;
@@ -880,8 +1081,9 @@ static void wdn_draw_run_(const wdn_session_t *s)
     int16_t w;
 
     poom_arduboy_clear();
-    poom_arduboy_draw_bitmap_rows(0, 0, (s->kind == WDN_KIND_BISCUIT) ? s_wardrive_node_logo_biscuit :
-                                  s_wardrive_node_logo_jcmk, WARDRIVE_NODE_LOGO_W, WARDRIVE_NODE_LOGO_H, false);
+    if(s->kind == WDN_KIND_PIGLET) wdn_draw_pig_(s);
+    else poom_arduboy_draw_bitmap_rows(0, 0, (s->kind == WDN_KIND_BISCUIT) ? s_wardrive_node_logo_biscuit :
+                                       s_wardrive_node_logo_jcmk, WARDRIVE_NODE_LOGO_W, WARDRIVE_NODE_LOGO_H, false);
 
     w = poom_arduboy_tiny_text_width(s_wdn_titles[s->kind]);
     poom_arduboy_draw_tiny_text((int16_t)(px + (pw - w) / 2), 1, s_wdn_titles[s->kind], WHITE);
@@ -898,6 +1100,7 @@ static void wdn_draw_run_(const wdn_session_t *s)
 
     switch(link) {
         case WDN_LINK_LINKED: (void)snprintf(line, sizeof(line), "LINKED"); break;
+        case WDN_LINK_WAITING: (void)snprintf(line, sizeof(line), "READY"); break;
         case WDN_LINK_QUIET: (void)snprintf(line, sizeof(line), "NO REPLY"); break;
         case WDN_LINK_RADIO_ERROR: (void)snprintf(line, sizeof(line), "RADIO ERR"); break;
         default: (void)snprintf(line, sizeof(line), blink ? "SEARCH.." : "SEARCH"); break;
@@ -908,6 +1111,7 @@ static void wdn_draw_run_(const wdn_session_t *s)
     if(link == WDN_LINK_LINKED && blink) poom_arduboy_fill_rect((int16_t)(px + 1), 43, 3, 3, WHITE);
 
     if(link == WDN_LINK_SEARCHING || link == WDN_LINK_RADIO_ERROR) (void)snprintf(line, sizeof(line), "HOME CH %u", (unsigned)WDN_HOME_CHANNEL);
+    else if(link == WDN_LINK_WAITING) (void)snprintf(line, sizeof(line), "START IN APP");
     else (void)snprintf(line, sizeof(line), "CH %u TX %lu", (unsigned)s->channel, (unsigned long)s->sent_count);
     w = poom_arduboy_tiny_text_width(line);
     poom_arduboy_draw_tiny_text((int16_t)(px + (pw - w) / 2), 51, line, WHITE);
@@ -956,6 +1160,9 @@ static void wdn_start_node_(wdn_session_t *s, wdn_kind_t kind)
     memset(s->recent, 0, sizeof(s->recent));
     if(s->seen != NULL) memset(s->seen, 0, (size_t)s->seen_cap * sizeof(uint64_t));
     s->seen_used = 0U;
+    memset(&s->pig, 0, sizeof(s->pig));
+    s->pig.x = (int16_t)((64 - WARDRIVE_NODE_PIG_W) / 2);
+    s->pig.next_dance_ms = wdn_now_ms_() + 20000U;
     xQueueReset(s->events);
     wdn_draw_run_(s);
     if(!wdn_radio_start_(s)) {
@@ -1014,8 +1221,10 @@ static void wdn_ui_task_(void *arg)
                     wdn_exit_();
                     break;
                 }
-                if(button.button == BTN_UP || button.button == BTN_DOWN) {
+                if(button.button == BTN_DOWN) {
                     s->pick = (uint8_t)((s->pick + 1U) % (uint8_t)WDN_KIND_COUNT);
+                } else if(button.button == BTN_UP) {
+                    s->pick = (uint8_t)((s->pick + (uint8_t)WDN_KIND_COUNT - 1U) % (uint8_t)WDN_KIND_COUNT);
                 } else if(button.button == BTN_A) {
                     s_wdn_last_pick = s->pick;
                     wdn_start_node_(s, (wdn_kind_t)s->pick);
