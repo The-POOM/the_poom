@@ -37,6 +37,7 @@ The following tables follow the `s_apps_*` list order in
 | `SPECTRUM` | Live Wi-Fi instrument: draws an RSSI trace with grid, peak hold, and cursor. LEFT/RIGHT switches to waterfall; UP/DOWN changes between 2.4 GHz and C5 5 GHz ranges; A pauses and B exits. | [menu_spectrum.c](src/menu_spectrum.c) |
 | `DEVICE INSPECTOR` | Passive, time-sliced observation summary. Alternates Wi-Fi, BLE, and IEEE 802.15.4 reception and shows unique Wi-Fi APs, unique BLE devices, and active IEEE 802.15.4 channels. It does not create SD files or PCAP captures. | [menu_device_inspector.c](src/menu_device_inspector.c) · [guide](README_DEVICE_INSPECTOR_WIFI_GUARD.md#device-inspector) |
 | `WIFI GUARD` | Passive Wi-Fi beacon-consistency and activity monitor. Warns about conflicting beacon identities and unusual AUTH, PROBE, CSA, EAPOL Logoff, or SAE frame bursts. It works without SD; reports are saved only when requested. | [menu_wifi_guard.c](src/menu_wifi_guard.c) · [guide](README_DEVICE_INSPECTOR_WIFI_GUARD.md#wifi-guard) |
+| `WARDRIVING NODE` | Pairs the POOM over ESP-NOW as a scanning node for an external wardriving core. `BISCUIT NODE` pairs with a Biscuit Shop core; `JCMK NODE` pairs with a JustCallMeKoko dual-band wardriver. The POOM scans the 2.4 GHz and 5 GHz channels the core assigns and forwards every access point; the core adds GPS and writes the WiGLE log. The screen shows the core's logo and the number of unique networks picked up. | [menu_wardrive_node.c](src/menu_wardrive_node.c) |
 | `SCAN NET` | Discovers local-network devices through ARP and shows network parameters and results. | [menu_poom_wifi_arp.c](src/menu_poom_wifi_arp.c) |
 | `CLI ZIGBEE` | Opens the Zigbee console. Shown only when `CONFIG_ZB_ENABLED` is enabled. | [menu_cli_zigbee.c](src/menu_cli_zigbee.c) |
 | `HTTP LOAD` | Sends HTTP requests to a configured server to measure behaviour under load; parameters and counters are available on the device. | [menu_http_load_test.c](src/menu_http_load_test.c) |
@@ -252,6 +253,8 @@ graph TD
     B --> B11[SCAN CHANNELS]
     B --> B12[SPECTRUM]
     B --> B13[DEVICE INSPECTOR]
+    B --> B13a[WIFI GUARD]
+    B --> B13b[WARDRIVING NODE]
     B --> B14[SCAN NET]
     B --> B15[CLI]
     B --> B16[HTTP LOAD]
@@ -378,6 +381,16 @@ This section expands each app with:
 - UI: cycles every three seconds through Wi-Fi, BLE, and IEEE 802.15.4. Shows unique Wi-Fi AP and BLE MAC counts plus the number of active IEEE 802.15.4 channels. **A** pauses/resumes and **B** stops.
 - I/O: OLED-only; it deliberately does not write SD files or start PCAP capture.
 - Memory: state exists only during the session in PSRAM and is released on exit.
+
+#### WARDRIVING NODE (`menu_wardrive_node.c`, `menu_wardrive_node_show()`)
+- What it is: an ESP-NOW wardriving node. The core owns GPS and WiGLE logging; the POOM is extra 2.4 GHz + 5 GHz scanning capacity.
+- Modes: `BISCUIT NODE` (Biscuit Shop core in plain-reply mode: node hello, role ack, `channels=...;dwell=...` plan, unicast records) and `JCMK NODE` (JustCallMeKoko ESP32 dual-band wardriver core: binary ADMIN channel slice over its 40-channel table, broadcast records). Each mode prefers its own core kind and falls back to any core that answers.
+- Protocol: 212-byte `ENOW` frames on home channel 6. Records are `BSSID,SSID,[AUTH],CHANNEL,RSSI,W`; SSID commas become `_`. A BSSID is forwarded again only after it leaves the 256-entry recent history, as on JCMK nodes. JCMK core encryption must be off (its default).
+- Radio: after each channel scan the radio is back on channel 6 to forward results; after each full pass the node sends a heartbeat and listens 300 ms for a new assignment. Empty channels are left after half the dwell. If the core is silent for 30 s the node probes it, and after 120 s it searches again.
+- UI: `UP/DOWN` picks the mode, `A` starts and `B` stops. The run screen shows the Biscuit Shop or JCMK logo, unique networks picked up, link state, current channel and records sent.
+- I/O: OLED and serial logs only; nothing is written to SD.
+- Memory: session state and the unique-BSSID table (8192 entries in PSRAM, 1024 without PSRAM) exist only while the app is open.
+- Exit/return: stops ESP-NOW and Wi-Fi, then publishes `poom/menu/resume`.
 
 #### SCAN NET (`menu_poom_wifi_arp.c`, `menu_poom_wifi_arp_show()`)
 - What it is: local network discovery/ARP tooling for diagnostics on authorized networks.
