@@ -21,9 +21,14 @@ its exact screen flow are present.
 | `QUIET TIME` | One AP | Sends a beacon-format Quiet element for the selected BSSID. |
 | `CHANNEL SWITCH` | One AP and a different channel in the same band | Sends a beacon-format Channel Switch Announcement. The run remains on the selected AP's current channel. |
 | `SAE COMMIT FLOOD` | One WPA3-Personal or WPA2/WPA3-Personal transition AP | Sends bounded initial group-19 SAE Commit frames. It does not complete SAE authentication or implement anti-clogging-token retries. |
+| `PROBE REQUEST FLOOD` | One named AP | Sends SSID-directed probe requests on its channel with locally administered source addresses. |
+| `AP CLONE SPAM` | One named AP | Advertises its SSID/channel under a distinct local BSSID as an open beacon. It does not host an AP. |
+| `SPAM WIFI` | Saved, Random, Funny or Rick Roll source and channel | Explicit 30-second beacon run; presets preserve saved SSIDs. UP/DOWN selects source, LEFT/RIGHT selects channel. |
+| `FIND MY BEEP` | One current connectable tag candidate or BEEP ALL | Explicit single sound request per frozen identity, with service/property checks, ACK/rejection/timeout results and cancel. See the [protocol and lifecycle notes](../modules/poom_findmy_beep/README.md). |
 
 APs with equal SSIDs remain separate targets when their BSSIDs differ. The list
-shows channel, RSSI and a BSSID suffix. Hidden SSIDs remain selectable. The
+shows channel, RSSI and a BSSID suffix. Hidden SSIDs remain selectable except
+for Probe Request and AP Clone, which require a discovered name. The
 selected AP is copied into the session, so a later scan-cache update cannot
 silently change an already chosen target.
 
@@ -50,7 +55,8 @@ before another start.
 The native runtime sends at most one frame per configured interval; the menu
 uses 100 ms. Processing can make the actual rate lower. It stops at the selected
 duration, on a stop request, or on a construction/driver error. The backend
-rejects durations above 60 seconds and intervals below 100 ms. Unsupported
+rejects durations above 60 seconds and intervals below 100 ms for these targeted
+actions. The beacon-list worker uses a 10-ms minimum interval. Unsupported
 driver behavior is reported instead of being retried indefinitely.
 
 ## Capture and scan coverage
@@ -73,7 +79,8 @@ output equivalence.
 | Pwnagotchi discovery | No dedicated advertisement decoder | POOMGOTCHI is POOM's handshake-capture app; its name does not mean it detects Pwnagotchi advertisements. |
 | Espressif discovery | Existing OUI/vendor labels | No dedicated Espressif-only scan/filter is added. |
 | Channel activity, packet rates and signal views | `SCAN CHANNELS`, `SPECTRUM`, frame-mix statistics and Fox Hunt | Related native views, not identical Marauder data presentation. |
-| BLE discovery/capture | Existing BLE scan, tracker, detector and PCAP services | Includes tracker/wearable classifications such as AirTag, SmartTag, Tile and smart-glasses heuristics. It does not establish exact parity with Marauder's skimmer, Flipper, iBeacon or BLE Flock workflows. |
+| BLE discovery/capture | BLE DETECT now includes FindMy monitor, iBeacon detail, Flipper/Flock/Meta/HC-name candidate filters and measured report-rate view | Native paged selection, strict AD parsing and existing Fox Hunt/GATT handoff; see [scope and provenance](../applications/poom_ble_detector/MARAUDER_PASSIVE_BLE.md). HC-name matches do not prove a skimmer; C5 does not support Classic-only inquiry. |
+| FindMy sound | FIND MY BEEP, selected tag or one-pass batch | AirTag/FMNA/DULT services must be discovered. ATT acknowledgment is separate from audible output; physical tag compatibility remains a device acceptance item. |
 | Remote ID | Existing drone scan features | Existing POOM implementation; this change does not revalidate every transport. |
 | PineScan, multi-SSID detection, CSI motion and follow detection | No dedicated counterparts identified in this port | Not implemented by this change. |
 | ARP, ping and port/service scans | Existing `SCAN NET` ARP discovery, TCP/UDP port probes, SSH checks and common-service host probes | ICMP ping and a complete 1..65535 TCP port sweep remain separate gaps; existing native probes should be reused. |

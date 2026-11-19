@@ -282,6 +282,15 @@ static int scripted_input(action_event_t *event)
         case 2: assert(s->view == VIEW_CLIENTS && s->monitoring && !start_calls); s_stop_action = true; return pdFALSE;
         default: assert(false);
         }
+    } else if(test_case == 17U) { /* Named-SSID actions skip hidden APs and need no client discovery. */
+        switch(step) {
+        case 0: assert(s->view == VIEW_APS && s->ap_count == 1 && s->aps[0].bssid[5] == 11 && !start_calls); event->button = ACTION_A; break;
+        case 1: assert(s->view == VIEW_READY && !monitor_starts && !start_calls); event->button = ACTION_A; break;
+        case 2: assert(s->view == VIEW_RUNNING && last_started.ap.bssid[5] == 11 && !last_started.client_count); event->button = ACTION_B; break;
+        case 3: assert(s->view == VIEW_RESULT); event->button = ACTION_B; break;
+        case 4: assert(s->view == VIEW_APS); event->button = ACTION_B; break;
+        default: assert(false);
+        }
     } else assert(false);
     return pdTRUE;
 }
@@ -366,6 +375,12 @@ int main(void)
     reset(14); channel_error = ESP_FAIL; menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG); run_ui(); assert(monitor_starts == 1 && monitor_stops == 1);
     reset(15); menu_wifi_action_show(POOM_WIFI_ACTION_BAD_MSG); run_ui(); assert(!start_calls && monitor_starts == 1 && monitor_stops == 1);
     reset(16); test_selection_capacity();
+    reset(17); scan_fixture.records[0].ssid[0] = 0;
+    menu_wifi_action_show(POOM_WIFI_ACTION_PROBE_REQUEST); run_ui();
+    assert(start_calls == 1 && !monitor_starts && last_started.mode == POOM_MARAUDER_PROBE_REQUEST);
+    reset(17); scan_fixture.records[0].ssid[0] = 0;
+    menu_wifi_action_show(POOM_WIFI_ACTION_AP_CLONE); run_ui();
+    assert(start_calls == 1 && !monitor_starts && last_started.mode == POOM_MARAUDER_AP_CLONE);
 
     puts("Wi-Fi action UI: discovery, scope, MAC multiselection/reordering, navigation, errors, cancellation and CLI stop passed");
     return 0;
