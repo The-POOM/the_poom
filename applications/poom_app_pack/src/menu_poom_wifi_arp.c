@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "Arduboy2.h"
@@ -93,6 +94,10 @@ typedef enum
     MENU_POOM_WIFI_ARP_STATE_HOST_SCAN_RESULT,
     MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_WAIT,
     MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_LIST,
+    MENU_POOM_WIFI_ARP_STATE_FIND_SELECT,
+    MENU_POOM_WIFI_ARP_STATE_TCP_READY,
+    MENU_POOM_WIFI_ARP_STATE_TCP_WAIT,
+    MENU_POOM_WIFI_ARP_STATE_TCP_RESULT,
 } menu_poom_wifi_arp_state_t;
 
 typedef enum
@@ -116,6 +121,7 @@ typedef enum
     MENU_POOM_WIFI_ARP_ITEM_SSID = 0,
     MENU_POOM_WIFI_ARP_ITEM_PASS,
     MENU_POOM_WIFI_ARP_ITEM_SCAN,
+    MENU_POOM_WIFI_ARP_ITEM_PING,
     MENU_POOM_WIFI_ARP_ITEM_FIND_PORT,
     MENU_POOM_WIFI_ARP_ITEM_BACK,
     MENU_POOM_WIFI_ARP_ITEM_COUNT,
@@ -148,7 +154,7 @@ static menu_poom_wifi_arp_char_set_t s_menu_poom_wifi_arp_char_set = MENU_POOM_W
 static char s_menu_poom_wifi_arp_status[22] = "A:Select  B:Exit";
 static uint8_t s_menu_poom_wifi_arp_status_hold_cycles = 0U;
 
-#define MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS (64U)
+#define MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS (254U)
 #define MENU_POOM_WIFI_ARP_SCAN_VISIBLE_ROWS (4)
 #define MENU_POOM_WIFI_ARP_SCAN_LIST_Y0 (14)
 #define MENU_POOM_WIFI_ARP_SCAN_ROW_STEP (10)
@@ -185,6 +191,67 @@ static uint8_t s_menu_poom_wifi_arp_host_scan_mac[6] = {0};
 static uint32_t s_menu_poom_wifi_arp_host_scan_seq = 0U;
 static uint8_t s_menu_poom_wifi_arp_host_scan_page = 0U;
 static menu_poom_wifi_arp_state_t s_menu_poom_wifi_arp_host_scan_return_state = MENU_POOM_WIFI_ARP_STATE_SCAN_LIST;
+static portMUX_TYPE s_net_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_net_owned;
+static bool s_net_cancel;
+static bool s_net_back_pending;
+static bool s_ping_discovery;
+static TaskHandle_t s_tcp_task;
+static poom_wifi_arp_tcp_scan_result_t *s_tcp_result;
+static poom_wifi_arp_progress_t s_net_progress;
+static esp_err_t s_net_error;
+static uint16_t s_tcp_page = 1U;
+static uint8_t s_find_choice;
+static const char *const s_tcp_presets[] = {"CUSTOM PORT", "TELNET TCP 23", "SMTP TCP 25", "DNS TCP 53", "HTTP TCP 80", "HTTPS TCP 443", "RDP TCP 3389"};
+static const uint16_t s_tcp_preset_ports[] = {0,23,25,53,80,443,3389};
+
+static bool menu_net_cancelled_(void *user)
+{
+    (void)user;
+    portENTER_CRITICAL(&s_net_lock);
+    const bool cancelled = s_net_cancel;
+    portEXIT_CRITICAL(&s_net_lock);
+    return cancelled;
+}
+static void menu_net_cancel_(bool cancel)
+{
+    portENTER_CRITICAL(&s_net_lock); s_net_cancel = cancel; portEXIT_CRITICAL(&s_net_lock);
+}
+static bool menu_net_workers_busy_(void)
+{
+    portENTER_CRITICAL(&s_net_lock);
+    const bool busy = s_menu_poom_wifi_arp_scan_task || s_menu_poom_wifi_arp_port_task ||
+                      s_menu_poom_wifi_arp_host_scan_task || s_tcp_task;
+    portEXIT_CRITICAL(&s_net_lock);
+    return busy;
+}
+static void menu_net_progress_(const poom_wifi_arp_progress_t *progress, void *user)
+{
+    (void)user;
+    portENTER_CRITICAL(&s_net_lock); s_net_progress = *progress; portEXIT_CRITICAL(&s_net_lock);
+}
+static const poom_wifi_arp_control_t s_net_control = {
+    .cancelled = menu_net_cancelled_, .progress = menu_net_progress_,
+};
+
+bool menu_poom_wifi_arp_is_active(void)
+{
+    portENTER_CRITICAL(&s_net_lock); const bool active = s_net_owned; portEXIT_CRITICAL(&s_net_lock);
+    return active;
+}
+
+bool menu_poom_wifi_arp_stop(void)
+{
+    menu_net_cancel_(true);
+    s_menu_poom_wifi_arp_exit_requested = true;
+    if(xTaskGetCurrentTaskHandle() == s_menu_poom_wifi_arp_status_task) return false;
+    const TickType_t started = xTaskGetTickCount();
+    while(menu_poom_wifi_arp_is_active()) {
+        if(xTaskGetTickCount() - started >= pdMS_TO_TICKS(5000U)) return false;
+        vTaskDelay(pdMS_TO_TICKS(10U));
+    }
+    return true;
+}
 
 /**
  * @brief Handles an internal callback for this menu module.
@@ -266,7 +333,10 @@ static bool menu_poom_wifi_arp_ensure_scan_hosts_(void)
         return true;
     }
 
-    s_menu_poom_wifi_arp_scan_hosts = (poom_wifi_arp_scan_host_t *)calloc(MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS,
+    s_menu_poom_wifi_arp_scan_hosts = heap_caps_calloc(MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS,
+        sizeof(*s_menu_poom_wifi_arp_scan_hosts), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!s_menu_poom_wifi_arp_scan_hosts)
+        s_menu_poom_wifi_arp_scan_hosts = (poom_wifi_arp_scan_host_t *)calloc(MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS,
                                                                            sizeof(*s_menu_poom_wifi_arp_scan_hosts));
     return (s_menu_poom_wifi_arp_scan_hosts != NULL);
 }
@@ -579,7 +649,8 @@ static void menu_poom_wifi_arp_draw_scan_wait_(const char* msg)
     if (s_menu_poom_wifi_arp_wifi_last_line[0] != '\0')
     {
         poom_arduboy_set_cursor(10, 38);
-        (void)poom_arduboy_print(s_menu_poom_wifi_arp_wifi_last_line);
+        const bool limited = s_ping_discovery && s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_SCAN_WAIT && s_net_progress.scope_limited;
+        (void)poom_arduboy_print(limited ? "Local /24 only" : s_menu_poom_wifi_arp_wifi_last_line);
     }
 
     poom_arduboy_set_cursor(72, 56);
@@ -600,7 +671,7 @@ static void menu_poom_wifi_arp_draw_scan_list_(void)
 
     if (s_menu_poom_wifi_arp_scan_count == 0U)
     {
-        menu_poom_wifi_arp_draw_scan_wait_("No hosts");
+        menu_poom_wifi_arp_draw_scan_wait_(s_net_error == ESP_OK ? "No hosts" : "Discovery failed");
         return;
     }
 
@@ -647,7 +718,7 @@ static void menu_poom_wifi_arp_draw_scan_list_(void)
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
 
     poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print(F("A:SEL"));
+    (void)poom_arduboy_print(F("A:SVC >:TCP"));
     poom_arduboy_set_cursor(72, 56);
     (void)poom_arduboy_print(F("B:EXIT"));
 
@@ -822,7 +893,7 @@ static void menu_poom_wifi_arp_draw_port_sweep_list_(void)
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
 
     poom_arduboy_set_cursor(0, 56);
-    (void)poom_arduboy_print(F("A:SEL"));
+    (void)poom_arduboy_print(F("A:SVC >:TCP"));
     poom_arduboy_set_cursor(72, 56);
     (void)poom_arduboy_print(F("B:EXIT"));
 
@@ -1093,7 +1164,10 @@ static void menu_poom_wifi_arp_draw_main_(bool wifi_ready)
                 break;
 
             case MENU_POOM_WIFI_ARP_ITEM_SCAN:
-                (void)snprintf(line_item, sizeof(line_item), "Scan Hosts");
+                (void)snprintf(line_item, sizeof(line_item), "ARP Discovery");
+                break;
+            case MENU_POOM_WIFI_ARP_ITEM_PING:
+                (void)snprintf(line_item, sizeof(line_item), "Ping Discovery");
                 break;
 
             case MENU_POOM_WIFI_ARP_ITEM_FIND_PORT:
@@ -1262,26 +1336,9 @@ static esp_err_t menu_poom_wifi_arp_exit_(void)
     s_menu_poom_wifi_arp_exit_requested = false;
     s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_MAIN;
 
-    if (s_menu_poom_wifi_arp_scan_task != NULL)
-    {
-        TaskHandle_t scan_task = s_menu_poom_wifi_arp_scan_task;
-        s_menu_poom_wifi_arp_scan_task = NULL;
-        vTaskDelete(scan_task);
-    }
-
-    if (s_menu_poom_wifi_arp_port_task != NULL)
-    {
-        TaskHandle_t scan_task = s_menu_poom_wifi_arp_port_task;
-        s_menu_poom_wifi_arp_port_task = NULL;
-        vTaskDelete(scan_task);
-    }
-
-    if (s_menu_poom_wifi_arp_host_scan_task != NULL)
-    {
-        TaskHandle_t scan_task = s_menu_poom_wifi_arp_host_scan_task;
-        s_menu_poom_wifi_arp_host_scan_task = NULL;
-        vTaskDelete(scan_task);
-    }
+    menu_net_cancel_(true);
+    menu_poom_wifi_arp_draw_scan_wait_("Stopping...");
+    while(menu_net_workers_busy_()) vTaskDelay(pdMS_TO_TICKS(20U));
 
     if(s_menu_poom_wifi_arp_status_task != NULL)
     {
@@ -1325,9 +1382,11 @@ static esp_err_t menu_poom_wifi_arp_exit_(void)
     }
 
     menu_poom_wifi_arp_release_scan_hosts_();
+    free(s_tcp_result); s_tcp_result = NULL;
 
     const uint8_t token = 1;
     (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    portENTER_CRITICAL(&s_net_lock); s_net_owned = false; portEXIT_CRITICAL(&s_net_lock);
     return ESP_OK;
 }
 
@@ -1346,16 +1405,19 @@ static void menu_poom_wifi_arp_scan_task_(void* task_arg)
         .num_active_hosts = 0U,
         .max_hosts = MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS,
         .subnet_prefix = {0},
+        .cancelled = menu_net_cancelled_,
     };
 
-    (void)poom_wifi_arp_scan_subnet(&ctx);
+    s_net_error = s_ping_discovery ? poom_wifi_arp_ping_subnet(&ctx, &s_net_control) : poom_wifi_arp_scan_subnet(&ctx);
 
     s_menu_poom_wifi_arp_scan_count = ctx.num_active_hosts;
     s_menu_poom_wifi_arp_scan_selected = 0;
     s_menu_poom_wifi_arp_scan_scroll = 0;
 
+    if(!menu_net_cancelled_(NULL)) s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_SCAN_LIST;
+    portENTER_CRITICAL(&s_net_lock);
     s_menu_poom_wifi_arp_scan_task = NULL;
-    s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_SCAN_LIST;
+    portEXIT_CRITICAL(&s_net_lock);
     vTaskDelete(NULL);
 }
 
@@ -1379,6 +1441,9 @@ static void menu_poom_wifi_arp_scan_start_if_ready_(void)
     }
 
     s_menu_poom_wifi_arp_scan_started = true;
+    menu_net_cancel_(false);
+    memset(&s_net_progress, 0, sizeof(s_net_progress));
+    s_net_error = ESP_OK;
     s_menu_poom_wifi_arp_scan_count = 0U;
     (void)memset(s_menu_poom_wifi_arp_scan_hosts,
                  0,
@@ -1386,12 +1451,16 @@ static void menu_poom_wifi_arp_scan_start_if_ready_(void)
 
     if (s_menu_poom_wifi_arp_scan_task == NULL)
     {
-        (void)xTaskCreate(menu_poom_wifi_arp_scan_task_,
+        if(xTaskCreate(menu_poom_wifi_arp_scan_task_,
                           "beast_scan",
                           4096,
                           NULL,
                           5,
-                          &s_menu_poom_wifi_arp_scan_task);
+                          &s_menu_poom_wifi_arp_scan_task) != pdPASS) {
+            s_menu_poom_wifi_arp_scan_started = false;
+            s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_MAIN;
+            menu_poom_wifi_arp_set_status_("Scan task failed", 10U);
+        }
     }
 }
 
@@ -1415,13 +1484,16 @@ static void menu_poom_wifi_arp_port_sweep_task_(void *task_arg)
         .num_active_hosts = 0U,
         .max_hosts = MENU_POOM_WIFI_ARP_SCAN_MAX_HOSTS,
         .subnet_prefix = {0},
+        .cancelled = menu_net_cancelled_,
     };
 
     (void)poom_wifi_arp_scan_subnet(&ctx);
+    s_menu_poom_wifi_arp_scan_count = ctx.num_active_hosts;
 
     s_menu_poom_wifi_arp_port_total = ctx.num_active_hosts;
     for (size_t i = 0; i < ctx.num_active_hosts; i++)
     {
+        if(menu_net_cancelled_(NULL)) break;
         bool match = false;
         const poom_wifi_arp_scan_host_t *host = &ctx.hosts[i];
         switch (s_menu_poom_wifi_arp_find_mode)
@@ -1452,8 +1524,10 @@ static void menu_poom_wifi_arp_port_sweep_task_(void *task_arg)
     s_menu_poom_wifi_arp_port_selected = 0;
     s_menu_poom_wifi_arp_port_scroll = 0;
 
+    if(!menu_net_cancelled_(NULL)) s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_LIST;
+    portENTER_CRITICAL(&s_net_lock);
     s_menu_poom_wifi_arp_port_task = NULL;
-    s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_LIST;
+    portEXIT_CRITICAL(&s_net_lock);
     vTaskDelete(NULL);
 }
 
@@ -1477,6 +1551,7 @@ static void menu_poom_wifi_arp_port_sweep_start_if_ready_(void)
     }
 
     s_menu_poom_wifi_arp_port_started = true;
+    menu_net_cancel_(false);
     s_menu_poom_wifi_arp_port_hit_count = 0U;
     s_menu_poom_wifi_arp_port_total = 0U;
     s_menu_poom_wifi_arp_port_done = 0U;
@@ -1484,12 +1559,16 @@ static void menu_poom_wifi_arp_port_sweep_start_if_ready_(void)
 
     if (s_menu_poom_wifi_arp_port_task == NULL)
     {
-        (void)xTaskCreate(menu_poom_wifi_arp_port_sweep_task_,
+        if(xTaskCreate(menu_poom_wifi_arp_port_sweep_task_,
                           "beast_find",
                           4096,
                           NULL,
                           5,
-                          &s_menu_poom_wifi_arp_port_task);
+                          &s_menu_poom_wifi_arp_port_task) != pdPASS) {
+            s_menu_poom_wifi_arp_port_started = false;
+            s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_MAIN;
+            menu_poom_wifi_arp_set_status_("Scan task failed", 10U);
+        }
     }
 }
 
@@ -1503,14 +1582,17 @@ static void menu_poom_wifi_arp_host_scan_task_(void *task_arg)
 {
     const uint32_t seq = (uint32_t)(uintptr_t)task_arg;
 
-    (void)poom_wifi_arp_probe_host_services(s_menu_poom_wifi_arp_host_scan_ip, &s_menu_poom_wifi_arp_host_scan_result);
+    (void)poom_wifi_arp_probe_host_services_cancelable(s_menu_poom_wifi_arp_host_scan_ip,
+        &s_menu_poom_wifi_arp_host_scan_result, menu_net_cancelled_, NULL);
 
-    if ((seq == s_menu_poom_wifi_arp_host_scan_seq) && (s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_HOST_SCAN_WAIT))
+    if (!menu_net_cancelled_(NULL) && (seq == s_menu_poom_wifi_arp_host_scan_seq) && (s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_HOST_SCAN_WAIT))
     {
         s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_HOST_SCAN_RESULT;
     }
 
+    portENTER_CRITICAL(&s_net_lock);
     s_menu_poom_wifi_arp_host_scan_task = NULL;
+    portEXIT_CRITICAL(&s_net_lock);
     vTaskDelete(NULL);
 }
 
@@ -1540,19 +1622,23 @@ static void menu_poom_wifi_arp_host_scan_start_(const poom_wifi_arp_scan_host_t 
     s_menu_poom_wifi_arp_host_scan_page = 0U;
 
     s_menu_poom_wifi_arp_host_scan_seq++;
+    menu_net_cancel_(false);
     const uint32_t seq = s_menu_poom_wifi_arp_host_scan_seq;
 
     if (s_menu_poom_wifi_arp_host_scan_task == NULL)
     {
-        (void)xTaskCreate(menu_poom_wifi_arp_host_scan_task_,
+        s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_HOST_SCAN_WAIT;
+        if(xTaskCreate(menu_poom_wifi_arp_host_scan_task_,
                           "beast_probe",
                           4096,
                           (void *)(uintptr_t)seq,
                           5,
-                          &s_menu_poom_wifi_arp_host_scan_task);
+                          &s_menu_poom_wifi_arp_host_scan_task) != pdPASS) {
+            s_menu_poom_wifi_arp_state = s_menu_poom_wifi_arp_host_scan_return_state;
+            menu_poom_wifi_arp_set_status_("Probe task failed", 10U);
+        }
     }
 
-    s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_HOST_SCAN_WAIT;
 }
 
 /**
@@ -1561,6 +1647,89 @@ static void menu_poom_wifi_arp_host_scan_start_(const poom_wifi_arp_scan_host_t 
  * @param[in] task_arg Parameter passed to the helper.
  * @return void
  */
+static uint16_t menu_net_next_open_(uint32_t first)
+{
+    for(uint32_t port = first; port <= 65535U; ++port)
+        if(poom_wifi_arp_tcp_port_open(s_tcp_result, (uint16_t)port)) return (uint16_t)port;
+    return 0U;
+}
+
+static void menu_net_tcp_prepare_(const poom_wifi_arp_scan_host_t *host)
+{
+    if(!host || menu_net_workers_busy_()) return;
+    (void)snprintf(s_menu_poom_wifi_arp_host_scan_ip, sizeof(s_menu_poom_wifi_arp_host_scan_ip), "%.15s", host->ip);
+    s_net_error = ESP_OK;
+    s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_TCP_READY;
+}
+
+static void menu_net_tcp_task_(void *arg)
+{
+    (void)arg;
+    s_net_error = poom_wifi_arp_scan_tcp_range(s_menu_poom_wifi_arp_host_scan_ip, 1U, 65535U,
+                                             &s_net_control, s_tcp_result);
+    s_tcp_page = 1U;
+    if(s_menu_poom_wifi_arp_active) s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_TCP_RESULT;
+    portENTER_CRITICAL(&s_net_lock); s_tcp_task = NULL; portEXIT_CRITICAL(&s_net_lock);
+    vTaskDelete(NULL);
+}
+
+static void menu_net_tcp_start_(void)
+{
+    if(menu_net_workers_busy_()) return;
+    if(!s_tcp_result) s_tcp_result = heap_caps_calloc(1U, sizeof(*s_tcp_result), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!s_tcp_result) s_tcp_result = calloc(1U, sizeof(*s_tcp_result));
+    if(!s_tcp_result) { menu_poom_wifi_arp_set_status_("No RAM for ports", 10U); s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_MAIN; return; }
+    memset(s_tcp_result, 0, sizeof(*s_tcp_result));
+    memset(&s_net_progress, 0, sizeof(s_net_progress)); s_net_progress.total = 65535U;
+    s_net_error = ESP_OK; menu_net_cancel_(false);
+    s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_TCP_WAIT;
+    if(xTaskCreate(menu_net_tcp_task_, "beast_tcp_all", 4096U, NULL, 5U, &s_tcp_task) != pdPASS) {
+        s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_TCP_READY;
+        s_net_error = ESP_ERR_NO_MEM;
+    }
+}
+
+static void menu_net_draw_tcp_(void)
+{
+    char line[32];
+    poom_wifi_arp_progress_t progress;
+    portENTER_CRITICAL(&s_net_lock); progress = s_net_progress; portEXIT_CRITICAL(&s_net_lock);
+    poom_arduboy_clear(); poom_arduboy_set_text_size(1);
+    poom_arduboy_set_cursor(0, 2); (void)poom_arduboy_print("FULL TCP SCAN");
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
+    if(s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_TCP_READY) {
+        poom_arduboy_set_cursor(0, 15); (void)poom_arduboy_print(s_menu_poom_wifi_arp_host_scan_ip);
+        poom_arduboy_set_cursor(0, 27); (void)poom_arduboy_print("TCP ports 1-65535");
+        poom_arduboy_set_cursor(0, 39); (void)poom_arduboy_print(s_net_error == ESP_ERR_NO_MEM ? "Task needs memory" : "May take minutes");
+        poom_arduboy_set_cursor(0, 56); (void)poom_arduboy_print("A:START       B:BACK");
+    } else if(s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_TCP_WAIT) {
+        poom_arduboy_set_cursor(0, 14); (void)poom_arduboy_print(s_menu_poom_wifi_arp_host_scan_ip);
+        (void)snprintf(line, sizeof(line), "%lu/%lu scanned", (unsigned long)progress.completed, (unsigned long)progress.total);
+        poom_arduboy_set_cursor(0, 25); (void)poom_arduboy_print(line);
+        (void)snprintf(line, sizeof(line), "Open %lu  Errors %lu", (unsigned long)progress.found, (unsigned long)progress.errors);
+        poom_arduboy_set_cursor(0, 36); (void)poom_arduboy_print(line);
+        poom_arduboy_set_cursor(0, 47); (void)poom_arduboy_print(menu_net_cancelled_(NULL) ? "Stopping..." : "Checking this host");
+        poom_arduboy_set_cursor(0, 56); (void)poom_arduboy_print("B:STOP");
+    } else {
+        (void)snprintf(line, sizeof(line), "%s %lu/%lu", progress.cancelled ? "Stopped" : s_net_error == ESP_OK ? "Done" : "Error",
+                       (unsigned long)progress.completed, (unsigned long)progress.total);
+        poom_arduboy_set_cursor(0, 14); (void)poom_arduboy_print(line);
+        uint32_t port = s_tcp_page;
+        for(unsigned row = 0U; row < 3U; ++row) {
+            const uint16_t found = menu_net_next_open_(port);
+            if(!found) {
+                if(row == 0U) { poom_arduboy_set_cursor(0, 34); (void)poom_arduboy_print(progress.errors ? "Probe errors occurred" : "No open ports found"); }
+                break;
+            }
+            (void)snprintf(line, sizeof(line), "TCP %u OPEN", found);
+            poom_arduboy_set_cursor(0, 24 + row * 10); (void)poom_arduboy_print(line);
+            port = (uint32_t)found + 1U;
+        }
+        poom_arduboy_set_cursor(0, 56); (void)poom_arduboy_print("UP/DN ports   B:BACK");
+    }
+    poom_arduboy_display();
+}
+
 static void menu_poom_wifi_arp_status_task_(void* task_arg)
 {
     (void)task_arg;
@@ -1573,6 +1742,14 @@ static void menu_poom_wifi_arp_status_task_(void* task_arg)
         {
             (void)menu_poom_wifi_arp_exit_();
             break;
+        }
+        if(s_net_back_pending) {
+            if(menu_net_workers_busy_()) {
+                menu_poom_wifi_arp_draw_scan_wait_("Stopping...");
+                vTaskDelay(pdMS_TO_TICKS(50U)); continue;
+            }
+            s_net_back_pending = false; menu_net_cancel_(false);
+            s_menu_poom_wifi_arp_state = s_menu_poom_wifi_arp_host_scan_return_state;
         }
 
         if((s_menu_poom_wifi_arp_status_hold_cycles > 0U) &&
@@ -1599,6 +1776,19 @@ static void menu_poom_wifi_arp_status_task_(void* task_arg)
             case MENU_POOM_WIFI_ARP_STATE_EDIT_PORT:
                 menu_poom_wifi_arp_draw_edit_port_();
                 break;
+            case MENU_POOM_WIFI_ARP_STATE_FIND_SELECT: {
+                poom_arduboy_clear(); poom_arduboy_set_text_size(1);
+                menu_poom_wifi_arp_draw_title_(NULL);
+                const unsigned first = (s_find_choice / 4U) * 4U;
+                for(unsigned i = first; i < 7U && i < first + 4U; ++i) {
+                    const int y = 14 + (int)(i - first) * 10;
+                    poom_arduboy_set_cursor(2, y); (void)poom_arduboy_print(s_tcp_presets[i]);
+                    if(i == s_find_choice) poom_arduboy_fill_rect(0, y - 1, ARDUBOY_WIDTH, 9, INVERT);
+                }
+                poom_arduboy_set_cursor(0, 56); (void)poom_arduboy_print("A:SELECT      B:BACK");
+                poom_arduboy_display();
+                break;
+            }
             case MENU_POOM_WIFI_ARP_STATE_SCAN_WAIT: {
                 const bool sta_connected = poom_wifi_ctrl_sta_is_connected();
                 if (!wifi_ready)
@@ -1643,7 +1833,13 @@ static void menu_poom_wifi_arp_status_task_(void* task_arg)
                 }
 
                 menu_poom_wifi_arp_scan_start_if_ready_();
-                menu_poom_wifi_arp_draw_scan_wait_("Scanning...");
+                if(s_ping_discovery) {
+                    poom_wifi_arp_progress_t progress;
+                    portENTER_CRITICAL(&s_net_lock); progress = s_net_progress; portEXIT_CRITICAL(&s_net_lock);
+                    char line[22];
+                    (void)snprintf(line, sizeof(line), "Ping %lu/%lu", (unsigned long)progress.completed, (unsigned long)progress.total);
+                    menu_poom_wifi_arp_draw_scan_wait_(line);
+                } else menu_poom_wifi_arp_draw_scan_wait_("ARP scanning...");
                 break;
             }
             case MENU_POOM_WIFI_ARP_STATE_SCAN_LIST:
@@ -1705,6 +1901,11 @@ static void menu_poom_wifi_arp_status_task_(void* task_arg)
             case MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_LIST:
                 menu_poom_wifi_arp_draw_port_sweep_list_();
                 break;
+            case MENU_POOM_WIFI_ARP_STATE_TCP_READY:
+            case MENU_POOM_WIFI_ARP_STATE_TCP_WAIT:
+            case MENU_POOM_WIFI_ARP_STATE_TCP_RESULT:
+                menu_net_draw_tcp_();
+                break;
             default:
                 break;
         }
@@ -1712,7 +1913,7 @@ static void menu_poom_wifi_arp_status_task_(void* task_arg)
         vTaskDelay(pdMS_TO_TICKS(MENU_POOM_WIFI_ARP_REFRESH_MS));
     }
 
-    s_menu_poom_wifi_arp_status_task = NULL;
+    /* exit_ already cleared this task's handle before releasing ownership. */
     vTaskDelete(NULL);
 }
 
@@ -1898,6 +2099,8 @@ static void menu_poom_wifi_arp_handle_main_button_(uint8_t button)
             menu_poom_wifi_arp_enter_edit_pass_();
             break;
         case MENU_POOM_WIFI_ARP_ITEM_SCAN:
+        case MENU_POOM_WIFI_ARP_ITEM_PING:
+            s_ping_discovery = s_menu_poom_wifi_arp_selected == MENU_POOM_WIFI_ARP_ITEM_PING;
             s_menu_poom_wifi_arp_scan_started = false;
             s_menu_poom_wifi_arp_scan_connect_started = false;
             s_menu_poom_wifi_arp_scan_connect_wait_cycles = 0U;
@@ -1905,7 +2108,8 @@ static void menu_poom_wifi_arp_handle_main_button_(uint8_t button)
             s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_SCAN_WAIT;
             break;
         case MENU_POOM_WIFI_ARP_ITEM_FIND_PORT:
-            menu_poom_wifi_arp_enter_edit_port_();
+            s_find_choice = 0U;
+            s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_FIND_SELECT;
             break;
         case MENU_POOM_WIFI_ARP_ITEM_BACK:
         default:
@@ -2033,12 +2237,53 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
 
     (void)user_ctx;
 
-    if((msg == NULL) || (msg->len < sizeof(button_msg)))
+    if(!s_menu_poom_wifi_arp_active || (msg == NULL) || (msg->len < sizeof(button_msg)))
     {
         return;
     }
 
     (void)memcpy(&button_msg, msg->data, sizeof(button_msg));
+
+    if(s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_FIND_SELECT && button_msg.event == BUTTON_SINGLE_CLICK) {
+        if(button_msg.button == BTN_B) s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_MAIN;
+        else if(button_msg.button == BTN_UP) s_find_choice = (uint8_t)((s_find_choice + 6U) % 7U);
+        else if(button_msg.button == BTN_DOWN) s_find_choice = (uint8_t)((s_find_choice + 1U) % 7U);
+        else if(button_msg.button == BTN_A) {
+            if(s_find_choice == 0U) menu_poom_wifi_arp_enter_edit_port_();
+            else {
+                s_menu_poom_wifi_arp_target_port = s_tcp_preset_ports[s_find_choice];
+                s_menu_poom_wifi_arp_find_mode = MENU_POOM_WIFI_ARP_FIND_MODE_TCP;
+                s_menu_poom_wifi_arp_port_started = false;
+                s_menu_poom_wifi_arp_port_connect_started = false;
+                s_menu_poom_wifi_arp_port_connect_wait_cycles = 0U;
+                s_menu_poom_wifi_arp_port_hit_count = s_menu_poom_wifi_arp_port_total = s_menu_poom_wifi_arp_port_done = 0U;
+                s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_WAIT;
+            }
+        }
+        return;
+    }
+
+    if(button_msg.event == BUTTON_SINGLE_CLICK &&
+       s_menu_poom_wifi_arp_state >= MENU_POOM_WIFI_ARP_STATE_TCP_READY) {
+        if(button_msg.button == BTN_B) {
+            if(s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_TCP_WAIT) menu_net_cancel_(true);
+            else s_menu_poom_wifi_arp_state = s_menu_poom_wifi_arp_host_scan_return_state;
+        } else if(s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_TCP_READY && button_msg.button == BTN_A) menu_net_tcp_start_();
+        else if(s_menu_poom_wifi_arp_state == MENU_POOM_WIFI_ARP_STATE_TCP_RESULT) {
+            if(button_msg.button == BTN_DOWN) {
+                uint32_t next = s_tcp_page;
+                for(unsigned row = 0; row < 3U; ++row) { uint16_t found = menu_net_next_open_(next); if(!found) { next = 65536U; break; } next = (uint32_t)found + 1U; }
+                const uint16_t found = menu_net_next_open_(next); if(found) s_tcp_page = found;
+            } else if(button_msg.button == BTN_UP) {
+                unsigned count = 0U;
+                for(uint32_t p = s_tcp_page; p > 1U;) {
+                    --p;
+                    if(poom_wifi_arp_tcp_port_open(s_tcp_result, (uint16_t)p)) { s_tcp_page = (uint16_t)p; if(++count == 3U) break; }
+                }
+            }
+        }
+        return;
+    }
 
     if((button_msg.button == BTN_B) && (button_msg.event == BUTTON_SINGLE_CLICK))
     {
@@ -2047,10 +2292,9 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
         {
             if (s_menu_poom_wifi_arp_host_scan_task != NULL)
             {
-                TaskHandle_t scan_task = s_menu_poom_wifi_arp_host_scan_task;
-                s_menu_poom_wifi_arp_host_scan_task = NULL;
                 s_menu_poom_wifi_arp_host_scan_seq++;
-                vTaskDelete(scan_task);
+                menu_net_cancel_(true); s_net_back_pending = true;
+                return;
             }
             s_menu_poom_wifi_arp_state = s_menu_poom_wifi_arp_host_scan_return_state;
             return;
@@ -2104,7 +2348,7 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
                 s_menu_poom_wifi_arp_scan_selected++;
                 return;
             }
-            if (button_msg.button == BTN_A)
+            if (button_msg.button == BTN_A || button_msg.button == BTN_RIGHT)
             {
                 if (s_menu_poom_wifi_arp_scan_count == 0U)
                 {
@@ -2122,7 +2366,8 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
 
                 const poom_wifi_arp_scan_host_t *host = &s_menu_poom_wifi_arp_scan_hosts[s_menu_poom_wifi_arp_scan_selected];
                 s_menu_poom_wifi_arp_host_scan_return_state = MENU_POOM_WIFI_ARP_STATE_SCAN_LIST;
-                menu_poom_wifi_arp_host_scan_start_(host);
+                if(button_msg.button == BTN_RIGHT) menu_net_tcp_prepare_(host);
+                else menu_poom_wifi_arp_host_scan_start_(host);
                 return;
             }
         }
@@ -2139,7 +2384,7 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
                 s_menu_poom_wifi_arp_port_selected++;
                 return;
             }
-            if (button_msg.button == BTN_A)
+            if (button_msg.button == BTN_A || button_msg.button == BTN_RIGHT)
             {
                 if (s_menu_poom_wifi_arp_port_hit_count == 0U)
                 {
@@ -2162,7 +2407,8 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
                     return;
                 }
                 s_menu_poom_wifi_arp_host_scan_return_state = MENU_POOM_WIFI_ARP_STATE_PORT_SWEEP_LIST;
-                menu_poom_wifi_arp_host_scan_start_(host);
+                if(button_msg.button == BTN_RIGHT) menu_net_tcp_prepare_(host);
+                else menu_poom_wifi_arp_host_scan_start_(host);
                 return;
             }
         }
@@ -2243,6 +2489,9 @@ static void menu_poom_wifi_arp_button_cb_(const poom_sbus_msg_t* msg, void* user
 
 void menu_poom_wifi_arp_show(void)
 {
+    if(menu_poom_wifi_arp_is_active()) return;
+    portENTER_CRITICAL(&s_net_lock); s_net_owned = true; portEXIT_CRITICAL(&s_net_lock);
+    menu_net_cancel_(false); s_net_back_pending = false; s_ping_discovery = false; s_net_error = ESP_OK;
     s_menu_poom_wifi_arp_active = true;
     s_menu_poom_wifi_arp_exit_requested = false;
     s_menu_poom_wifi_arp_state = MENU_POOM_WIFI_ARP_STATE_MAIN;
@@ -2281,28 +2530,18 @@ void menu_poom_wifi_arp_show(void)
         }
         else
         {
-            s_menu_poom_wifi_arp_active = false;
-            menu_poom_wifi_arp_release_scan_hosts_();
-            poom_arduboy_clear();
-            poom_arduboy_set_text_size(1);
-            menu_poom_wifi_arp_draw_title_(NULL);
-            poom_arduboy_set_cursor(10, 30);
-            (void)poom_arduboy_print(F("Button sub error"));
-            poom_arduboy_display();
-
-            const uint8_t token = 1;
-            (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+            (void)menu_poom_wifi_arp_exit_();
             return;
         }
     }
 
     if(s_menu_poom_wifi_arp_status_task == NULL)
     {
-        (void)xTaskCreate(menu_poom_wifi_arp_status_task_,
+        if(xTaskCreate(menu_poom_wifi_arp_status_task_,
                           "menu_wifi_arp",
                           MENU_POOM_WIFI_ARP_STATUS_STACK,
                           NULL,
                           MENU_POOM_WIFI_ARP_STATUS_PRIO,
-                          &s_menu_poom_wifi_arp_status_task);
+                          &s_menu_poom_wifi_arp_status_task) != pdPASS) (void)menu_poom_wifi_arp_exit_();
     }
 }

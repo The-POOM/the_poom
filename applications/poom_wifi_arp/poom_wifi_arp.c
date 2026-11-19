@@ -189,6 +189,17 @@ static esp_netif_t *poom_wifi_arp_get_sta_netif_(void)
     return NULL;
 }
 
+esp_err_t poom_wifi_arp_get_network(uint32_t *address, uint32_t *netmask)
+{
+    if(!address || !netmask) return ESP_ERR_INVALID_ARG;
+    if(!poom_wifi_ctrl_sta_has_ip()) return ESP_ERR_INVALID_STATE;
+    esp_netif_t *sta = poom_wifi_arp_get_sta_netif_();
+    esp_netif_ip_info_t info;
+    if(!sta || esp_netif_get_ip_info(sta, &info) != ESP_OK) return ESP_ERR_INVALID_STATE;
+    *address = ntohl(info.ip.addr); *netmask = ntohl(info.netmask.addr);
+    return *address && *address < 0xe0000000U ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
 /**
  * @brief Internal helper for `poom_wifi_arp_get_lwip_sta_netif`.
  *
@@ -297,6 +308,11 @@ static bool poom_wifi_arp_scan_get_arp_entry_(struct netif *netif, const char *i
 
     memcpy(mac, ctx.out_mac, 6);
     return true;
+}
+
+bool poom_wifi_arp_lookup_mac(const char *ip, uint8_t mac[6])
+{
+    return ip && mac && poom_wifi_arp_scan_get_arp_entry_(poom_wifi_arp_get_lwip_sta_netif_(), ip, mac);
 }
 
 /**
@@ -412,6 +428,7 @@ static bool poom_wifi_arp_scan_add_host_(poom_wifi_arp_scan_ctx_t *ctx, const ch
     (void)strlcpy(host->ip, ip, sizeof(host->ip));
     memcpy(host->mac, mac, 6);
     host->is_active = true;
+    host->mac_known = true;
     ctx->num_active_hosts++;
     return true;
 }
@@ -436,15 +453,20 @@ static void poom_wifi_arp_scan_process_batch_(poom_wifi_arp_scan_ctx_t *ctx, str
 
     for (int host = batch_start; host <= batch_end; host++)
     {
+        if(ctx->cancelled && ctx->cancelled(ctx->cancel_user)) return;
         poom_wifi_arp_scan_build_ip_string_(current_ip, sizeof(current_ip), ctx->subnet_prefix, host);
         (void)poom_wifi_arp_scan_send_arp_request_(netif, current_ip);
         vTaskDelay(pdMS_TO_TICKS(POOM_WIFI_ARP_SCAN_REQ_DELAY_MS));
     }
 
-    vTaskDelay(pdMS_TO_TICKS(POOM_WIFI_ARP_SCAN_RESP_WAIT_MS));
+    for(unsigned waited = 0U; waited < POOM_WIFI_ARP_SCAN_RESP_WAIT_MS; waited += 10U) {
+        if(ctx->cancelled && ctx->cancelled(ctx->cancel_user)) return;
+        vTaskDelay(pdMS_TO_TICKS(10U));
+    }
 
     for (int host = batch_start; host <= batch_end; host++)
     {
+        if(ctx->cancelled && ctx->cancelled(ctx->cancel_user)) return;
         uint8_t mac[6];
         poom_wifi_arp_scan_build_ip_string_(current_ip, sizeof(current_ip), ctx->subnet_prefix, host);
         if (poom_wifi_arp_scan_get_arp_entry_(netif, current_ip, mac))
@@ -490,10 +512,7 @@ static bool poom_wifi_arp_tcp_connect_probe_(const char *target_ip, uint16_t por
     }
 
     flags = fcntl(sock, F_GETFL, 0);
-    if (flags >= 0)
-    {
-        (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    }
+    if(flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) { close(sock); return false; }
 
     rc = connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
     if (rc == 0)
@@ -593,10 +612,7 @@ static bool poom_wifi_arp_ssh_is_service_(const char *target_ip, uint16_t port, 
     }
 
     flags = fcntl(sock, F_GETFL, 0);
-    if (flags >= 0)
-    {
-        (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    }
+    if(flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) { close(sock); return false; }
 
     rc = connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
     if (rc == 0)
@@ -635,7 +651,7 @@ static bool poom_wifi_arp_ssh_is_service_(const char *target_ip, uint16_t port, 
         .tv_sec = (long)(banner_timeout_ms / 1000U),
         .tv_usec = (long)((banner_timeout_ms % 1000U) * 1000U),
     };
-    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+    if(setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv)) < 0) { close(sock); return false; }
 
     char banner[16] = {0};
     const int n = (int)recv(sock, banner, (int)(sizeof(banner) - 1U), 0);
@@ -773,7 +789,7 @@ static bool poom_wifi_arp_udp_response_probe_(const char *target_ip, uint16_t po
         .tv_sec = (long)(timeout_ms / 1000U),
         .tv_usec = (long)((timeout_ms % 1000U) * 1000U),
     };
-    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if(setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) { close(sock); return false; }
 
     uint8_t probe[96];
     const size_t probe_len = poom_wifi_arp_udp_make_payload_(port, probe, sizeof(probe));
@@ -807,7 +823,8 @@ static bool poom_wifi_arp_udp_response_probe_(const char *target_ip, uint16_t po
  * @param[in] banner_size Parameter passed to the function.
  * @return bool
  */
-static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port, char *out_banner, size_t banner_size)
+static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port, char *out_banner, size_t banner_size,
+                                            poom_wifi_arp_cancel_cb_t cancelled, void *user)
 {
     struct sockaddr_in server_addr;
     int sock = -1;
@@ -837,10 +854,7 @@ static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port
     }
 
     flags = fcntl(sock, F_GETFL, 0);
-    if (flags >= 0)
-    {
-        (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-    }
+    if(flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) { close(sock); return false; }
 
     rc = connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
     if (rc == 0)
@@ -849,23 +863,16 @@ static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port
     }
     else if (rc < 0 && errno == EINPROGRESS)
     {
-        struct timeval tv = {
-            .tv_sec = 2,
-            .tv_usec = 0,
-        };
-
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(sock, &wfds);
-
-        rc = select(sock + 1, NULL, &wfds, NULL, &tv);
-        if (rc > 0 && FD_ISSET(sock, &wfds))
-        {
-            int so_error = 0;
-            socklen_t slen = sizeof(so_error);
-            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &slen) == 0 && so_error == 0)
-            {
-                open = true;
+        for(unsigned waited = 0U; waited < 2000U; waited += 50U) {
+            if(cancelled && cancelled(user)) break;
+            struct timeval tv = {.tv_sec = 0, .tv_usec = 50000};
+            fd_set wfds; FD_ZERO(&wfds); FD_SET(sock, &wfds);
+            rc = select(sock + 1, NULL, &wfds, NULL, &tv);
+            if(rc < 0) break;
+            if(rc > 0 && FD_ISSET(sock, &wfds)) {
+                int so_error = 0; socklen_t slen = sizeof(so_error);
+                open = getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &slen) == 0 && so_error == 0;
+                break;
             }
         }
     }
@@ -876,15 +883,16 @@ static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port
         return false;
     }
 
-    (void)fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
-    struct timeval tv = {
-        .tv_sec = 2,
-        .tv_usec = 0,
-    };
-    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
     char banner[96] = {0};
-    const int n = (int)recv(sock, banner, (int)(sizeof(banner) - 1U), 0);
+    int n = 0;
+    for(unsigned waited = 0U; waited < 2000U; waited += 50U) {
+        if(cancelled && cancelled(user)) break;
+        struct timeval tv = {.tv_sec = 0, .tv_usec = 50000};
+        fd_set reading; FD_ZERO(&reading); FD_SET(sock, &reading);
+        rc = select(sock + 1, &reading, NULL, NULL, &tv);
+        if(rc < 0) break;
+        if(rc > 0) { n = (int)recv(sock, banner, (int)sizeof(banner) - 1, 0); break; }
+    }
     if (n > 0)
     {
         banner[n] = '\0';
@@ -897,7 +905,7 @@ static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port
     }
 
     close(sock);
-    return true;
+    return n >= 4 && memcmp(banner, "SSH-", 4U) == 0;
 }
 
 /**
@@ -907,7 +915,8 @@ static bool poom_wifi_arp_ssh_banner_probe_(const char *target_ip, uint16_t port
  * @param[in] out Parameter passed to the function.
  * @return esp_err_t
  */
-static esp_err_t poom_wifi_arp_probe_tcp_ports_(const char *target_ip, poom_wifi_arp_port_probe_result_t *out)
+static esp_err_t poom_wifi_arp_probe_tcp_ports_(const char *target_ip, poom_wifi_arp_port_probe_result_t *out,
+                                               poom_wifi_arp_cancel_cb_t cancelled, void *user)
 {
     if ((target_ip == NULL) || (out == NULL))
     {
@@ -919,6 +928,7 @@ static esp_err_t poom_wifi_arp_probe_tcp_ports_(const char *target_ip, poom_wifi
 
     for (size_t i = 0; i < (sizeof(s_poom_wifi_arp_common_tcp_ports_) / sizeof(s_poom_wifi_arp_common_tcp_ports_[0])); i++)
     {
+        if(cancelled && cancelled(user)) return ESP_ERR_INVALID_STATE;
         if (out->num_open_ports >= POOM_WIFI_ARP_PROBE_MAX_PORTS)
         {
             break;
@@ -952,7 +962,8 @@ static esp_err_t poom_wifi_arp_probe_tcp_ports_(const char *target_ip, poom_wifi
  * @param[in] out Parameter passed to the function.
  * @return esp_err_t
  */
-static esp_err_t poom_wifi_arp_probe_udp_ports_(const char *target_ip, poom_wifi_arp_port_probe_result_t *out)
+static esp_err_t poom_wifi_arp_probe_udp_ports_(const char *target_ip, poom_wifi_arp_port_probe_result_t *out,
+                                               poom_wifi_arp_cancel_cb_t cancelled, void *user)
 {
     if ((target_ip == NULL) || (out == NULL))
     {
@@ -964,6 +975,7 @@ static esp_err_t poom_wifi_arp_probe_udp_ports_(const char *target_ip, poom_wifi
 
     for (size_t i = 0; i < (sizeof(s_poom_wifi_arp_common_udp_ports_) / sizeof(s_poom_wifi_arp_common_udp_ports_[0])); i++)
     {
+        if(cancelled && cancelled(user)) return ESP_ERR_INVALID_STATE;
         if (out->num_open_ports >= POOM_WIFI_ARP_PROBE_MAX_PORTS)
         {
             break;
@@ -992,6 +1004,12 @@ static esp_err_t poom_wifi_arp_probe_udp_ports_(const char *target_ip, poom_wifi
 
 esp_err_t poom_wifi_arp_probe_host_services(const char *target_ip, poom_wifi_arp_service_probe_result_t *out)
 {
+    return poom_wifi_arp_probe_host_services_cancelable(target_ip, out, NULL, NULL);
+}
+
+esp_err_t poom_wifi_arp_probe_host_services_cancelable(const char *target_ip, poom_wifi_arp_service_probe_result_t *out,
+                                                       poom_wifi_arp_cancel_cb_t cancelled, void *user)
+{
     if ((target_ip == NULL) || (out == NULL))
     {
         return ESP_ERR_INVALID_ARG;
@@ -1002,14 +1020,15 @@ esp_err_t poom_wifi_arp_probe_host_services(const char *target_ip, poom_wifi_arp
     out->ssh_port = 0U;
     (void)memset(out->ssh_banner, 0, sizeof(out->ssh_banner));
 
-    (void)poom_wifi_arp_probe_tcp_ports_(target_ip, &out->tcp);
-    (void)poom_wifi_arp_probe_udp_ports_(target_ip, &out->udp);
+    if(poom_wifi_arp_probe_tcp_ports_(target_ip, &out->tcp, cancelled, user) != ESP_OK) return ESP_ERR_INVALID_STATE;
+    if(poom_wifi_arp_probe_udp_ports_(target_ip, &out->udp, cancelled, user) != ESP_OK) return ESP_ERR_INVALID_STATE;
 
     const uint16_t ssh_ports[] = {22U, 2222U, 2022U};
     for (size_t i = 0; i < (sizeof(ssh_ports) / sizeof(ssh_ports[0])); i++)
     {
+        if(cancelled && cancelled(user)) return ESP_ERR_INVALID_STATE;
         char banner[64] = {0};
-        if (poom_wifi_arp_ssh_banner_probe_(target_ip, ssh_ports[i], banner, sizeof(banner)))
+        if (poom_wifi_arp_ssh_banner_probe_(target_ip, ssh_ports[i], banner, sizeof(banner), cancelled, user))
         {
             out->ssh_found = true;
             out->ssh_port = ssh_ports[i];
@@ -1060,6 +1079,7 @@ esp_err_t poom_wifi_arp_scan_subnet(poom_wifi_arp_scan_ctx_t *ctx)
          batch_start <= POOM_WIFI_ARP_SCAN_END_HOST;
          batch_start += POOM_WIFI_ARP_SCAN_BATCH_SIZE)
     {
+        if(ctx->cancelled && ctx->cancelled(ctx->cancel_user)) return ESP_ERR_INVALID_STATE;
         int batch_end = batch_start + POOM_WIFI_ARP_SCAN_BATCH_SIZE - 1;
         if (batch_end > POOM_WIFI_ARP_SCAN_END_HOST)
         {
