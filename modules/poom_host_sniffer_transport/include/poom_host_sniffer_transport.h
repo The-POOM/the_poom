@@ -42,7 +42,9 @@ esp_err_t poom_host_sniffer_transport_send_ieee802154_packet(
     const uint8_t *packet,
     size_t packet_len,
     uint8_t channel,
-    int8_t rssi);
+    int8_t rssi,
+    uint8_t lqi,
+    uint64_t timestamp_us);
 
 #ifdef __cplusplus
 }

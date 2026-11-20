@@ -150,7 +150,6 @@ static void menu_sniffer_rt_draw_ieee802154_ch_(void)
 {
     char line1[22];
     char line2[22];
-    char line3[22];
 
     (void)snprintf(
         line1,
@@ -158,7 +157,6 @@ static void menu_sniffer_rt_draw_ieee802154_ch_(void)
         "802.15.4 CH:%u",
         (unsigned)s_menu_sniffer_rt_ieee802154_channel);
     (void)snprintf(line2, sizeof(line2), "Up/Down: ch");
-    (void)snprintf(line3, sizeof(line3), "A:Start B:Back");
 
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
@@ -170,9 +168,6 @@ static void menu_sniffer_rt_draw_ieee802154_ch_(void)
     (void)poom_arduboy_print(line1);
     poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + ROW_STEP));
     (void)poom_arduboy_print(line2);
-    poom_arduboy_set_cursor(TEXT_X, (int16_t)(ROW0_Y + 2 * ROW_STEP));
-    (void)poom_arduboy_print(line3);
-
     poom_arduboy_set_cursor(0, 56);
     (void)poom_arduboy_print(F("A:START"));
     poom_arduboy_set_cursor(72, 56);
@@ -191,20 +186,23 @@ static void menu_sniffer_rt_draw_ieee802154_running_(void)
     char line2[22];
     char line3[22];
     const uint32_t packet_count = poom_ieee802154_sniffer_get_packet_count();
+    const uint32_t drop_count = poom_ieee802154_sniffer_get_drop_count();
     const int8_t rssi = poom_ieee802154_sniffer_get_recent_rssi();
+    const uint8_t lqi = poom_ieee802154_sniffer_get_recent_lqi();
     const uint8_t channel = poom_ieee802154_sniffer_get_channel();
 
     (void)snprintf(line1, sizeof(line1), "802.15.4 RUN");
     (void)snprintf(
         line2,
         sizeof(line2),
-        "CH:%u PKT:%lu",
+        "CH:%u P:%lu D:%lu",
         (unsigned)channel,
-        (unsigned long)packet_count);
+        (unsigned long)packet_count,
+        (unsigned long)drop_count);
 
     if (packet_count > 0U)
     {
-        (void)snprintf(line3, sizeof(line3), "RSSI:%d dBm", (int)rssi);
+        (void)snprintf(line3, sizeof(line3), "RSSI:%d LQI:%u", (int)rssi, (unsigned)lqi);
     }
     else
     {

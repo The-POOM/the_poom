@@ -10,11 +10,13 @@
 
 #define POOM_HOST_SNIFFER_TRANSPORT_BLE_HCI_MAX_LEN (64U)
 #define POOM_HOST_SNIFFER_TRANSPORT_RAW_OVERHEAD (7U)
+#define POOM_HOST_SNIFFER_TRANSPORT_IEEE802154_RAW_OVERHEAD (16U)
 #define POOM_HOST_SNIFFER_TRANSPORT_CRC_LEN (2U)
 #define POOM_HOST_SNIFFER_TRANSPORT_MAX_RAW_LEN \
     (POOM_HOST_SNIFFER_TRANSPORT_RAW_OVERHEAD + POOM_HOST_SNIFFER_TRANSPORT_MAX_PAYLOAD_LEN + POOM_HOST_SNIFFER_TRANSPORT_CRC_LEN)
 #define POOM_HOST_SNIFFER_TRANSPORT_MAX_ENCODED_LEN (POOM_HOST_SNIFFER_TRANSPORT_MAX_RAW_LEN + 4U)
 #define POOM_HOST_SNIFFER_TRANSPORT_BLE_ADV_MAX_LEN (31U)
+#define POOM_HOST_SNIFFER_TRANSPORT_IEEE802154_VERSION (0x02U)
 
 /**
  * @brief Prepares a BLE advertising payload for transport.
@@ -386,14 +388,53 @@ esp_err_t poom_host_sniffer_transport_send_ieee802154_packet(
     const uint8_t *packet,
     size_t packet_len,
     uint8_t channel,
-    int8_t rssi)
+    int8_t rssi,
+    uint8_t lqi,
+    uint64_t timestamp_us)
 {
-    return poom_host_sniffer_transport_send_frame(
-        POOM_HOST_SNIFFER_TRANSPORT_FRAME_DATA,
-        channel,
-        0U,
-        packet,
-        packet_len,
-        rssi,
-        POOM_HOST_SNIFFER_TRANSPORT_STATUS_OK);
+    uint8_t raw[POOM_HOST_SNIFFER_TRANSPORT_IEEE802154_RAW_OVERHEAD +
+                POOM_HOST_SNIFFER_TRANSPORT_MAX_PAYLOAD_LEN +
+                POOM_HOST_SNIFFER_TRANSPORT_CRC_LEN];
+    uint8_t encoded[POOM_HOST_SNIFFER_TRANSPORT_IEEE802154_RAW_OVERHEAD +
+                    POOM_HOST_SNIFFER_TRANSPORT_MAX_PAYLOAD_LEN +
+                    POOM_HOST_SNIFFER_TRANSPORT_CRC_LEN + 4U];
+    size_t raw_len = 0U;
+    size_t encoded_len;
+    uint16_t crc;
+
+    if((packet == NULL) || (packet_len > POOM_HOST_SNIFFER_TRANSPORT_MAX_PAYLOAD_LEN))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Version 2 is IEEE 802.15.4-specific.  It preserves the V1 common
+     * header and appends LQI plus the radio SFD timestamp after status. */
+    raw[raw_len++] = POOM_HOST_SNIFFER_TRANSPORT_IEEE802154_VERSION;
+    raw[raw_len++] = POOM_HOST_SNIFFER_TRANSPORT_FRAME_DATA;
+    raw[raw_len++] = channel;
+    raw[raw_len++] = 0U;
+    raw[raw_len++] = (uint8_t)packet_len;
+    memcpy(&raw[raw_len], packet, packet_len);
+    raw_len += packet_len;
+    raw[raw_len++] = (uint8_t)rssi;
+    raw[raw_len++] = POOM_HOST_SNIFFER_TRANSPORT_STATUS_OK;
+    raw[raw_len++] = lqi;
+    for(uint8_t i = 0U; i < 8U; ++i)
+    {
+        raw[raw_len++] = (uint8_t)(timestamp_us >> (8U * i));
+    }
+
+    crc = poom_host_sniffer_transport_crc16_ccitt_(raw, raw_len);
+    raw[raw_len++] = (uint8_t)(crc & 0xFFU);
+    raw[raw_len++] = (uint8_t)((crc >> 8U) & 0xFFU);
+    encoded_len = poom_host_sniffer_transport_cobs_encode_(raw, raw_len, encoded, sizeof(encoded));
+    if(encoded_len == 0U)
+    {
+        return ESP_FAIL;
+    }
+
+    (void)fwrite(encoded, 1U, encoded_len, stdout);
+    (void)fputc(0, stdout);
+    (void)fflush(stdout);
+    return ESP_OK;
 }
