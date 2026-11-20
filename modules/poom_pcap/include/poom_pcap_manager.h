@@ -76,11 +76,13 @@ typedef struct
     uint8_t pmkid_count;
     uint8_t valid_pair_count;
     uint8_t client_count; /* unique stations seen exchanging data with the target BSSID */
-    uint16_t eapol_frame_count; /* EAPOL frames seen for the selected BSSID */
     uint16_t deauth_count; /* deauthentication frames declaring the target BSSID */
     bool complete;
     bool hash22000_saved;
     bool has_beacon;
+    bool client_rx_valid;       /* a focus client is set (see set_focus_client) */
+    uint32_t client_rx_age_ms;  /* ms since last frame to/from the focus client;
+                                   UINT32_MAX = set but not yet seen */
 } poom_pcap_wifi_handshake_status_t;
 
 /** IEEE 802.15.4/Zigbee channel range. */
@@ -250,10 +252,15 @@ const char *poom_pcap_manager_get_file_path(void);
  *
  * @param[in] callback Promiscuous RX callback (must not be NULL).
  * @param[in] filter_mask Hardware filter mask (e.g. `WIFI_PROMIS_FILTER_MASK_ALL`).
+ * @param[in] use_apsta Bring the radio up in APSTA (true) instead of STA-only
+ *                      (false). APSTA keeps the AP interface live so raw frames
+ *                      can be injected (e.g. deauth) while sniffing; STA-only is
+ *                      the quieter default for passive capture.
  * @return ESP_OK on success, otherwise an ESP error code.
  */
 esp_err_t poom_pcap_manager_wifi_start_monitor_mode(wifi_promiscuous_cb_t callback,
-                                                    uint32_t filter_mask);
+                                                    uint32_t filter_mask,
+                                                    bool use_apsta);
 
 /**
  * @brief Helper: stop WiFi monitor/promiscuous mode for capture.
@@ -372,6 +379,17 @@ int8_t poom_pcap_manager_sniffer_zigbee_get_rssi(void);
  * The status is updated only when `POOM_PCAP_WIFI_CAPTURE_HANDSHAKE` is active.
  */
 bool poom_pcap_manager_wifi_handshake_get_status(poom_pcap_wifi_handshake_status_t *out_status);
+
+/**
+ * @brief Set (or clear) the "focus" client for the handshake RX activity signal.
+ *
+ * When set, the capture records the time of the last frame seen to or from this
+ * client, surfaced as `client_rx_valid` / `client_rx_age_ms` in the status. Pass
+ * NULL to clear. Does not affect which BSSID is captured.
+ *
+ * @param[in] mac Six-byte client MAC, or NULL to clear.
+ */
+void poom_pcap_manager_wifi_handshake_set_focus_client(const uint8_t mac[6]);
 
 #ifdef __cplusplus
 }

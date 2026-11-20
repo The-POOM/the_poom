@@ -77,6 +77,11 @@ static bool s_rescan_requested = false;
 static bool s_buttons_subscribed = false;
 static TaskHandle_t s_task = NULL;
 
+/* One-shot return callback: when set, the cracker calls it on exit instead of
+ * publishing the menu-resume token (see menu_handshake_crack_set_exit_callback). */
+static void (*s_exit_cb)(void *ctx) = NULL;
+static void *s_exit_cb_ctx = NULL;
+
 typedef enum {
     HS_MODE_QUICK = 0,
     HS_MODE_SMART,
@@ -882,6 +887,12 @@ static void menu_handshake_crack_draw_(void)
 
 /* ---- lifecycle ---------------------------------------------------------- */
 
+void menu_handshake_crack_set_exit_callback(void (*cb)(void *ctx), void *ctx)
+{
+    s_exit_cb = cb;
+    s_exit_cb_ctx = ctx;
+}
+
 static void menu_handshake_crack_exit_(void)
 {
     TaskHandle_t current = xTaskGetCurrentTaskHandle();
@@ -910,8 +921,23 @@ static void menu_handshake_crack_exit_(void)
 
     menu_handshake_crack_session_close_();
 
-    const uint8_t token = 1;
-    (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    /* If a launcher registered a one-shot return callback, hand control back to
+     * it instead of resuming the main menu (e.g. the detector's Capture
+     * Handshake flow re-opens the client Options screen). Otherwise publish the
+     * menu-resume token as usual. */
+    if (s_exit_cb != NULL)
+    {
+        void (*cb)(void *) = s_exit_cb;
+        void *ctx = s_exit_cb_ctx;
+        s_exit_cb = NULL;
+        s_exit_cb_ctx = NULL;
+        cb(ctx);
+    }
+    else
+    {
+        const uint8_t token = 1;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+    }
 }
 
 static void menu_handshake_crack_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx)

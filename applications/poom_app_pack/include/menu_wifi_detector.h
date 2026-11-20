@@ -24,6 +24,9 @@ void menu_wifi_detector_show(void);
  * @return void
  */
 void menu_wifi_detector_show_clients(const uint8_t ap_bssid[6], uint8_t channel);
+void menu_wifi_detector_show_client_options(const uint8_t ap_bssid[6],
+                                           uint8_t channel,
+                                           const uint8_t client_mac[6]);
 
 #ifdef __cplusplus
 }
