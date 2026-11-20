@@ -76,7 +76,7 @@ esp_err_t poom_wifi_csi_start(poom_wifi_csi_t **out,const uint8_t bssid[6],uint8
     config.acquire_csi_ht20=1;config.acquire_csi_ht40=1;config.acquire_csi_vht=1;
     config.acquire_csi_su=1;config.acquire_csi_mu=1;config.acquire_csi_dcm=1;config.acquire_csi_beamformed=1;
     config.acquire_csi_he_stbc_mode=ESP_CSI_ACQUIRE_STBC_HELTF1;
-    config.lltf_bit_mode=0; /* IDF 6.1 C5: explicitly request signed 12-bit L-LTF. */
+    //config.lltf_bit_mode=0; /* IDF 6.1 C5: explicitly request signed 12-bit L-LTF. */
     if(error==ESP_OK)error=esp_wifi_set_csi_config(&config);
     if(error==ESP_OK)error=esp_wifi_set_csi_rx_cb(receive,nullptr);
     portENTER_CRITICAL(&s_lock);s_receiver=s;portEXIT_CRITICAL(&s_lock);
