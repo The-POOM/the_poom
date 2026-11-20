@@ -757,6 +757,12 @@ static void power_off_enter_deep_sleep_(void)
         (void)sd_card_unmount();
     }
 
+    if ((gpio_config(&wake_cfg) != ESP_OK) ||
+        (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) != ESP_OK)
+#if !defined(CONFIG_IDF_TARGET_ESP32C5)
+        || (esp_deep_sleep_enable_gpio_wakeup(wake_mask, ESP_GPIO_WAKEUP_GPIO_LOW) != ESP_OK)
+#endif
+       )
     const bool wake_ok =
         (gpio_config(&wake_cfg) == ESP_OK) &&
         (esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL) == ESP_OK) &&
