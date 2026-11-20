@@ -85,6 +85,7 @@ set(MODULES
     # Local modules
     nfcal
     poom_ble_scan
+    poom_findmy_beep
     poom_boot_policy
     poom_buz_theme
     poom_button_sound
@@ -134,6 +135,8 @@ set(MODULES
     poom_ble_tracker
     poom_ble_detector
     poom_wifi_detector
+    poom_wifi_observer
+    poom_wifi_csi
     poom_drone
     poom_edge_impulse
     poom_http_load_test
@@ -154,6 +157,7 @@ set(COMPONENTS ${MODULES})
 
 set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_scan
+    ${CMAKE_SOURCE_DIR}/modules/poom_findmy_beep
     ${CMAKE_SOURCE_DIR}/modules/poom_boot_policy
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_client
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_dynamic
@@ -179,6 +183,8 @@ set(POOM_MODULE_DIRS
     ${CMAKE_SOURCE_DIR}/modules/poom_uart_sniffer
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_attacks
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_ctrl
+    ${CMAKE_SOURCE_DIR}/modules/poom_wifi_observer
+    ${CMAKE_SOURCE_DIR}/modules/poom_wifi_csi
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_mac
     ${CMAKE_SOURCE_DIR}/modules/poom_wifi_scanner
     ${CMAKE_SOURCE_DIR}/modules/poom_pcap

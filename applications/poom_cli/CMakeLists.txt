@@ -30,6 +30,7 @@ set(cli_requires
     poom_wifi_deauth
     poom_wifi_deauth_detector
     poom_wifi_karma
+    poom_wifi_attacks
     poom_wifi_scanner
     poom_sniffer_device
     poom_wifi_spam

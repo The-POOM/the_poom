@@ -10,12 +10,39 @@
 
 #include "esp_gap_ble_api.h"
 #include "poom_ble_scan.h"
+#include "poom_ble_recon_parser.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define POOM_BLE_DETECTOR_RSSI_AT_1M_DBM (-65.0f)
 #define POOM_BLE_DETECTOR_PATH_LOSS       (2.2f)
 static poom_ble_detector_cb_t volatile s_callback;
 static poom_ble_detector_filter_t s_filter = POOM_BLE_DETECTOR_FILTER_DEVICES;
 static volatile bool s_active;
+static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+static poom_ble_detector_stats_t s_stats;
+static uint32_t s_started_ms, s_stopped_ms, s_window_ms, s_window_reports;
+static unsigned s_callback_users;
+
+static uint32_t detector_now_ms_(void) { return (uint32_t)(esp_timer_get_time() / 1000LL); }
+
+void poom_ble_detector_get_stats(poom_ble_detector_stats_t *stats)
+{
+    if(stats == NULL) return;
+    const uint32_t now = detector_now_ms_();
+    portENTER_CRITICAL(&s_stats_lock);
+    const uint32_t at = s_active ? now : s_stopped_ms;
+    if(at - s_window_ms >= 1000U) {
+        s_stats.rate_reports = s_window_reports;
+        s_stats.rate_window_ms = at - s_window_ms;
+        s_window_reports = 0U;
+        s_window_ms = at;
+    }
+    s_stats.elapsed_ms = at - s_started_ms;
+    *stats = s_stats;
+    portEXIT_CRITICAL(&s_stats_lock);
+}
 
 static void poom_ble_detector_copy_text_(char *out, size_t out_len, const char *text)
 {
@@ -146,13 +173,13 @@ static void poom_ble_detector_match_manufacturer_(poom_ble_detector_record_t *re
     }
 
     company = (uint16_t)data[0] | ((uint16_t)data[1] << 8U);
-    if((company == 0x004CU) && (data_len >= 3U) &&
-       ((data[2] == 0x12U) || (data[2] == 0x1EU)))
+    if((company == 0x004CU) && (data_len >= 29U) &&
+       (data[2] == 0x12U) && (data[3] == 0x19U))
     {
         poom_ble_detector_set_match_(record,
                                      POOM_BLE_DETECTOR_CLASS_AIRTAG,
-                                     POOM_DETECT_CONFIDENCE_HIGH,
-                                     "AirTag",
+                                     POOM_DETECT_CONFIDENCE_POSSIBLE,
+                                     "FindMy candidate",
                                      "Apple");
     }
     else if(company == 0x0075U)
@@ -348,6 +375,39 @@ bool poom_ble_detector_parse(const uint8_t *adv_data,
                                      "Axon");
     }
 
+    poom_ble_recon_decode_parts_(adv_data, adv_len, NULL, 0U, out_record);
+    out_record->primary_adv_length = (uint8_t)adv_len;
+    return true;
+}
+
+bool poom_ble_detector_parse_parts(const uint8_t *adv_data, size_t adv_len,
+                                   const uint8_t *response_data, size_t response_len,
+                                   const uint8_t mac_address[6], int rssi,
+                                   poom_ble_detector_record_t *out_record)
+{
+    static const uint8_t empty[1] = {0};
+    if(adv_len > 31U || response_len > 31U || (adv_len && !adv_data) ||
+       (response_len && !response_data) || !mac_address || !out_record) return false;
+    if(!poom_ble_detector_parse(adv_data ? adv_data : empty, adv_len, mac_address, rssi, out_record)) return false;
+    if(response_len) {
+        poom_ble_detector_record_t response;
+        (void)poom_ble_detector_parse(response_data, response_len, mac_address, rssi, &response);
+        if(response.confidence > out_record->confidence) {
+            out_record->device_class = response.device_class;
+            out_record->confidence = response.confidence;
+            memcpy(out_record->vendor, response.vendor, sizeof(out_record->vendor));
+            memcpy(out_record->name, response.name, sizeof(out_record->name));
+        }
+        memcpy(out_record->adv_data + adv_len, response_data, response_len);
+        poom_ble_recon_decode_parts_(adv_data, adv_len, response_data, response_len, out_record);
+    }
+    out_record->adv_data_length = (uint8_t)(adv_len + response_len);
+    out_record->primary_adv_length = (uint8_t)adv_len;
+    if((out_record->signatures & POOM_BLE_FINDMY_SIGNATURES) &&
+       out_record->device_class == POOM_BLE_DETECTOR_CLASS_UNKNOWN) {
+        out_record->device_class = POOM_BLE_DETECTOR_CLASS_OTHER_TRACKER;
+        out_record->confidence = POOM_DETECT_CONFIDENCE_POSSIBLE;
+    }
     return true;
 }
 
@@ -362,6 +422,7 @@ bool poom_ble_detector_record_matches_filter(const poom_ble_detector_record_t *r
     switch(filter)
     {
         case POOM_BLE_DETECTOR_FILTER_DEVICES:
+        case POOM_BLE_DETECTOR_FILTER_ANALYZER:
             return true;
         case POOM_BLE_DETECTOR_FILTER_TRACKERS:
             return (record->device_class == POOM_BLE_DETECTOR_CLASS_AIRTAG) ||
@@ -371,6 +432,12 @@ bool poom_ble_detector_record_matches_filter(const poom_ble_detector_record_t *r
         case POOM_BLE_DETECTOR_FILTER_WEARABLES:
             return (record->device_class == POOM_BLE_DETECTOR_CLASS_SMART_GLASSES) ||
                    (record->device_class == POOM_BLE_DETECTOR_CLASS_BODY_CAMERA);
+        case POOM_BLE_DETECTOR_FILTER_FINDMY: return (record->signatures & POOM_BLE_FINDMY_SIGNATURES) != 0U;
+        case POOM_BLE_DETECTOR_FILTER_IBEACON: return (record->signatures & POOM_BLE_SIGNATURE_IBEACON) != 0U;
+        case POOM_BLE_DETECTOR_FILTER_FLIPPER: return (record->signatures & POOM_BLE_SIGNATURE_FLIPPER) != 0U;
+        case POOM_BLE_DETECTOR_FILTER_FLOCK: return (record->signatures & POOM_BLE_SIGNATURE_FLOCK) != 0U;
+        case POOM_BLE_DETECTOR_FILTER_META: return (record->signatures & POOM_BLE_SIGNATURE_META) != 0U;
+        case POOM_BLE_DETECTOR_FILTER_HC_NAMES: return (record->signatures & POOM_BLE_SIGNATURE_HC_NAME) != 0U;
         default:
             return false;
     }
@@ -378,43 +445,77 @@ bool poom_ble_detector_record_matches_filter(const poom_ble_detector_record_t *r
 
 static void poom_ble_detector_scan_cb_(const esp_ble_gap_cb_param_t *scan_result)
 {
-    poom_ble_detector_cb_t callback = s_callback;
+    if(scan_result == NULL) return;
+    portENTER_CRITICAL(&s_stats_lock);
+    poom_ble_detector_cb_t callback = s_active ? s_callback : NULL;
+    if(callback) ++s_callback_users;
+    const poom_ble_detector_filter_t filter = s_filter;
+    portEXIT_CRITICAL(&s_stats_lock);
     poom_ble_detector_record_t record;
-    size_t adv_len;
+    size_t adv_len, response_len;
 
-    if((scan_result == NULL) || !s_active || (callback == NULL))
+    if(callback == NULL)
     {
         return;
     }
 
-    adv_len = (size_t)scan_result->scan_rst.adv_data_len +
-              (size_t)scan_result->scan_rst.scan_rsp_len;
-    if(adv_len > sizeof(scan_result->scan_rst.ble_adv))
-    {
-        adv_len = sizeof(scan_result->scan_rst.ble_adv);
-    }
+    const uint32_t now = detector_now_ms_();
+    portENTER_CRITICAL(&s_stats_lock);
+    if(s_stats.reports != UINT32_MAX) ++s_stats.reports;
+    if(s_window_reports != UINT32_MAX) ++s_window_reports;
+    const int rssi = scan_result->scan_rst.rssi;
+    if(s_stats.reports == 1U || rssi < s_stats.rssi_min) s_stats.rssi_min = rssi;
+    if(s_stats.reports == 1U || rssi > s_stats.rssi_max) s_stats.rssi_max = rssi;
+    s_stats.rssi_last = rssi;
+    portEXIT_CRITICAL(&s_stats_lock);
+    adv_len = scan_result->scan_rst.adv_data_len;
+    response_len = scan_result->scan_rst.scan_rsp_len;
+    if(adv_len > 31U || response_len > 31U || adv_len + response_len > sizeof(scan_result->scan_rst.ble_adv)) goto done;
 
-    if(poom_ble_detector_parse(scan_result->scan_rst.ble_adv,
-                               adv_len,
+    if(poom_ble_detector_parse_parts(scan_result->scan_rst.ble_adv, adv_len,
+                               scan_result->scan_rst.ble_adv + adv_len, response_len,
                                scan_result->scan_rst.bda,
                                scan_result->scan_rst.rssi,
                                &record) &&
-       poom_ble_detector_record_matches_filter(&record, s_filter))
+       poom_ble_detector_record_matches_filter(&record, filter))
     {
+        record.last_seen_ms = now;
+        record.reports = 1U;
+        portENTER_CRITICAL(&s_stats_lock);
+        if(s_stats.matched_reports != UINT32_MAX) ++s_stats.matched_reports;
+        portEXIT_CRITICAL(&s_stats_lock);
         callback(&record);
+    }
+done:
+    portENTER_CRITICAL(&s_stats_lock);
+    --s_callback_users;
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
+static void poom_ble_detector_drain_callbacks_(void)
+{
+    for(;;) {
+        portENTER_CRITICAL(&s_stats_lock);
+        const bool idle = s_callback_users == 0U;
+        portEXIT_CRITICAL(&s_stats_lock);
+        if(idle) return;
+        vTaskDelay(pdMS_TO_TICKS(10U));
     }
 }
 
 void poom_ble_detector_register_cb(poom_ble_detector_cb_t callback)
 {
+    portENTER_CRITICAL(&s_stats_lock);
     s_callback = callback;
+    portEXIT_CRITICAL(&s_stats_lock);
+    if(callback == NULL) poom_ble_detector_drain_callbacks_();
 }
 
 esp_err_t poom_ble_detector_start(poom_ble_detector_filter_t filter)
 {
     esp_err_t status;
 
-    if(filter >= POOM_BLE_DETECTOR_FILTER_COUNT)
+    if(filter < POOM_BLE_DETECTOR_FILTER_DEVICES || filter >= POOM_BLE_DETECTOR_FILTER_COUNT)
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -425,16 +526,26 @@ esp_err_t poom_ble_detector_start(poom_ble_detector_filter_t filter)
     }
 
     s_filter = filter;
+    portENTER_CRITICAL(&s_stats_lock);
+    memset(&s_stats, 0, sizeof(s_stats));
+    s_started_ms = s_stopped_ms = s_window_ms = detector_now_ms_();
+    s_window_reports = 0U;
+    portEXIT_CRITICAL(&s_stats_lock);
     poom_ble_scan_set_scan_type(BLE_SCAN_TYPE_PASSIVE);
     poom_ble_scan_set_filter_type(BLE_SCAN_FILTER_ALLOW_ALL);
     poom_ble_scan_set_uart_forward_enabled(false);
     poom_ble_scan_register_cb(poom_ble_detector_scan_cb_);
+    portENTER_CRITICAL(&s_stats_lock);
     s_active = true;
+    portEXIT_CRITICAL(&s_stats_lock);
 
     status = poom_ble_scan_start();
     if(status != ESP_OK)
     {
+        portENTER_CRITICAL(&s_stats_lock);
         s_active = false;
+        s_stopped_ms = detector_now_ms_();
+        portEXIT_CRITICAL(&s_stats_lock);
         poom_ble_scan_register_cb(NULL);
     }
 
@@ -445,8 +556,12 @@ esp_err_t poom_ble_detector_stop(void)
 {
     esp_err_t status;
 
+    portENTER_CRITICAL(&s_stats_lock);
     s_active = false;
+    s_stopped_ms = detector_now_ms_();
+    portEXIT_CRITICAL(&s_stats_lock);
     poom_ble_scan_register_cb(NULL);
+    poom_ble_detector_drain_callbacks_();
     status = poom_ble_scan_stop();
     return status;
 }
@@ -458,6 +573,13 @@ const char *poom_ble_detector_filter_label(poom_ble_detector_filter_t filter)
         case POOM_BLE_DETECTOR_FILTER_DEVICES: return "BLE DEVICES";
         case POOM_BLE_DETECTOR_FILTER_TRACKERS: return "TRACKERS";
         case POOM_BLE_DETECTOR_FILTER_WEARABLES: return "WEARABLES";
+        case POOM_BLE_DETECTOR_FILTER_FINDMY: return "FINDMY MONITOR";
+        case POOM_BLE_DETECTOR_FILTER_IBEACON: return "IBEACONS";
+        case POOM_BLE_DETECTOR_FILTER_FLIPPER: return "FLIPPER CANDIDATES";
+        case POOM_BLE_DETECTOR_FILTER_FLOCK: return "FLOCK CANDIDATES";
+        case POOM_BLE_DETECTOR_FILTER_META: return "META CANDIDATES";
+        case POOM_BLE_DETECTOR_FILTER_HC_NAMES: return "HC NAME CANDIDATES";
+        case POOM_BLE_DETECTOR_FILTER_ANALYZER: return "BLE RATE";
         default: return "BLE DETECT";
     }
 }

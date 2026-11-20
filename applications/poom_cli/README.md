@@ -9,6 +9,12 @@
 - Expose POOM command groups that other apps can launch or embed.
 - Pause and resume the REPL when another tool temporarily takes over the console.
 
+`wifi-status` also reports the Beast Wi-Fi attack runtime, accepted transmit
+count, error count, and last driver error. `stop-all` and Wi-Fi application
+conflict handling stop that runtime before another radio service starts. When
+the OLED action app is linked, an acknowledged stop hook also waits for its AP
+scan or client monitor to finish before the CLI takes over the radio.
+
 ## Structure
 
 ```text

@@ -70,6 +70,9 @@
 #include "menu_spectrum.h"
 #include "menu_device_inspector.h"
 #include "menu_wifi_guard.h"
+#include "menu_wifi_csi.h"
+#include "menu_wifi_action.h"
+#include "menu_findmy_beep.h"
 #include "menu_wardrive_node.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
@@ -441,6 +444,26 @@ static void action_deauth_(void)
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
     app_deauth();
+}
+
+static void action_wifi_(poom_wifi_action_t action)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_action_show(action);
+}
+static void action_bad_msg_(void) { action_wifi_(POOM_WIFI_ACTION_BAD_MSG); }
+static void action_assoc_sleep_(void) { action_wifi_(POOM_WIFI_ACTION_ASSOC_SLEEP); }
+static void action_quiet_time_(void) { action_wifi_(POOM_WIFI_ACTION_QUIET); }
+static void action_channel_switch_(void) { action_wifi_(POOM_WIFI_ACTION_CHANNEL_SWITCH); }
+static void action_sae_commit_(void) { action_wifi_(POOM_WIFI_ACTION_SAE_COMMIT); }
+static void action_probe_flood_(void) { action_wifi_(POOM_WIFI_ACTION_PROBE_REQUEST); }
+static void action_ap_clone_spam_(void) { action_wifi_(POOM_WIFI_ACTION_AP_CLONE); }
+static void action_findmy_beep_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_findmy_beep_show();
 }
 
 /**
@@ -1037,6 +1060,22 @@ static void action_wifi_guard_(void)
     menu_wifi_guard_show();
 }
 
+static void action_wifi_recon_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_recon_show();
+}
+
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_ESP_WIFI_CSI_ENABLED
+static void action_wifi_csi_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wifi_csi_show();
+}
+#endif
+
 /** Opens the ESP-NOW wardriving node for a Biscuit or JCMK core. */
 static void action_wardrive_node_(void)
 {
@@ -1156,6 +1195,13 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"OPENTHREAD CLI", action_cli_ot_},
 #endif
     {"DEAUTH", action_deauth_},
+    {"BAD MSG", action_bad_msg_},
+    {"ASSOC SLEEP", action_assoc_sleep_},
+    {"QUIET TIME", action_quiet_time_},
+    {"CHANNEL SWITCH", action_channel_switch_},
+    {"SAE COMMIT FLOOD", action_sae_commit_},
+    {"PROBE REQUEST FLOOD", action_probe_flood_},
+    {"AP CLONE SPAM", action_ap_clone_spam_},
     {"DEAUTH DET", action_deauth_detector_},
     {"FOX HUNT", action_fox_hunt_},
     {"KARMA", action_karma_},
@@ -1164,6 +1210,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"CAPTIVE PORTAL", action_captive_},
     {"TV OFF", action_tv_off_},
     {"BLE DETECT", action_ble_detector_},
+    {"FIND MY BEEP", action_findmy_beep_},
     {"WIFI DETECT", action_wifi_detector_},
     {"CRACK HS", action_handshake_crack_},
     {"POOMGOTCHI", action_poomgotchi_},
@@ -1173,6 +1220,10 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SPECTRUM", action_spectrum_},
     {"DEVICE INSPECTOR", action_device_inspector_},
     {"WIFI GUARD", action_wifi_guard_},
+    {"WIFI RECON", action_wifi_recon_},
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_ESP_WIFI_CSI_ENABLED
+    {"CSI RF MOTION", action_wifi_csi_},
+#endif
     {"WARDRIVING NODE", action_wardrive_node_},
     {"SCAN NET", action_arp_},
 
@@ -1240,7 +1291,7 @@ static const poom_menu_submenu_t s_submenus[] = {
 };
 
 /* Persist independent permutations, never application data or targets. */
-#define MENU_MAX_ITEMS 32
+#define MENU_MAX_ITEMS 48
 #define MENU_ORDER_MODES 5
 static uint8_t s_order[MENU_ORDER_MODES][MENU_MAX_ITEMS];
 static bool s_reordering = false;
@@ -1254,13 +1305,13 @@ static void menu_order_defaults_(uint8_t mode)
 }
 static bool menu_order_valid_(uint8_t mode)
 {
-    uint32_t seen = 0;
+    uint64_t seen = 0;
     const uint8_t n = s_submenus[mode].count;
     if (n > MENU_MAX_ITEMS) return false;
     for (uint8_t i = 0; i < n; ++i) {
         uint8_t v = s_order[mode][i];
-        if (v >= n || (seen & (1UL << v))) return false;
-        seen |= 1UL << v;
+        if (v >= n || (seen & (1ULL << v))) return false;
+        seen |= 1ULL << v;
     }
     return true;
 }

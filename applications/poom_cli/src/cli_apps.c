@@ -37,9 +37,37 @@
 #include "poom_wifi_deauth.h"
 #include "poom_wifi_deauth_detector.h"
 #include "poom_wifi_karma.h"
+#include "poom_wifi_marauder.h"
 #include "poom_wifi_scanner.h"
 #include "poom_wifi_spam.h"
 #include "sd_card.h"
+
+/* The OLED app is optional for the CLI component. Weak hooks avoid a cyclic
+ * dependency on poom_app_pack while allowing an acknowledged radio handoff. */
+extern void menu_wifi_action_stop(void) __attribute__((weak));
+extern bool menu_wifi_action_is_active(void) __attribute__((weak));
+extern void menu_findmy_beep_stop(void) __attribute__((weak));
+extern void menu_ble_spam_stop(void) __attribute__((weak));
+extern bool menu_wifi_observer_stop(void) __attribute__((weak));
+extern bool menu_wifi_csi_stop(void) __attribute__((weak));
+extern bool menu_poom_wifi_arp_stop(void) __attribute__((weak));
+extern esp_err_t poom_findmy_beep_stop(void) __attribute__((weak));
+
+static bool cli_apps_stop_wifi_action_(void)
+{
+    if(menu_wifi_action_stop != NULL) menu_wifi_action_stop();
+    if(menu_findmy_beep_stop != NULL) menu_findmy_beep_stop();
+    if(menu_ble_spam_stop != NULL) menu_ble_spam_stop();
+    bool released = true;
+    if(menu_wifi_observer_stop != NULL && !menu_wifi_observer_stop()) released = false;
+    if(menu_wifi_csi_stop != NULL && !menu_wifi_csi_stop()) released = false;
+    if(menu_poom_wifi_arp_stop != NULL && !menu_poom_wifi_arp_stop()) released = false;
+    if(poom_findmy_beep_stop != NULL && poom_findmy_beep_stop() != ESP_OK) released = false;
+    if(poom_wifi_marauder_stop() != ESP_OK) released = false;
+    if(poom_ble_spam_stop() != ESP_OK) released = false;
+    if(!released) printf("Radio cleanup incomplete; command cancelled. Restart the device if cleanup keeps failing.\n");
+    return released;
+}
 
 #define CLI_APPS_BLE_NAME_MAX       (31U)
 #define CLI_APPS_BLE_GATT_NAME_MAX  (31U)
@@ -116,7 +144,6 @@ typedef struct
     size_t char_count;
 } cli_apps_ble_gatt_cfg_t;
 
-static bool s_cli_apps_ble_spam_running = false;
 static bool s_cli_apps_karma_running = false;
 static char s_cli_apps_ble_spam_name[CLI_APPS_BLE_NAME_MAX + 1U] = "-";
 static cli_apps_ble_gatt_cfg_t s_cli_apps_ble_gatt_cfg = {0};
@@ -746,7 +773,6 @@ static void cli_apps_stop_ble_spam_(void)
 {
     poom_ble_spam_register_cb(NULL);
     poom_ble_spam_app_stop();
-    s_cli_apps_ble_spam_running = false;
     (void)snprintf(s_cli_apps_ble_spam_name, sizeof(s_cli_apps_ble_spam_name), "-");
 }
 
@@ -757,6 +783,7 @@ static void cli_apps_stop_ble_spam_(void)
  */
 static void cli_apps_stop_wifi_spam_(void)
 {
+    cli_apps_stop_wifi_action_();
     (void)poom_wifi_spam_stop();
 }
 
@@ -767,6 +794,7 @@ static void cli_apps_stop_wifi_spam_(void)
  */
 static void cli_apps_stop_karma_(void)
 {
+    cli_apps_stop_wifi_action_();
     (void)poom_wifi_karma_stop();
     s_cli_apps_karma_running = false;
 }
@@ -778,6 +806,7 @@ static void cli_apps_stop_karma_(void)
  */
 static void cli_apps_stop_deauth_(void)
 {
+    cli_apps_stop_wifi_action_();
     (void)poom_wifi_deauth_stop();
 }
 
@@ -788,6 +817,7 @@ static void cli_apps_stop_deauth_(void)
  */
 static void cli_apps_stop_deauth_detector_(void)
 {
+    cli_apps_stop_wifi_action_();
     (void)poom_wifi_deauth_detector_stop();
 }
 
@@ -798,6 +828,7 @@ static void cli_apps_stop_deauth_detector_(void)
  */
 static void cli_apps_stop_captive_(void)
 {
+    cli_apps_stop_wifi_action_();
     poom_wifi_captive_stop();
     poom_wifi_captive_set_ap_clone(NULL, false);
     s_cli_apps_captive_running = false;
@@ -812,6 +843,7 @@ static void cli_apps_stop_captive_(void)
  */
 static void cli_apps_stop_scanner_(void)
 {
+    cli_apps_stop_wifi_action_();
     (void)poom_scanner_core_stop();
 }
 
@@ -822,6 +854,7 @@ static void cli_apps_stop_scanner_(void)
  */
 static void cli_apps_stop_sniffer_device_(void)
 {
+    cli_apps_stop_wifi_action_();
     (void)poom_sniffer_device_stop();
 }
 
@@ -977,6 +1010,7 @@ static bool cli_apps_wifi_connection_active_(void)
  */
 static void cli_apps_stop_wifi_sta_(const char* reason)
 {
+    cli_apps_stop_wifi_action_();
     if(!cli_apps_wifi_connection_active_())
     {
         return;
@@ -998,6 +1032,15 @@ static void cli_apps_stop_wifi_sta_(const char* reason)
 static void cli_apps_stop_other_wifi_apps_(void)
 {
     bool wifi_spam_running = false;
+    poom_marauder_status_t marauder_status = {0};
+
+    cli_apps_stop_wifi_action_();
+    poom_wifi_marauder_get_status(&marauder_status);
+    if(marauder_status.running)
+    {
+        printf("Stopping Wi-Fi attacks due to Wi-Fi app conflict\n");
+        poom_wifi_marauder_stop();
+    }
 
     if((poom_wifi_spam_get_running(&wifi_spam_running) == ESP_OK) && wifi_spam_running)
     {
@@ -1054,6 +1097,14 @@ static bool cli_apps_wifi_runtime_active_(void)
 {
     bool wifi_spam_running = false;
     bool sniffer_running = false;
+    poom_marauder_status_t marauder_status = {0};
+
+    if(menu_wifi_action_is_active != NULL && menu_wifi_action_is_active()) return true;
+    poom_wifi_marauder_get_status(&marauder_status);
+    if(marauder_status.running)
+    {
+        return true;
+    }
 
     if((poom_wifi_spam_get_running(&wifi_spam_running) == ESP_OK) && wifi_spam_running)
     {
@@ -1080,7 +1131,7 @@ static bool cli_apps_wifi_runtime_active_(void)
  */
 static bool cli_apps_ble_runtime_active_(void)
 {
-    return s_cli_apps_ble_spam_running || poom_ble_tracker_is_active();
+    return poom_ble_spam_is_active() || poom_ble_tracker_is_active();
 }
 
 /**
@@ -1090,7 +1141,7 @@ static bool cli_apps_ble_runtime_active_(void)
  */
 static void cli_apps_stop_ble_runtime_for_wifi_(void)
 {
-    if(s_cli_apps_ble_spam_running)
+    if(poom_ble_spam_is_active())
     {
         printf("Stopping ble-spam due to BLE/Wi-Fi radio conflict\n");
         cli_apps_stop_ble_spam_();
@@ -1121,6 +1172,7 @@ static void cli_apps_stop_wifi_runtime_for_ble_(void)
  */
 static void cli_apps_prepare_wifi_base_(void)
 {
+    cli_apps_stop_wifi_action_();
     if(cli_apps_ble_runtime_active_())
     {
         cli_apps_stop_ble_runtime_for_wifi_();
@@ -1777,6 +1829,8 @@ static int cli_apps_stop_all_(void)
 {
     bool lua_running = false;
 
+    cli_apps_stop_wifi_action_();
+    poom_wifi_marauder_stop();
     cli_apps_stop_ble_gatt_();
     cli_apps_stop_wifi_spam_();
     cli_apps_stop_karma_();
@@ -1833,6 +1887,7 @@ static int cmd_cli_stop_all(int argc, char** argv)
  */
 static int cmd_wifi_spam_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     esp_err_t err;
     bool running = false;
 
@@ -1872,6 +1927,7 @@ static int cmd_wifi_spam_stop(int argc, char** argv)
     (void)argc;
     (void)argv;
 
+    cli_apps_stop_wifi_action_();
     err = poom_wifi_spam_stop();
     if(err != ESP_OK)
     {
@@ -1913,7 +1969,12 @@ static int cmd_wifi_spam_status(int argc, char** argv)
         return 1;
     }
 
-    printf("wifi-spam: %s | ssids=%u\n", running ? "RUNNING" : "STOPPED", (unsigned)list.count);
+    poom_wifi_spam_status_t status;
+    poom_wifi_spam_get_status(&status);
+    printf("wifi-spam: %s | saved_ssids=%u | sent=%lu errors=%lu elapsed_ms=%lu last_error=%s\n",
+           running ? "RUNNING" : "STOPPED", (unsigned)list.count,
+           (unsigned long)status.sent, (unsigned long)status.errors,
+           (unsigned long)status.elapsed_ms, esp_err_to_name(status.last_error));
     return 0;
 }
 
@@ -2255,6 +2316,7 @@ static int cmd_ble_gatt_char_value_set(int argc, char** argv)
  */
 static int cmd_ble_gatt_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     poom_ble_gatt_dynamic_config_t params = {0};
     poom_ble_gatt_dynamic_char_config_t* chars = NULL;
     esp_err_t err;
@@ -2274,7 +2336,8 @@ static int cmd_ble_gatt_start(int argc, char** argv)
         return 0;
     }
 
-    if(s_cli_apps_ble_spam_running)
+    cli_apps_stop_wifi_action_();
+    if(poom_ble_spam_is_active())
     {
         printf("Stopping ble-spam due to BLE radio conflict\n");
         cli_apps_stop_ble_spam_();
@@ -2384,10 +2447,17 @@ static int cmd_ble_gatt_stop(int argc, char** argv)
  */
 static int cmd_ble_spam_start(int argc, char** argv)
 {
+    if(poom_ble_spam_is_active()) {
+        printf("ble-spam already running\n");
+        return 0;
+    }
+    if(!cli_apps_stop_wifi_action_()) return 1;
     (void)argc;
     (void)argv;
 
-    if(s_cli_apps_ble_spam_running)
+    cli_apps_stop_wifi_action_();
+
+    if(poom_ble_spam_is_active())
     {
         printf("ble-spam already running\n");
         return 0;
@@ -2411,9 +2481,13 @@ static int cmd_ble_spam_start(int argc, char** argv)
     }
 
     poom_ble_spam_register_cb(cli_apps_ble_spam_name_cb_);
-    poom_ble_spam_start();
-    s_cli_apps_ble_spam_running = true;
-    printf("ble-spam running\n");
+    const esp_err_t error = poom_ble_spam_start();
+    if(error != ESP_OK) {
+        poom_ble_spam_register_cb(NULL);
+        printf("ble-spam-start failed: %s\n", esp_err_to_name(error));
+        return 1;
+    }
+    printf("ble-spam start requested (30-second default)\n");
     return 0;
 }
 
@@ -2429,7 +2503,14 @@ static int cmd_ble_spam_stop(int argc, char** argv)
     (void)argc;
     (void)argv;
 
+    if(menu_ble_spam_stop != NULL) menu_ble_spam_stop();
     cli_apps_stop_ble_spam_();
+    poom_ble_spam_status_t status;
+    poom_ble_spam_get_status(&status);
+    if(!status.radio_released) {
+        printf("ble-spam-stop failed: %s; restart required\n", esp_err_to_name(status.error));
+        return 1;
+    }
     printf("ble-spam stopped\n");
     return 0;
 }
@@ -2446,9 +2527,12 @@ static int cmd_ble_spam_status(int argc, char** argv)
     (void)argc;
     (void)argv;
 
-    printf("ble-spam: %s | current=%s\n",
-           s_cli_apps_ble_spam_running ? "RUNNING" : "STOPPED",
-           s_cli_apps_ble_spam_name);
+    poom_ble_spam_status_t status;
+    poom_ble_spam_get_status(&status);
+    printf("ble-spam: %s | advertising=%u | current=%s | cycles=%lu elapsed_ms=%lu radio_released=%u error=%s\n",
+           status.active ? "ACTIVE" : "STOPPED", (unsigned)status.advertising,
+           status.label, (unsigned long)status.cycles, (unsigned long)status.elapsed_ms,
+           (unsigned)status.radio_released, esp_err_to_name(status.error));
     return 0;
 }
 
@@ -2464,7 +2548,9 @@ static int cmd_ble_spam_current(int argc, char** argv)
     (void)argc;
     (void)argv;
 
-    printf("ble-spam current: %s\n", s_cli_apps_ble_spam_name);
+    poom_ble_spam_status_t status;
+    poom_ble_spam_get_status(&status);
+    printf("ble-spam current: %s\n", status.label);
     return 0;
 }
 
@@ -2477,8 +2563,11 @@ static int cmd_ble_spam_current(int argc, char** argv)
  */
 static int cmd_ble_tracker_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     (void)argc;
     (void)argv;
+
+    cli_apps_stop_wifi_action_();
 
     if(poom_ble_tracker_is_active())
     {
@@ -2492,7 +2581,7 @@ static int cmd_ble_tracker_start(int argc, char** argv)
         cli_apps_stop_ble_gatt_();
     }
 
-    if(s_cli_apps_ble_spam_running)
+    if(poom_ble_spam_is_active())
     {
         printf("Stopping ble-spam due to BLE radio conflict\n");
         cli_apps_stop_ble_spam_();
@@ -2608,6 +2697,7 @@ static int cmd_ble_tracker_clear(int argc, char** argv)
  */
 static int cmd_ble_tracker_scan(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     return cmd_ble_tracker_start(argc, argv);
 }
 
@@ -2620,6 +2710,7 @@ static int cmd_ble_tracker_scan(int argc, char** argv)
  */
 static int cmd_karma_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     esp_err_t err;
 
     (void)argc;
@@ -3058,6 +3149,7 @@ static int cmd_lua_upload_abort(int argc, char** argv)
  */
 static int cmd_wifi_scan(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     esp_err_t err;
 
     (void)argc;
@@ -3106,6 +3198,7 @@ static int cmd_wifi_scan_show(int argc, char** argv)
  */
 static int cmd_wifi_connect(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     uint32_t index = 0U;
     wifi_ap_record_t* ap = NULL;
     const char* password = NULL;
@@ -3123,6 +3216,7 @@ static int cmd_wifi_connect(int argc, char** argv)
         return 1;
     }
 
+    cli_apps_prepare_wifi_base_();
     ap = poom_wifi_scanner_get_ap_record((unsigned)index);
     if(ap == NULL)
     {
@@ -3131,7 +3225,6 @@ static int cmd_wifi_connect(int argc, char** argv)
     }
 
     password = (argc == 3) ? argv[2] : NULL;
-    cli_apps_prepare_wifi_base_();
     err = poom_wifi_ctrl_sta_connect((const char*)ap->ssid, ((password != NULL) && (password[0] != '\0')) ? password : NULL);
     if(err != ESP_OK)
     {
@@ -3160,6 +3253,7 @@ static int cmd_wifi_connect(int argc, char** argv)
  */
 static int cmd_wifi_connect_ssid(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     const char* ssid = NULL;
     const char* password = NULL;
     esp_err_t err;
@@ -3208,6 +3302,7 @@ static int cmd_wifi_disconnect(int argc, char** argv)
     (void)argc;
     (void)argv;
 
+    cli_apps_stop_wifi_action_();
     err = poom_wifi_ctrl_sta_disconnect();
     if(err != ESP_OK)
     {
@@ -3230,9 +3325,17 @@ static int cmd_wifi_status(int argc, char** argv)
 {
     char ssid[33] = {0};
     char ip_buf[16] = {0};
+    poom_marauder_status_t marauder_status = {0};
 
     (void)argc;
     (void)argv;
+
+    poom_wifi_marauder_get_status(&marauder_status);
+    printf("wifi-attacks: %s | sent=%" PRIu32 " | errors=%" PRIu32 " | last=%s\n",
+           marauder_status.running ? "RUNNING" : "STOPPED",
+           marauder_status.sent,
+           marauder_status.errors,
+           esp_err_to_name(marauder_status.last_error));
 
     if(!cli_apps_wifi_connection_active_())
     {
@@ -3330,6 +3433,7 @@ static int cmd_wifi_save_current(int argc, char** argv)
  */
 static int cmd_deauth_scan(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     esp_err_t err;
 
     (void)argc;
@@ -3354,6 +3458,7 @@ static int cmd_deauth_scan(int argc, char** argv)
  */
 static int cmd_deauth_attack(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     uint32_t index = 0U;
     esp_err_t err;
 
@@ -3389,6 +3494,7 @@ static int cmd_deauth_attack(int argc, char** argv)
  */
 static int cmd_deauth_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     esp_err_t err;
 
     (void)argc;
@@ -3420,6 +3526,7 @@ static int cmd_deauth_stop(int argc, char** argv)
     (void)argc;
     (void)argv;
 
+    cli_apps_stop_wifi_action_();
     err = poom_wifi_deauth_stop();
     if(err != ESP_OK)
     {
@@ -3456,6 +3563,7 @@ static int cmd_deauth_status(int argc, char** argv)
  */
 static int cmd_deauth_det_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     esp_err_t err;
 
     (void)argc;
@@ -3487,6 +3595,7 @@ static int cmd_deauth_det_stop(int argc, char** argv)
     (void)argc;
     (void)argv;
 
+    cli_apps_stop_wifi_action_();
     err = poom_wifi_deauth_detector_stop();
     if(err != ESP_OK)
     {
@@ -3596,6 +3705,7 @@ static int cmd_deauth_det_reset(int argc, char** argv)
  */
 static int cmd_deauth_det_hop(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     uint32_t enabled = 0U;
     esp_err_t err;
 
@@ -3610,6 +3720,7 @@ static int cmd_deauth_det_hop(int argc, char** argv)
         return 1;
     }
 
+    cli_apps_stop_wifi_action_();
     err = poom_wifi_deauth_detector_set_channel_hopping(enabled != 0U);
     if(err != ESP_OK)
     {
@@ -3630,6 +3741,7 @@ static int cmd_deauth_det_hop(int argc, char** argv)
  */
 static int cmd_deauth_det_ch(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     uint32_t channel = 0U;
     esp_err_t err;
 
@@ -3645,6 +3757,7 @@ static int cmd_deauth_det_ch(int argc, char** argv)
         return 1;
     }
 
+    cli_apps_stop_wifi_action_();
     err = poom_wifi_deauth_detector_set_fixed_channel((uint8_t)channel);
     if(err != ESP_OK)
     {
@@ -3665,6 +3778,7 @@ static int cmd_deauth_det_ch(int argc, char** argv)
  */
 static int cmd_captive_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     (void)argc;
     (void)argv;
 
@@ -3702,6 +3816,7 @@ static int cmd_captive_start(int argc, char** argv)
  */
 static int cmd_captive_start_from_scan(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     uint32_t index = 0U;
     wifi_ap_record_t* ap = NULL;
 
@@ -3716,6 +3831,7 @@ static int cmd_captive_start_from_scan(int argc, char** argv)
         return 1;
     }
 
+    cli_apps_prepare_wifi_attack_();
     ap = poom_wifi_scanner_get_ap_record((unsigned)index);
     if(ap == NULL)
     {
@@ -3723,7 +3839,6 @@ static int cmd_captive_start_from_scan(int argc, char** argv)
         return 1;
     }
 
-    cli_apps_prepare_wifi_attack_();
     poom_wifi_captive_set_ap_clone((const char*)ap->ssid, true);
     (void)snprintf(s_cli_apps_captive_clone_ssid, sizeof(s_cli_apps_captive_clone_ssid), "%s", (const char*)ap->ssid);
     if(argc == 3)
@@ -3787,6 +3902,7 @@ static int cmd_captive_status(int argc, char** argv)
  */
 static int cmd_sniffer_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     poom_sniffer_device_config_t cfg = {0};
     uint32_t time_s = 0U;
     bool got_filter = false;
@@ -3916,6 +4032,7 @@ static int cmd_sniffer_start(int argc, char** argv)
  */
 static int cmd_scanner_start(int argc, char** argv)
 {
+    if(!cli_apps_stop_wifi_action_()) return 1;
     const char* mode = NULL;
     uint32_t hop_ms = 200U;
     esp_err_t err;

@@ -21,6 +21,8 @@ extern "C" {
  * @return void
  */
 void app_fox_hunt(void);
+/** Start an AP hunt from a passive observer target; B returns to BEAST. */
+void app_fox_hunt_wifi_ap(const uint8_t bssid[6], uint8_t channel, const char *name);
 
 /**
  * @brief Launches Fox Hunt locked directly onto a specific Wi-Fi client.

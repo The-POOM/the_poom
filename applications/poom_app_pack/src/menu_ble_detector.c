@@ -101,7 +101,16 @@ static const char *const s_filter_labels[] = {
     "BLE DEVICES",
     "TRACKERS",
     "WEARABLES",
+    "FINDMY MONITOR",
+    "IBEACONS",
+    "FLIPPER CANDIDATES",
+    "FLOCK CANDIDATES",
+    "META CANDIDATES",
+    "HC NAME CANDIDATES",
+    "BLE RATE",
 };
+_Static_assert(sizeof(s_filter_labels) / sizeof(s_filter_labels[0]) == POOM_BLE_DETECTOR_FILTER_COUNT,
+               "Every BLE profile needs a selector label");
 
 static poom_ble_detector_record_t *s_records[MENU_DETECTOR_VIEW_MAX_ITEMS];
 static poom_ble_detector_record_t *s_record_storage;
@@ -113,6 +122,9 @@ static int s_selected_index;
 static int s_scroll;
 static int s_filter_index;
 static int s_detail_index = -1;
+static uint8_t s_detail_page;
+static bool s_analyzer_list;
+static bool s_filter_back_requested;
 /* LEFT toggles the whole discovery list between labels and MAC addresses. */
 static bool s_show_mac_list;
 static menu_ble_detector_screen_t s_screen = MENU_BLE_DETECTOR_SCREEN_SELECT;
@@ -407,7 +419,9 @@ static void menu_ble_detector_record_cb_(const poom_ble_detector_record_t *recor
     }
     else
     {
+        const uint32_t reports = s_records[index]->reports;
         *s_records[index] = *record;
+        s_records[index]->reports = reports == UINT32_MAX ? reports : reports + 1U;
         if((s_alias_state[index] != MENU_BLE_ALIAS_PRESENT) &&
            ((strcmp(record->name, "UNKNOWN") != 0) ||
             (strcmp(s_names[index], "UNKNOWN") == 0)))
@@ -415,6 +429,7 @@ static void menu_ble_detector_record_cb_(const poom_ble_detector_record_t *recor
             menu_ble_detector_copy_name_(s_names[index], record->name);
         }
     }
+    s_records[index]->last_seen_ms = menu_ble_detector_now_ms_();
     s_scan_dirty = true;
     portEXIT_CRITICAL(&s_records_lock);
 }
@@ -730,11 +745,40 @@ static void menu_ble_detector_gatt_render_value_(void)
     poom_arduboy_display();
 }
 
+static void menu_ble_detector_render_rate_(void)
+{
+    poom_ble_detector_stats_t stats;
+    char line[32];
+    poom_ble_detector_get_stats(&stats);
+    poom_arduboy_clear();
+    poom_arduboy_set_text_size(1);
+    poom_arduboy_set_cursor(0, 2); (void)poom_arduboy_print("BLE REPORT RATE");
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
+    const uint32_t per_second = stats.rate_window_ms ?
+        (uint32_t)(((uint64_t)stats.rate_reports * 1000U) / stats.rate_window_ms) : 0U;
+    (void)snprintf(line, sizeof(line), "%lu reports/s", (unsigned long)per_second);
+    poom_arduboy_set_cursor(0, 15); (void)poom_arduboy_print(line);
+    (void)snprintf(line, sizeof(line), "Reports %lu", (unsigned long)stats.reports);
+    poom_arduboy_set_cursor(0, 25); (void)poom_arduboy_print(line);
+    if(stats.reports) (void)snprintf(line, sizeof(line), "RSSI %d..%d dBm", stats.rssi_min, stats.rssi_max);
+    else (void)snprintf(line, sizeof(line), "Waiting for reports");
+    poom_arduboy_set_cursor(0, 35); (void)poom_arduboy_print(line);
+    (void)snprintf(line, sizeof(line), "Elapsed %lus", (unsigned long)(stats.elapsed_ms / 1000U));
+    poom_arduboy_set_cursor(0, 45); (void)poom_arduboy_print(line);
+    poom_arduboy_set_cursor(0, 56); (void)poom_arduboy_print("A:LIST        B:BACK");
+    poom_arduboy_display();
+}
+
 static void menu_ble_detector_render_scan_(void)
 {
     menu_detector_view_row_t rows[MENU_DETECTOR_VIEW_MAX_ITEMS];
     int count;
     int i;
+
+    if(s_filter_index == POOM_BLE_DETECTOR_FILTER_ANALYZER && !s_analyzer_list) {
+        menu_ble_detector_render_rate_();
+        return;
+    }
 
     portENTER_CRITICAL(&s_records_lock);
     count = s_record_count;
@@ -742,8 +786,8 @@ static void menu_ble_detector_render_scan_(void)
 
     if(count == 0)
     {
-        menu_detector_view_draw_waiting(poom_ble_detector_filter_label(
-            (poom_ble_detector_filter_t)s_filter_index));
+        menu_detector_view_draw_waiting_actions(poom_ble_detector_filter_label(
+            (poom_ble_detector_filter_t)s_filter_index), "B:BACK");
         return;
     }
 
@@ -796,7 +840,7 @@ static void menu_ble_detector_render_scan_(void)
         s_selected_index,
         s_scroll,
         s_show_mac_list ? "A:SEL L:OUI" : "A:SEL L:MAC",
-        "B:EXIT");
+        "B:BACK");
 }
 
 static bool menu_ble_detector_record_snapshot_(int index,
@@ -843,7 +887,11 @@ static void menu_ble_detector_render_detail_(void)
                    "%.9s/%.10s",
                    poom_ble_detector_class_label(record.device_class),
                    poom_detect_confidence_label(record.confidence));
-    (void)snprintf(line2, sizeof(line2), "d=%.2fm", (double)record.distance_m);
+    if(record.signatures & (uint16_t)~POOM_BLE_SIGNATURE_IBEACON)
+        (void)snprintf(line1, sizeof(line1), "Advertising candidate");
+    else if(record.signatures & POOM_BLE_SIGNATURE_IBEACON)
+        (void)snprintf(line1, sizeof(line1), "iBeacon format");
+    (void)snprintf(line2, sizeof(line2), "UP/DN: more details");
     (void)snprintf(line3, sizeof(line3), "RSSI=%ddBm", record.rssi);
     if(s_show_mac_list)
     {
@@ -871,6 +919,40 @@ static void menu_ble_detector_render_detail_(void)
         (void)snprintf(line4, sizeof(line4), "OUI:%.17s",
                        (vendor != NULL) ? vendor : "UNKNOWN");
     }
+    if(s_detail_page == 1U) {
+        (void)snprintf(line0, sizeof(line0), "Advertisement hints");
+        const uint16_t sig = record.signatures;
+        const char *hint = "No profile match";
+        if(sig & POOM_BLE_SIGNATURE_IBEACON) hint = "iBeacon format";
+        else if(sig & POOM_BLE_FINDMY_SIGNATURES) hint = "FindMy candidate";
+        else if(sig & POOM_BLE_SIGNATURE_FLIPPER) hint = "Flipper candidate";
+        else if(sig & POOM_BLE_SIGNATURE_FLOCK) hint = "Flock candidate";
+        else if(sig & POOM_BLE_SIGNATURE_META) hint = "Meta candidate";
+        else if(sig & POOM_BLE_SIGNATURE_HC_NAME) hint = "HC name candidate";
+        (void)snprintf(line1, sizeof(line1), "%s", hint);
+        if(sig & POOM_BLE_FINDMY_SIGNATURES) {
+            (void)snprintf(line2, sizeof(line2), "%s%s%s%s",
+                           sig & POOM_BLE_SIGNATURE_FINDMY ? "Apple " : "",
+                           sig & POOM_BLE_SIGNATURE_FMNA ? "FD44 " : "",
+                           sig & POOM_BLE_SIGNATURE_DULT ? "DULT " : "",
+                           sig & POOM_BLE_SIGNATURE_LEGACY_FINDMY ? "FCB2" : "");
+        } else if(record.flock_serial[0]) (void)snprintf(line2, sizeof(line2), "Serial %.14s", record.flock_serial);
+        else if(record.identifier) (void)snprintf(line2, sizeof(line2), "ID %04X (unverified)", record.identifier);
+        else (void)snprintf(line2, sizeof(line2), "Identity unverified");
+        (void)snprintf(line3, sizeof(line3), "Reports: %lu", (unsigned long)record.reports);
+        (void)snprintf(line4, sizeof(line4), "Seen %lus ago",
+                       (unsigned long)((menu_ble_detector_now_ms_() - record.last_seen_ms) / 1000U));
+    } else if(s_detail_page == 2U && (record.signatures & POOM_BLE_SIGNATURE_IBEACON)) {
+        char uuid[37];
+        const uint8_t *u = record.ibeacon_uuid;
+        (void)snprintf(uuid, sizeof(uuid), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                       u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
+        (void)snprintf(line0, sizeof(line0), "%.18s", uuid);
+        (void)snprintf(line1, sizeof(line1), "%.18s", uuid + 18U);
+        (void)snprintf(line2, sizeof(line2), "Maj %u Min %u", record.ibeacon_major, record.ibeacon_minor);
+        (void)snprintf(line3, sizeof(line3), "Power %d dBm", record.ibeacon_power);
+        (void)snprintf(line4, sizeof(line4), "UP/DN: other details");
+    }
     menu_detector_view_draw_detail_actions(lines, s_detail_index, count, "A:ACTIONS");
 }
 
@@ -878,10 +960,12 @@ static void menu_ble_detector_render_(void)
 {
     if(s_screen == MENU_BLE_DETECTOR_SCREEN_SELECT)
     {
-        menu_detector_view_draw_selector("BLE DETECT",
-                                         s_filter_labels,
-                                         POOM_BLE_DETECTOR_FILTER_COUNT,
-                                         s_filter_index);
+        const int first = (s_filter_index / MENU_DETECTOR_VIEW_VISIBLE_ROWS) * MENU_DETECTOR_VIEW_VISIBLE_ROWS;
+        char title[22];
+        (void)snprintf(title, sizeof(title), "BLE DETECT %u/%u", (unsigned)(first / MENU_DETECTOR_VIEW_VISIBLE_ROWS + 1),
+                       (unsigned)((POOM_BLE_DETECTOR_FILTER_COUNT + MENU_DETECTOR_VIEW_VISIBLE_ROWS - 1) / MENU_DETECTOR_VIEW_VISIBLE_ROWS));
+        menu_detector_view_draw_selector(title, s_filter_labels + first,
+                                         POOM_BLE_DETECTOR_FILTER_COUNT - first, s_filter_index - first);
     }
     else if(s_screen == MENU_BLE_DETECTOR_SCREEN_ALIAS)
     {
@@ -1232,6 +1316,17 @@ static void menu_ble_detector_task_(void *arg)
             break;
         }
 
+        if(s_filter_back_requested) {
+            s_filter_back_requested = false;
+            poom_ble_detector_register_cb(NULL);
+            (void)poom_ble_detector_stop();
+            s_start_requested = false;
+            s_record_count = 0;
+            s_detail_index = -1;
+            s_screen = MENU_BLE_DETECTOR_SCREEN_SELECT;
+            s_input_dirty = true;
+        }
+
         if((s_record_storage != NULL) &&
            (s_screen == MENU_BLE_DETECTOR_SCREEN_GATT_WAIT) &&
            s_gatt_recon->start_requested)
@@ -1251,6 +1346,8 @@ static void menu_ble_detector_task_(void *arg)
         {
             s_selected_index = 0;
             s_scroll = 0;
+            s_detail_page = 0U;
+            s_analyzer_list = false;
             menu_ble_detector_reset_text_scroll_();
             s_screen = MENU_BLE_DETECTOR_SCREEN_GATT_SERVICES;
             s_input_dirty = true;
@@ -1263,6 +1360,8 @@ static void menu_ble_detector_task_(void *arg)
             s_record_count = 0;
             s_selected_index = 0;
             s_scroll = 0;
+            s_detail_page = 0U;
+            s_analyzer_list = false;
             menu_ble_detector_reset_text_scroll_();
             (void)memset(s_alias_state, 0, sizeof(s_alias_state));
             menu_detector_view_draw_waiting(poom_ble_detector_filter_label(
@@ -1284,6 +1383,10 @@ static void menu_ble_detector_task_(void *arg)
         if(s_screen < MENU_BLE_DETECTOR_SCREEN_GATT_WAIT)
         {
             menu_ble_detector_load_aliases_();
+            if(s_screen != MENU_BLE_DETECTOR_SCREEN_SELECT) {
+                poom_ble_detector_stats_t stats;
+                poom_ble_detector_get_stats(&stats);
+            }
         }
 
         if(menu_ble_detector_text_scroll_active_())
@@ -1297,6 +1400,12 @@ static void menu_ble_detector_task_(void *arg)
                 s_input_dirty = true;
             }
         }
+
+        /* Refresh the measured rate and last-seen age even during silence. */
+        if(((s_screen == MENU_BLE_DETECTOR_SCREEN_SCAN && s_filter_index == POOM_BLE_DETECTOR_FILTER_ANALYZER) ||
+            s_screen == MENU_BLE_DETECTOR_SCREEN_DETAIL) &&
+           xTaskGetTickCount() - last_scan_render >= pdMS_TO_TICKS(MENU_BLE_DETECTOR_REFRESH_MS))
+            s_input_dirty = true;
 
         if(s_input_dirty)
         {
@@ -1395,6 +1504,16 @@ static void menu_ble_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_
         {
             s_show_mac_list = !s_show_mac_list;
             s_input_dirty = true;
+        }
+        else if(event.button == BUTTON_UP || event.button == BUTTON_DOWN) {
+            poom_ble_detector_record_t record;
+            char name[MENU_DETECTOR_VIEW_NAME_LEN];
+            int count;
+            if(menu_ble_detector_record_snapshot_(s_detail_index, &record, name, &count)) {
+                const uint8_t pages = (record.signatures & POOM_BLE_SIGNATURE_IBEACON) ? 3U : 2U;
+                s_detail_page = (uint8_t)((s_detail_page + (event.button == BUTTON_DOWN ? 1U : pages - 1U)) % pages);
+                s_input_dirty = true;
+            }
         }
         else if(event.button == BUTTON_RIGHT)
         {
@@ -1557,18 +1676,26 @@ static void menu_ble_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_
         }
     }
 
+    if(s_filter_index == POOM_BLE_DETECTOR_FILTER_ANALYZER && !s_analyzer_list) {
+        if(event.button == BUTTON_B) s_filter_back_requested = true;
+        else if(event.button == BUTTON_A) { s_analyzer_list = true; s_input_dirty = true; }
+        return;
+    }
+
     if(s_record_count == 0)
     {
         if(event.button == BUTTON_B)
         {
-            s_exit_requested = true;
+            if(s_filter_index == POOM_BLE_DETECTOR_FILTER_ANALYZER) { s_analyzer_list = false; s_input_dirty = true; }
+            else s_filter_back_requested = true;
         }
         return;
     }
 
     if(event.button == BUTTON_B)
     {
-        s_exit_requested = true;
+        if(s_filter_index == POOM_BLE_DETECTOR_FILTER_ANALYZER) { s_analyzer_list = false; s_input_dirty = true; }
+        else s_filter_back_requested = true;
     }
     else if(event.button == BUTTON_LEFT)
     {
@@ -1592,6 +1719,7 @@ static void menu_ble_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_
     else if(event.button == BUTTON_A)
     {
         s_detail_index = s_selected_index;
+        s_detail_page = 0U;
         s_screen = MENU_BLE_DETECTOR_SCREEN_DETAIL;
         s_input_dirty = true;
     }
@@ -1618,6 +1746,9 @@ void menu_ble_detector_show(void)
     s_scroll = 0;
     s_filter_index = 0;
     s_detail_index = -1;
+    s_detail_page = 0U;
+    s_analyzer_list = false;
+    s_filter_back_requested = false;
     s_screen = MENU_BLE_DETECTOR_SCREEN_SELECT;
     s_exit_requested = false;
     s_hunt_launch = false;
