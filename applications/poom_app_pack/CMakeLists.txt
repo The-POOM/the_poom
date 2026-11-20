@@ -13,6 +13,7 @@ list(APPEND POOM_APP_PACK_SRCS
     "${COMPONENT_DIR}/src/menu_spectrum.c"
     "${COMPONENT_DIR}/src/menu_device_inspector.c"
     "${COMPONENT_DIR}/src/menu_wifi_guard.c"
+    "${COMPONENT_DIR}/src/menu_wardrive_node.c"
 )
 
 if(NOT CONFIG_ZB_ENABLED)

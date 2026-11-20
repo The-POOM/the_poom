@@ -70,6 +70,7 @@
 #include "menu_spectrum.h"
 #include "menu_device_inspector.h"
 #include "menu_wifi_guard.h"
+#include "menu_wardrive_node.h"
 #include "menu_sd_browser.h"
 #include "menu_sniffer_rt.h"
 #include "menu_sniffer_device.h"
@@ -1036,6 +1037,14 @@ static void action_wifi_guard_(void)
     menu_wifi_guard_show();
 }
 
+/** Opens the ESP-NOW wardriving node for a Biscuit or JCMK core. */
+static void action_wardrive_node_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_wardrive_node_show();
+}
+
 /**
  * @brief Internal helper for `action_imu_monitor`.
  *
@@ -1164,6 +1173,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"SPECTRUM", action_spectrum_},
     {"DEVICE INSPECTOR", action_device_inspector_},
     {"WIFI GUARD", action_wifi_guard_},
+    {"WARDRIVING NODE", action_wardrive_node_},
     {"SCAN NET", action_arp_},
 
 #if CONFIG_ZB_ENABLED
