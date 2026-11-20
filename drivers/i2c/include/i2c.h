@@ -103,6 +103,13 @@ void i2c_unlock(void);
  */
 void i2c_scan_devices(uint8_t **found_addresses, size_t *num_addresses);
 
+
+/** RX/TX stream transaction with explicit millisecond timeout. Caller holds
+ * i2c_lock(); unlike staged transfers this does not alter the staged buffer.
+ * TX and RX, when both supplied, use a repeated START. */
+uint8_t i2c_stream_transfer(uint8_t address,const uint8_t *tx,size_t tx_length,
+                            uint8_t *rx,size_t rx_length,int timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

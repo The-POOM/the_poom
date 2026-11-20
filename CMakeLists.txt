@@ -153,6 +153,8 @@ set(MODULES
 set(COMPONENTS ${MODULES})
 
 set(POOM_MODULE_DIRS
+    ${CMAKE_SOURCE_DIR}/modules/poom_gps
+    ${CMAKE_SOURCE_DIR}/modules/poom_wardrive
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_scan
     ${CMAKE_SOURCE_DIR}/modules/poom_boot_policy
     ${CMAKE_SOURCE_DIR}/modules/poom_ble_gatt_client
