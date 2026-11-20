@@ -25,6 +25,7 @@
 #include "Arduboy2.h"
 #include "button_driver.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "input_events.h"
@@ -70,55 +71,101 @@ static volatile bool s_exit_requested = false;   /* leave the menu entirely   */
 static volatile bool s_cancel = false;           /* abort an in-flight run    */
 static volatile bool s_start_requested = false;  /* begin cracking s_path     */
 static volatile bool s_continue_requested = false; /* resume with the variations */
+static volatile bool s_browse_requested = false;  /* open the SD wordlist picker */
+static volatile bool s_sd_run_requested = false;  /* run selected SD wordlist */
 static bool s_rescan_requested = false;
 static bool s_buttons_subscribed = false;
 static TaskHandle_t s_task = NULL;
 
-static hs_crack_screen_t s_screen = HS_CRACK_SCREEN_BROWSE;
-static bool s_direct_mode = false;               /* opened on a fixed file    */
-static poom_hs_crack_scope_t s_scope = POOM_HS_SCOPE_QUICK; /* mode on confirm */
-static bool s_can_continue = false;              /* QUICK unfound -> offer more */
-
-/* Confirm-screen mode selector. QUICK/SMART use the built-in wordlist (mapped
- * to the engine scope); SD-LIST streams a wordlist file chosen from the SD. */
 typedef enum {
     HS_MODE_QUICK = 0,
     HS_MODE_SMART,
     HS_MODE_SDLIST,
     HS_MODE_COUNT,
 } hs_ui_mode_t;
-static hs_ui_mode_t s_mode = HS_MODE_QUICK;
 
-static volatile bool s_browse_requested = false;   /* launch the SD list picker */
-static volatile bool s_sd_run_requested = false;   /* crack s_path x s_wordlist  */
-static char s_wordlist_path[160] = {0};            /* chosen wordlist, abs path  */
-static char s_wordlist_label[HS_CRACK_NAME_MAX] = {0};
+typedef struct
+{
+    hs_crack_screen_t s_screen;
+    bool s_direct_mode;
+    poom_hs_crack_scope_t s_scope;
+    bool s_can_continue;
+    hs_ui_mode_t s_mode;
 
-/* Crack journal: AP identity of the selected handshake, and the pending action
- * when prompting about an already-tried list. */
-static uint8_t s_ap_bssid[6] = {0};
-static char    s_ap_essid[33] = {0};
-static bool    s_ap_valid = false;                 /* peek of s_path succeeded   */
-static bool    s_from_journal = false;             /* result recalled, not run   */
-static bool    s_pending_is_sd = false;            /* ALREADY screen: which run  */
-static poom_hs_crack_scope_t s_pending_scope = POOM_HS_SCOPE_QUICK;
-static char    s_pending_list[40] = {0};           /* list_id being confirmed    */
-static bool    s_file_cracked[HS_CRACK_MAX_FILES]; /* browser "already cracked"  */
+    char s_wordlist_path[160];
+    char s_wordlist_label[HS_CRACK_NAME_MAX];
+    uint8_t s_ap_bssid[6];
+    char s_ap_essid[33];
+    bool s_ap_valid;
+    bool s_from_journal;
+    bool s_pending_is_sd;
+    poom_hs_crack_scope_t s_pending_scope;
+    char s_pending_list[40];
+    bool s_file_cracked[HS_CRACK_MAX_FILES];
+    char s_files[HS_CRACK_MAX_FILES][HS_CRACK_NAME_MAX];
+    uint32_t s_file_count;
+    uint32_t s_sel;
+    uint32_t s_scroll;
+    char s_path[160];
+    char s_label[HS_CRACK_NAME_MAX];
+    char s_info[40];
+    poom_hs_crack_result_t s_result;
+    volatile uint32_t s_tried;
+    uint32_t s_total;
+    int64_t s_last_draw_us;
+    int64_t s_crack_start_us;
+} hs_crack_session_t;
 
-static char s_files[HS_CRACK_MAX_FILES][HS_CRACK_NAME_MAX];
-static uint32_t s_file_count = 0;
-static uint32_t s_sel = 0;
-static uint32_t s_scroll = 0;
+static hs_crack_session_t *s_session = NULL;
 
-static char s_path[160] = {0};   /* full path of the file to crack */
-static char s_label[HS_CRACK_NAME_MAX] = {0};
-static char s_info[40] = {0};
+#define s_screen          (s_session->s_screen)
+#define s_direct_mode     (s_session->s_direct_mode)
+#define s_scope           (s_session->s_scope)
+#define s_can_continue    (s_session->s_can_continue)
+#define s_mode            (s_session->s_mode)
+#define s_wordlist_path   (s_session->s_wordlist_path)
+#define s_wordlist_label  (s_session->s_wordlist_label)
+#define s_ap_bssid        (s_session->s_ap_bssid)
+#define s_ap_essid        (s_session->s_ap_essid)
+#define s_ap_valid        (s_session->s_ap_valid)
+#define s_from_journal    (s_session->s_from_journal)
+#define s_pending_is_sd   (s_session->s_pending_is_sd)
+#define s_pending_scope   (s_session->s_pending_scope)
+#define s_pending_list    (s_session->s_pending_list)
+#define s_file_cracked    (s_session->s_file_cracked)
+#define s_files           (s_session->s_files)
+#define s_file_count      (s_session->s_file_count)
+#define s_sel             (s_session->s_sel)
+#define s_scroll          (s_session->s_scroll)
+#define s_path            (s_session->s_path)
+#define s_label           (s_session->s_label)
+#define s_info            (s_session->s_info)
+#define s_result          (s_session->s_result)
+#define s_tried           (s_session->s_tried)
+#define s_total           (s_session->s_total)
+#define s_last_draw_us    (s_session->s_last_draw_us)
+#define s_crack_start_us  (s_session->s_crack_start_us)
 
-static poom_hs_crack_result_t s_result;
-static volatile uint32_t s_tried = 0;
-static uint32_t s_total = 0;
-static int64_t s_last_draw_us = 0;
-static int64_t s_crack_start_us = 0;   /* set when hashing begins (total>0) */
+static bool menu_handshake_crack_session_open_(void)
+{
+    if (s_session != NULL)
+    {
+        return true;
+    }
+    s_session = heap_caps_calloc(1U, sizeof(*s_session),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_session == NULL)
+    {
+        s_session = calloc(1U, sizeof(*s_session));
+    }
+    return s_session != NULL;
+}
+
+static void menu_handshake_crack_session_close_(void)
+{
+    free(s_session);
+    s_session = NULL;
+}
 
 static void menu_handshake_crack_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_handshake_crack_draw_(void);
@@ -861,6 +908,8 @@ static void menu_handshake_crack_exit_(void)
         }
     }
 
+    menu_handshake_crack_session_close_();
+
     const uint8_t token = 1;
     (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
 }
@@ -1185,6 +1234,12 @@ static void menu_handshake_crack_common_start_(void)
 
 void menu_handshake_crack_show(void)
 {
+    if (!menu_handshake_crack_session_open_())
+    {
+        const uint8_t token = 1;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+        return;
+    }
     s_direct_mode = false;
     s_screen = HS_CRACK_SCREEN_BROWSE;
     s_info[0] = '\0';
@@ -1197,6 +1252,13 @@ void menu_handshake_crack_show_file(const char *path)
     if ((path == NULL) || (path[0] == '\0'))
     {
         menu_handshake_crack_show();
+        return;
+    }
+
+    if (!menu_handshake_crack_session_open_())
+    {
+        const uint8_t token = 1;
+        (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
         return;
     }
 
