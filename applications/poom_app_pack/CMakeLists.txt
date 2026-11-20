@@ -39,8 +39,12 @@ set(POOM_APP_PACK_REQUIRES
     poom_cli
     driver
     esp_app_format
+    esp_event
     esp_http_client
+    esp_http_server
+    esp_netif
     esp_system
+    esp_wifi
     i2c
     ir
     mbedtls
