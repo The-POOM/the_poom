@@ -30,9 +30,11 @@
  *    same marker but no board type or version, so a core never offers it a
  *    Piglet firmware update.
  *
- * Wire behaviour follows justcallmekoko/ESP32DualBandWardriver,
- * Hamspiced/piglet and the Biscuit handshake contributed by Biscuit Shop to
- * Piglet.  The pig on the PIGLET NODE screen is original POOM pixel art.
+ * Wire behaviour follows Just Call Me Koko's ESP32DualBandWardriver and
+ * Hamspiced/Piglet. The Biscuit plain-reply handshake and channel-plan
+ * reference is Hedge (@CodeHedge / Biscuit Shop)'s contribution to Piglet:
+ * https://github.com/Hamspiced/piglet/pull/16
+ * The pig on the PIGLET NODE screen is original POOM pixel art.
  *
  * The radio is shared between scanning and ESP-NOW, so the core can only be
  * heard on the home channel (6).  After every channel scan the node is back
