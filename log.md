@@ -1,3 +1,58 @@
+## POOM 1.0.18
+
+### COMMUNITY UPDATE — THE BEAST EXPANSION
+
+- A major community-driven firmware update featuring new applications and significant improvements to **THE BEAST**.
+- Special recognition to **[Kal — @valleytechsolutions](https://github.com/valleytechsolutions)** for expanding POOM's Wi-Fi, BLE, network analysis and security capabilities.
+- This release also includes contributions from **[@l3allzh4ck](https://github.com/l3allzh4ck)**, bringing additional functionality and improvements to the POOM ecosystem.
+
+### THE BEAST — WIFI & BLE TOOLS
+
+- **WIFI ACTIONS:** Redesigned Wi-Fi operations with a simpler workflow: select an action, discover nearby targets, configure settings and start. Includes BAD MSG, ASSOC SLEEP, QUIET TIME, CHANNEL SWITCH, SAE COMMIT, PROBE REQUEST and AP CLONE.
+- **SPAM WIFI:** Unified Wi-Fi beacon broadcasting with saved SSIDs, random names, funny presets and Rick Roll.
+- **BLE DETECT:** Enhanced Bluetooth discovery with Apple Find My monitoring, iBeacon details and detection of potential Flipper, Flock, Meta and other BLE devices.
+- **FIND MY BEEP:** Discover compatible nearby Bluetooth trackers and request an audible alert from selected devices. Supports individual selection and BEEP ALL.
+- **SPAM BLE:** Added selectable BLE advertising modes for Apple Devices, Apple Juice, Sour Apple, Swift Pair, Samsung, Google Fast Pair, Flipper and All Families.
+- **WIFI GUARD:** Expanded Wi-Fi monitoring to identify suspicious activity and potential Pwnagotchi, Pineapple-like, multi-SSID and Flock devices.
+- **WIFI RECON:** Analyze relationships between access points, stations and probe requests to better understand nearby Wi-Fi activity.
+- **RF MOTION:** Experimental Wi-Fi CSI application that analyzes radio signal variations to identify changes in the surrounding RF environment.
+- **SCAN NET:** Discover devices on a connected network using ICMP and scan TCP ports (1–65535) to identify available services.
+
+### WARDRIVING NODE
+
+- Added **WARDRIVING NODE** to `THE BEAST`, allowing POOM to operate as an external ESP-NOW Wi-Fi scanning node for compatible wardriving systems.
+- Supports three integration modes:
+  - **BISCUIT NODE:** Connects POOM to a Biscuit Shop wardriving core.
+  - **JCMK NODE:** Integrates with JustCallMeKoko's dual-band wardriving system.
+  - **PIGLET NODE:** Supports the Hamspiced Piglet core protocol.
+- Supports **2.4 GHz and 5 GHz Wi-Fi scanning**, forwarding discovered network information to an external core responsible for GPS and WiGLE logging.
+- Added duplicate network filtering and an OLED interface displaying discovered networks, connection status, active channel and transmitted records.
+
+### CRACK HS — HANDSHAKE AUDITING
+
+- Added **CRACK HS** to `THE BEAST`, enabling on-device WPA/WPA2 password auditing using previously captured handshakes.
+- Includes three password auditing modes:
+  - **QUICK:** Tests common passwords with basic variations.
+  - **SMART:** Expands the search using additional password patterns and network-name variations.
+  - **SD LIST:** Supports custom password dictionaries stored on the microSD card.
+- Added **Crack History** to track previous attempts, avoid unnecessary repeated tests and remember successfully recovered passwords.
+- Designed for authorized security testing and identifying weak Wi-Fi credentials.
+
+### SYSTEM IMPROVEMENTS
+
+- Improved Wi-Fi and BLE resource management, scan handling and application cancellation.
+- Added more detailed runtime statistics and improved network discovery workflows.
+- Improved ESP32-C5 compatibility with **ESP-IDF v6.1**.
+- Fixed OLED font rendering issues affecting labels in applications such as SPECTRUM.
+- Improved application stability and integration with existing POOM features.
+
+### SPECIAL THANKS
+
+- Thanks to **Just Call Me Koko**, **Hedge / Biscuit Shop**, **Hamspiced / Piglet** and **Dragon Detector** for their open-source projects and protocol references.
+- Thanks to everyone testing, reporting issues and helping improve POOM.
+
+**POOM keeps evolving thanks to its community!**
+
 ## POOM 1.0.17
 
 ### 802.15.4 SNIFFER
