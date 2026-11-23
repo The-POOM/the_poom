@@ -135,3 +135,37 @@ between Wardrive and the stock radio apps on
 Device Inspector, Spectrum, BLE Detect and Fox Hunt BLE checks were accepted
 based on the tester's report. The COM5 monitor excerpt independently shows
 Spectrum starting its scanner successfully.
+
+## Upstream 1.0.18 merge and ESP-IDF v6.1 (hardware check passed)
+
+Upstream `main` at 1.0.18 (`742556e`) was merged into this branch as
+`d4d957c`. The only textual conflict was menu registration in
+`poom_menu.c`; both sides were kept, so WARDRIVE sits beside upstream's
+Wardriving Node and Security Audit entries. No Wardrive source changed. A
+review found no overlapping global symbols, SD paths, NVS namespaces or
+Kconfig names between Wardrive and the newly added upstream apps (Wardriving
+Node stores under `wardrive_node`; Wardrive uses `/sdcard/wardrive`).
+
+The owner built on Windows with ESP-IDF `v6.1` (release tag), upstream's
+`sdkconfig.defaults` and `sdkconfig.esp32c5.ram_optimization`, and a
+build-local defaults file setting RX 10 / BA 6 (see
+[build instructions](WARDRIVE_BUILD.md)). The compiled `sdkconfig.h` was
+verified to contain RX 10, BA 6, external mbedTLS allocation, ALWAYSINTERNAL
+512 and RESERVE_INTERNAL 32768 before flashing. Fresh v6.1 generation also
+selects 16/16, and hand-editing the generated sdkconfig yielded 2/2 in the
+compiled header, so that method is not used.
+
+Build `build-wardrive-1018`, app version `1.0-r18-77`: image 0x36fb00 bytes in
+the 0x3a0000 app slot, leaving 0x30500 (197888) bytes, or 5%. Upstream's
+`CONFIG_COMPILER_OPTIMIZATION_SIZE` more than offsets the apps added since
+1.0.16. HP SRAM static use is 214945 of 320928 bytes; external BSS is 34176.
+
+The owner reported that the full hardware checklist passed on this build:
+boot on `1.0-r18-77` / ESP-IDF v6.1 without errors; stock Device Inspector
+Wi-Fi/BLE, Spectrum, BLE Detect and Fox Hunt BLE; Wardrive GPS fix, combined
+Wi-Fi/BLE collection, pause/resume, background recording, session save, Saved
+Sessions scrolling, CSV creation, Wi-Fi download and WiGLE upload; repeat
+Wardrive ↔ stock radio app transitions without reset; and transitions between
+Wardrive and the 1.0.18 additions (Wardriving Node, Security Audit, Wi-Fi
+Actions) in both directions. These are owner-reported hardware results; the
+agent did not directly operate the POOM.

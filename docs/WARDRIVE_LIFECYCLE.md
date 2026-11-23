@@ -1,7 +1,8 @@
 # Wardrive lifecycle and stock integration
 
-This integration is based on upstream 1.0.16, commit
-`3533ee027efcf06a610265f3c4b4be8c73548fb5`.
+This integration is based on upstream 1.0.18, commit
+`742556e7deea0f5769fd9a63f332517ac26aa944` (originally developed on 1.0.16,
+`3533ee027efcf06a610265f3c4b4be8c73548fb5`).
 
 Wardrive is started by the menu action only. It has no boot hook, background
 service, global allocator policy, partition change or sdkconfig override.
