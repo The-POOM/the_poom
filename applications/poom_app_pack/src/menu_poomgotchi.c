@@ -26,6 +26,7 @@
 #define POOMGOTCHI_STACK              (2560U)
 #define POOMGOTCHI_TASK_PRIO          (4U)
 #define POOMGOTCHI_TARGET_MAX         (8U)
+#define POOMGOTCHI_HISTORY_MAX        (24U)    /* remember more captured BSSIDs than we chase per scan (#45) */
 #define POOMGOTCHI_CAPTURE_FILE_LEN   (21U)
 #define POOMGOTCHI_CAPTURE_MS         (20000U) /* dwell per target; longer gives a reconnect time to finish (#45) */
 #define POOMGOTCHI_RESULT_MS          (1500U)
@@ -79,7 +80,7 @@ typedef struct {
 
 typedef struct {
     poomgotchi_target_t targets[POOMGOTCHI_TARGET_MAX];
-    poomgotchi_history_t history[POOMGOTCHI_TARGET_MAX];
+    poomgotchi_history_t history[POOMGOTCHI_HISTORY_MAX];
     uint8_t history_replace_index;
 } poomgotchi_session_t;
 
@@ -172,7 +173,7 @@ static poomgotchi_history_t *poomgotchi_target_history_(void)
     poomgotchi_target_t *target = poomgotchi_target_meta_();
 
     if((s_session == NULL) || (target == NULL) ||
-       (target->history_index >= POOMGOTCHI_TARGET_MAX)) {
+       (target->history_index >= POOMGOTCHI_HISTORY_MAX)) {
         return NULL;
     }
     return &s_session->history[target->history_index];
@@ -402,7 +403,7 @@ static bool poomgotchi_ap_is_usable_(const wifi_ap_record_t *ap)
 static int poomgotchi_history_find_(const uint8_t bssid[6])
 {
     if((s_session == NULL) || (bssid == NULL)) return -1;
-    for(uint8_t i = 0U; i < POOMGOTCHI_TARGET_MAX; ++i) {
+    for(uint8_t i = 0U; i < POOMGOTCHI_HISTORY_MAX; ++i) {
         if(s_session->history[i].used &&
            (memcmp(s_session->history[i].bssid, bssid, 6U) == 0)) return i;
     }
@@ -415,14 +416,14 @@ static uint8_t poomgotchi_history_get_(const uint8_t bssid[6])
     if(found >= 0) return (uint8_t)found;
 
     uint8_t slot = POOMGOTCHI_HISTORY_NONE;
-    for(uint8_t i = 0U; i < POOMGOTCHI_TARGET_MAX; ++i) {
+    for(uint8_t i = 0U; i < POOMGOTCHI_HISTORY_MAX; ++i) {
         if(!s_session->history[i].used) {
             slot = i;
             break;
         }
     }
     if(slot == POOMGOTCHI_HISTORY_NONE) {
-        slot = s_session->history_replace_index++ % POOMGOTCHI_TARGET_MAX;
+        slot = s_session->history_replace_index++ % POOMGOTCHI_HISTORY_MAX;
     }
     (void)memset(&s_session->history[slot], 0, sizeof(s_session->history[slot]));
     (void)memcpy(s_session->history[slot].bssid, bssid, 6U);
@@ -525,8 +526,6 @@ static bool poomgotchi_send_deauth_(void)
     }
     s_last_deauth_ms = poomgotchi_now_ms_();
     ++s_stats.deauths;
-    printf("[poomgotchi] deauth x%u ch=%u\n", (unsigned)POOMGOTCHI_DEAUTH_BURST,
-           (unsigned)target->primary);
     poomgotchi_request_render_();
     return true;
 }
@@ -570,7 +569,6 @@ static void poomgotchi_start_capture_(void)
             s_capture_running = true;
             s_capture_started_ms = poomgotchi_now_ms_();
             ++s_stats.targets_tried;
-            printf("[poomgotchi] capture ch=%u\n", (unsigned)target->primary);
             s_screen = POOMGOTCHI_SCREEN_CAPTURE;
             poomgotchi_request_render_();
             return;
@@ -620,8 +618,6 @@ static void poomgotchi_finish_capture_(bool captured)
     poom_pcap_wifi_handshake_status_t hs = {0};
 
     (void)poom_pcap_manager_wifi_handshake_get_status(&hs);
-    printf("[poomgotchi] %s hs=%u pmk=%u\n", captured ? "cap" : "miss",
-           (unsigned)hs.valid_pair_count, (unsigned)hs.pmkid_count);
     poomgotchi_record_capture_observations_(&hs, captured);
     poomgotchi_remember_capture_file_();
     s_result_captured = captured;
