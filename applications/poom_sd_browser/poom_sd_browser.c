@@ -264,7 +264,7 @@ static esp_err_t poom_sd_browser_format_file_detail_name_(const char* input_name
     input_len = strlen(input_name);
     if(input_len <= POOM_SD_BROWSER_FILE_DETAIL_NAME_VISIBLE_CHARS)
     {
-        snprintf(out_name, out_name_len, "%s", input_name);
+        (void)strlcpy(out_name, input_name, out_name_len);
         return ESP_OK;
     }
 

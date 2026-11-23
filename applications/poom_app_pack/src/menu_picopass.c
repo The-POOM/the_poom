@@ -178,8 +178,8 @@ static const uint8_t* pp_raw_row(int row, char* label, size_t label_sz)
         default:
         {
             int blk = row - 4;
-            snprintf(label, label_sz, "B%02d",
-                     POOM_PICOPASS_PACS_CFG_BLOCK + blk);
+            snprintf(label, label_sz, "B%02u",
+                     (unsigned)(uint8_t)(POOM_PICOPASS_PACS_CFG_BLOCK + blk));
             return s_dump.blocks[blk];
         }
     }

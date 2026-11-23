@@ -43,6 +43,10 @@ static poom_wifi_scanner_ap_records_t s_poom_wifi_scanner_records = {0};
 esp_err_t poom_wifi_scanner_scan_configured(const wifi_scan_config_t *config)
 {
     esp_err_t status;
+    uint16_t count = POOM_WIFI_SCANNER_MAX_AP;
+
+    /* Failed/cancelled scans must never expose stale entries as fresh targets. */
+    (void)memset(&s_poom_wifi_scanner_records, 0, sizeof(s_poom_wifi_scanner_records));
 
     status = poom_wifi_ctrl_init_sta();
     if(status != ESP_OK)
@@ -50,8 +54,6 @@ esp_err_t poom_wifi_scanner_scan_configured(const wifi_scan_config_t *config)
         POOM_WIFI_SCANNER_PRINTF_E("poom_wifi_ctrl_init_sta failed: %s", esp_err_to_name(status));
         return status;
     }
-
-    s_poom_wifi_scanner_records.count = POOM_WIFI_SCANNER_MAX_AP;
 
     status = esp_wifi_clear_ap_list();
     if((status != ESP_OK) && (status != ESP_ERR_WIFI_NOT_INIT))
@@ -66,13 +68,15 @@ esp_err_t poom_wifi_scanner_scan_configured(const wifi_scan_config_t *config)
         return status;
     }
 
-    status = esp_wifi_scan_get_ap_records(&s_poom_wifi_scanner_records.count,
+    status = esp_wifi_scan_get_ap_records(&count,
                                           s_poom_wifi_scanner_records.records);
     if(status != ESP_OK)
     {
         POOM_WIFI_SCANNER_PRINTF_E("esp_wifi_scan_get_ap_records failed: %s", esp_err_to_name(status));
         return status;
     }
+
+    s_poom_wifi_scanner_records.count = count;
 
     POOM_WIFI_SCANNER_PRINTF_I("Found %u APs", s_poom_wifi_scanner_records.count);
     POOM_WIFI_SCANNER_PRINTF_D("Scan completed");

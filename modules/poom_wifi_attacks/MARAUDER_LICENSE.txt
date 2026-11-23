@@ -1,0 +1,38 @@
+Protocol attribution
+
+Bad Msg, Association Sleep, Channel Switch, Quiet Time, and initial SAE
+group-19 commit formats were adapted from ESP32 Marauder by Just Call Me Koko:
+https://github.com/justcallmekoko/ESP32Marauder
+Pinned develop commit: ef9a4bbb0ea53a2d0d3ed5b6c7bca590dadc20da
+Source: esp32_marauder/WiFiScan.h and esp32_marauder/WiFiScan.cpp.
+
+The native ESP-IDF task lifecycle, bounded run control, immutable frame builders,
+and PSA-based ECC integration are POOM adaptations. Initial SAE commit generation
+uses PSA-generated P-256 material. POOM also adapts the beacon announcement
+parameters: CSA count 1; Quiet count 1, period 0, duration 100 TU, offset 0. These
+changes are not claims of upstream behavior or physical-device acceptance.
+Initial SAE commit generation does not implement SAE anti-clogging retries or a complete authentication
+exchange. Driver acceptance is not proof that a client received a frame or
+changed behavior. No hardware or RF acceptance is implied by this port.
+
+MIT License
+
+Copyright (c) 2020 Just Call Me Koko
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

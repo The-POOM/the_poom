@@ -55,10 +55,19 @@ uint8_t poom_ieee802154_sniffer_get_channel(void);
  */
 int8_t poom_ieee802154_sniffer_get_recent_rssi(void);
 
+/** Returns the most recent frame LQI, or 0 when unavailable. */
+uint8_t poom_ieee802154_sniffer_get_recent_lqi(void);
+
 /**
  * @brief Returns the number of captured frames since the last start.
  */
 uint32_t poom_ieee802154_sniffer_get_packet_count(void);
+
+/** Returns frames dropped because the capture queue was full. */
+uint32_t poom_ieee802154_sniffer_get_drop_count(void);
+
+/** Returns the peak number of frames queued during this capture. */
+uint32_t poom_ieee802154_sniffer_get_queue_high_water(void);
 
 #ifdef __cplusplus
 }

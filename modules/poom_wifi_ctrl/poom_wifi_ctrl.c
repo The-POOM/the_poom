@@ -591,7 +591,9 @@ esp_err_t poom_wifi_ctrl_deinit(void)
         POOM_PRINTF_W("wifi deinit: %s", esp_err_to_name(err2));
     }
 
-    s_wifi.wifi_initialized = false;
+    /* Keep the initialized state on deinit failure so a caller can retry the
+     * actual driver teardown instead of receiving a false successful no-op. */
+    if(err2 == ESP_OK || err2 == ESP_ERR_WIFI_NOT_INIT) s_wifi.wifi_initialized = false;
     s_sta_connected = false;
     s_sta_has_ip = false;
 

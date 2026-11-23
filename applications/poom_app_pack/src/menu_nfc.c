@@ -859,7 +859,7 @@ static void menu_nfc_emv_format_aid_(const uint8_t* aid, size_t aid_len, char* o
 
     if(strlen(full) < out_len)
     {
-        (void)snprintf(out, out_len, "%s", full);
+        (void)strlcpy(out, full, out_len);
         return;
     }
 
@@ -2410,13 +2410,16 @@ static void menu_nfc_prepare_generic_scan_view_(void)
                    uid_compact);
     if(has_user_bytes && has_total_bytes)
     {
-        (void)snprintf(s_scan_meta->summary_lines[2],
-                       sizeof(s_scan_meta->summary_lines[2]),
+        char summary[24];
+        (void)snprintf(summary,
+                       sizeof(summary),
                        "R:%s N:%s %u/%u",
                        menu_nfc_scan_mode_str_(&s_scan_dump),
                        s_scan_ndef_known ? (s_scan_has_ndef ? "Y" : "N") : "U",
                        (unsigned)user_bytes,
                        (unsigned)total_bytes);
+        (void)strlcpy(s_scan_meta->summary_lines[2], summary,
+                      sizeof(s_scan_meta->summary_lines[2]));
     }
     else
     {

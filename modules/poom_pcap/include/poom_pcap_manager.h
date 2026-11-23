@@ -65,6 +65,8 @@ typedef enum
     POOM_PCAP_WIFI_CAPTURE_HANDSHAKE,
     /** Capture only WPS EAP (EAP-Expanded / WFA) frames over EAPOL. */
     POOM_PCAP_WIFI_CAPTURE_WPS,
+    /** Capture unprotected Authentication frames using the SAE algorithm (3). */
+    POOM_PCAP_WIFI_CAPTURE_SAE,
     POOM_PCAP_WIFI_CAPTURE_COUNT,
 } poom_pcap_wifi_capture_t;
 

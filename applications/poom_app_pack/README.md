@@ -24,20 +24,25 @@ The following tables follow the `s_apps_*` list order in
 | `CLI` | Opens the POOM console for application, NFC, configuration, and drone commands. It is used through the USB console; the OLED shows access instructions. | [menu_cli_nfc.c](src/menu_cli_nfc.c) |
 | `OPENTHREAD CLI` | Opens the OpenThread console to configure and inspect a Thread network. Shown only when `CONFIG_OPENTHREAD_ENABLED` and `CONFIG_OPENTHREAD_CLI` are enabled. | [menu_cli_ot.c](src/menu_cli_ot.c) |
 | `DEAUTH` | Scans Wi-Fi access points, lets the user select one, and runs active test modes, including deauthentication. | [menu_deauth.c](src/menu_deauth.c) |
+| `BAD MSG`, `ASSOC SLEEP`, `QUIET TIME`, `CHANNEL SWITCH`, `SAE COMMIT FLOOD`, `PROBE REQUEST FLOOD`, `AP CLONE SPAM` | Action-specific discovery, copied AP/client targets, explicit start and bounded duration. Bad Msg/Assoc Sleep each contain their client scope choice. | [action guide](../../docs/BEAST_MARAUDER_PORT.md) |
+| `FIND MY BEEP` | Select a current tag or BEEP ALL, then send one sound request per eligible identity. ATT results and audible output are distinct. | [protocol and UI](../../modules/poom_findmy_beep/README.md) |
+| `WIFI RECON` | Bounded AP/station/probe observation sessions, relationships and explicit SD reports. | [guide](../../docs/WIFI_OBSERVER.md) |
+| `CSI RF MOTION` | Selected-AP CSI calibration and experimental RF variation view for C5. | [guide](../../docs/CSI_RF_MOTION.md) |
 | `DEAUTH DET` | Passively detects deauthentication frames and shows alerts, event correlation, and detector settings. | [menu_deauth_detector.c](src/menu_deauth_detector.c) |
 | `KARMA` | Runs Wi-Fi probe-request response tests and shows the active SSID and session state. | [menu_karma.c](src/menu_karma.c) |
 | `SPAM WIFI` | Transmits Wi-Fi advertisements with different SSIDs for detection and advertisement-load testing. | [menu_ssid_spam.c](src/menu_ssid_spam.c) |
-| `SPAM BLE` | Transmits BLE advertisements from available profiles and lets the user change the transmit mode. | [menu_ble_spam.c](src/menu_ble_spam.c) |
+| `SPAM BLE` | Explicit-start Apple Devices/Juice, Sour Apple, Swift Pair, Samsung, Fast Pair, Flipper and All modes with bounded duration and checked cleanup. | [menu_ble_spam.c](src/menu_ble_spam.c) |
 | `CAPTIVE PORTAL` | Configures and runs an access point with a captive portal; network settings are prepared on the device. | [menu_captive.c](src/menu_captive.c) |
-| `BLE DETECT` | Lists nearby BLE devices with signal strength, details, and aliases. Includes `BLE DEVICES`, `TRACKERS`, and `WEARABLES` filters; signature matches are device-type indicators. | [menu_ble_detector.c](src/menu_ble_detector.c) |
+| `BLE DETECT` | Lists nearby BLE devices with signal strength, details, and aliases. Includes generic, tracker/wearable, FindMy, iBeacon, Flipper, Flock, Meta and HC-name candidate profiles plus measured report rate. | [menu_ble_detector.c](src/menu_ble_detector.c) |
 | `WIFI DETECT` | Lists Wi-Fi devices and filters `WIFI DEVICES`, `AP CLIENTS`, `FLOCK/ALPR`, and `IP CAMERAS`. Shows signal, details, and aliases; AP clients are inferred through passive observation. | [menu_wifi_detector.c](src/menu_wifi_detector.c) |
 | `SNIFFER` | Captures Wi-Fi, BLE, or IEEE 802.15.4/Zigbee traffic in PCAP format. Selects mode and channel, then shows whether output uses SD or UART. | [menu_poom_pcap.c](src/menu_poom_pcap.c) |
 | `SNNIFER RT` | Selects BLE or IEEE 802.15.4 capture for real-time analysis from a connected computer. IEEE 802.15.4 allows channel selection. | [menu_sniffer_rt.c](src/menu_sniffer_rt.c) |
 | `SCAN CHANNELS` | Shows per-channel activity for Wi-Fi or IEEE 802.15.4. Wi-Fi mode can lock a channel and show frames per second, retries, deauth frames, and frame-type distribution. | [menu_scanner_core.c](src/menu_scanner_core.c) |
 | `SPECTRUM` | Live Wi-Fi instrument: draws an RSSI trace with grid, peak hold, and cursor. LEFT/RIGHT switches to waterfall; UP/DOWN changes between 2.4 GHz and C5 5 GHz ranges; A pauses and B exits. | [menu_spectrum.c](src/menu_spectrum.c) |
 | `DEVICE INSPECTOR` | Passive, time-sliced observation summary. Alternates Wi-Fi, BLE, and IEEE 802.15.4 reception and shows unique Wi-Fi APs, unique BLE devices, and active IEEE 802.15.4 channels. It does not create SD files or PCAP captures. | [menu_device_inspector.c](src/menu_device_inspector.c) · [guide](README_DEVICE_INSPECTOR_WIFI_GUARD.md#device-inspector) |
-| `WIFI GUARD` | Passive Wi-Fi beacon-consistency and activity monitor. Warns about conflicting beacon identities and unusual AUTH, PROBE, CSA, EAPOL Logoff, or SAE frame bursts. It works without SD; reports are saved only when requested. | [menu_wifi_guard.c](src/menu_wifi_guard.c) · [guide](README_DEVICE_INSPECTOR_WIFI_GUARD.md#wifi-guard) |
-| `SCAN NET` | Discovers local-network devices through ARP and shows network parameters and results. | [menu_poom_wifi_arp.c](src/menu_poom_wifi_arp.c) |
+| `WIFI GUARD` | Passive Wi-Fi beacon-consistency and activity monitor. Warns about conflicting beacon identities and unusual AUTH, PROBE, CSA, EAPOL Logoff, or SAE frame bursts. It works without SD; reports are saved only when requested. | [menu_wifi_observer.c](src/menu_wifi_observer.c) · [guide](../../docs/WIFI_OBSERVER.md) |
+| `WARDRIVING NODE` | Pairs the POOM over ESP-NOW as a scanning node for an external wardriving core. `BISCUIT NODE` pairs with a Biscuit Shop core; `JCMK NODE` pairs with a JustCallMeKoko dual-band wardriver; `PIGLET NODE` pairs with a Piglet in Core mode. The POOM scans the 2.4 GHz and 5 GHz channels the core assigns and forwards every access point; the core adds GPS and writes the WiGLE log. The screen shows the core's logo (an animated pig for Piglet) and the number of unique networks picked up. | [menu_wardrive_node.c](src/menu_wardrive_node.c) |
+| `SCAN NET` | ARP/ICMP discovery, named TCP service presets and selected-host TCP ports 1–65535 with cooperative cancellation. | [menu_poom_wifi_arp.c](src/menu_poom_wifi_arp.c) |
 | `CLI ZIGBEE` | Opens the Zigbee console. Shown only when `CONFIG_ZB_ENABLED` is enabled. | [menu_cli_zigbee.c](src/menu_cli_zigbee.c) |
 | `HTTP LOAD` | Sends HTTP requests to a configured server to measure behaviour under load; parameters and counters are available on the device. | [menu_http_load_test.c](src/menu_http_load_test.c) |
 | `PROBE REQ` | Monitors Wi-Fi probe requests and shows an observation list with details. | [menu_sniffer_device.c](src/menu_sniffer_device.c) |
@@ -252,6 +257,8 @@ graph TD
     B --> B11[SCAN CHANNELS]
     B --> B12[SPECTRUM]
     B --> B13[DEVICE INSPECTOR]
+    B --> B13a[WIFI GUARD]
+    B --> B13b[WARDRIVING NODE]
     B --> B14[SCAN NET]
     B --> B15[CLI]
     B --> B16[HTTP LOAD]
@@ -378,6 +385,18 @@ This section expands each app with:
 - UI: cycles every three seconds through Wi-Fi, BLE, and IEEE 802.15.4. Shows unique Wi-Fi AP and BLE MAC counts plus the number of active IEEE 802.15.4 channels. **A** pauses/resumes and **B** stops.
 - I/O: OLED-only; it deliberately does not write SD files or start PCAP capture.
 - Memory: state exists only during the session in PSRAM and is released on exit.
+
+#### WARDRIVING NODE (`menu_wardrive_node.c`, `menu_wardrive_node_show()`)
+- What it is: an ESP-NOW wardriving node. The core owns GPS and WiGLE logging; the POOM is extra 2.4 GHz + 5 GHz scanning capacity.
+- Modes: `BISCUIT NODE` (Biscuit Shop core in plain-reply mode: node hello, role ack, `channels=...;dwell=...` plan, unicast records), `JCMK NODE` (JustCallMeKoko ESP32 dual-band wardriver core: binary ADMIN channel slice over its 40-channel table, broadcast records) and `PIGLET NODE` (Hamspiced Piglet in Core mode: `PIGLET1` marker, role + `channels=...` plan, unicast records). The core kind is read from its `CORE_REPLY`, so each mode prefers its own core kind and falls back to any core that answers.
+- Start/stop: with a Biscuit core the POOM pairs and then waits on channel 6 (`READY`, `START IN APP`) until the core assigns it the Wi-Fi role, and stops scanning if the role is taken away, like a Biscuit node. JCMK and Piglet nodes scan as soon as they are paired. Core messages outside the handshake are written to the serial log.
+- Piglet: the POOM identifies itself with the Piglet marker but no board type or firmware version, so a Piglet core lists it as a Piglet node and never offers it a Piglet firmware update.
+- Protocol: 212-byte `ENOW` frames on home channel 6. Records are `BSSID,SSID,[AUTH],CHANNEL,RSSI,W`; SSID commas become `_`. A BSSID is forwarded again only after it leaves the 256-entry recent history, as on JCMK nodes. JCMK core encryption must be off (its default).
+- Radio: after each channel scan the radio is back on channel 6 to forward results; after each full pass the node sends a heartbeat and listens 300 ms for a new assignment. Empty channels are left after half the dwell. If the core is silent for 30 s the node probes it, and after 120 s it searches again.
+- UI: `UP/DOWN` picks the mode, `A` starts and `B` stops. The run screen shows the Biscuit Shop or JCMK logo, or for `PIGLET NODE` a pig that walks, dances when the core pairs and twerks when new networks come in, plus unique networks picked up, link state, current channel and records sent. The pig is original pixel art for the POOM.
+- I/O: OLED and serial logs only; nothing is written to SD.
+- Memory: session state and the unique-BSSID table (8192 entries in PSRAM, 1024 without PSRAM) exist only while the app is open.
+- Exit/return: stops ESP-NOW and Wi-Fi, then publishes `poom/menu/resume`.
 
 #### SCAN NET (`menu_poom_wifi_arp.c`, `menu_poom_wifi_arp_show()`)
 - What it is: local network discovery/ARP tooling for diagnostics on authorized networks.

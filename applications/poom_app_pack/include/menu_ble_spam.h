@@ -3,6 +3,7 @@
 
 #ifndef MENU_BLE_SPAM_H
 #define MENU_BLE_SPAM_H
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,6 +14,8 @@ extern "C" {
  * @return void
  */
 void menu_ble_spam_display(void);
+void menu_ble_spam_stop(void);
+bool menu_ble_spam_is_active(void);
 
 #ifdef __cplusplus
 }

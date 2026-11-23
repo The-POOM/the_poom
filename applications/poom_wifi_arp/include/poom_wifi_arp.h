@@ -14,6 +14,8 @@ extern "C" {
 
 #include "esp_err.h"
 
+typedef bool (*poom_wifi_arp_cancel_cb_t)(void *user);
+
 /**
  * @brief ARP scan host entry (IPv4 + MAC).
  */
@@ -22,6 +24,8 @@ typedef struct
     char ip[16];      /**< "xxx.xxx.xxx.xxx" */
     uint8_t mac[6];   /**< MAC address */
     bool is_active;   /**< true when host responded */
+    bool mac_known;
+    uint32_t ping_rtt_ms;
 } poom_wifi_arp_scan_host_t;
 
 /**
@@ -35,7 +39,42 @@ typedef struct
     size_t num_active_hosts;          /**< Output: number of active hosts found. */
     size_t max_hosts;                 /**< Capacity of hosts[]. */
     char subnet_prefix[16];           /**< Output: e.g. "192.168.1." */
+    poom_wifi_arp_cancel_cb_t cancelled;
+    void *cancel_user;
 } poom_wifi_arp_scan_ctx_t;
+
+typedef struct {
+    uint32_t attempted, completed, found, errors, timed_out;
+    uint32_t total, elapsed_ms;
+    uint32_t first_ipv4, last_ipv4; /* host byte order for ping scope */
+    bool scope_limited;
+    bool cancelled;
+    int last_socket_error;
+} poom_wifi_arp_progress_t;
+
+typedef struct {
+    poom_wifi_arp_cancel_cb_t cancelled;
+    void (*progress)(const poom_wifi_arp_progress_t *progress, void *user);
+    void *user;
+} poom_wifi_arp_control_t;
+
+#define POOM_WIFI_ARP_TCP_BITMAP_BYTES (8192U)
+#define POOM_WIFI_ARP_TCP_PARALLEL (8U)
+typedef struct {
+    poom_wifi_arp_progress_t progress;
+    uint8_t open_bitmap[POOM_WIFI_ARP_TCP_BITMAP_BYTES];
+} poom_wifi_arp_tcp_scan_result_t;
+
+/* The caller owns worker lifetime, control context and output storage. Both
+ * synchronous scans close every socket before returning, including cancel. */
+esp_err_t poom_wifi_arp_ping_subnet(poom_wifi_arp_scan_ctx_t *ctx, const poom_wifi_arp_control_t *control);
+esp_err_t poom_wifi_arp_scan_tcp_range(const char *target_ip, uint16_t first_port,
+                                     uint16_t last_port, const poom_wifi_arp_control_t *control,
+                                     poom_wifi_arp_tcp_scan_result_t *out);
+bool poom_wifi_arp_tcp_port_open(const poom_wifi_arp_tcp_scan_result_t *result, uint16_t port);
+/* Connected STA IPv4 and netmask in host byte order; does not send traffic. */
+esp_err_t poom_wifi_arp_get_network(uint32_t *address, uint32_t *netmask);
+bool poom_wifi_arp_lookup_mac(const char *ip, uint8_t mac[6]);
 
 /** @brief Max number of ports recorded in a host probe. */
 #define POOM_WIFI_ARP_PROBE_MAX_PORTS (16U)
@@ -114,6 +153,8 @@ esp_err_t poom_wifi_arp_probe_ssh_port(const char *target_ip, uint16_t port, boo
  * @return ESP_OK on success, otherwise an ESP error code.
  */
 esp_err_t poom_wifi_arp_probe_host_services(const char *target_ip, poom_wifi_arp_service_probe_result_t *out);
+esp_err_t poom_wifi_arp_probe_host_services_cancelable(const char *target_ip,
+    poom_wifi_arp_service_probe_result_t *out, poom_wifi_arp_cancel_cb_t cancelled, void *user);
 
 #ifdef __cplusplus
 }
