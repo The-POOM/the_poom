@@ -46,6 +46,9 @@ typedef struct
     rmt_symbol_word_t* symbols;
     size_t symbol_capacity;
     const char* tag;
+    uint8_t reserved_gpio; /* GPIO + 1 while reserved */
+    bool rc5_toggle;
+    bool rc6_toggle;
 } ir_tx_handle_t;
 
 ir_tx_config_t ir_tx_default_config(void);
@@ -54,6 +57,11 @@ esp_err_t ir_tx_init(ir_tx_handle_t* transmitter, const ir_tx_config_t* config, 
 esp_err_t ir_tx_deinit(ir_tx_handle_t* transmitter);
 
 esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32_t address, uint32_t command);
+
+/* Sends one logical press and waits for completion. Full NECext uses the
+ * two command bytes verbatim, as in Flipper parsed files. */
+esp_err_t ir_tx_send_press(ir_tx_handle_t* transmitter, ir_protocol_t protocol,
+                           uint32_t address, uint32_t command, bool full_nec_ext);
 
 /* Sends the complete RAW capture and waits for completion before returning.
  * The caller retains ownership of signal. Parsed TX carrier settings are preserved. */

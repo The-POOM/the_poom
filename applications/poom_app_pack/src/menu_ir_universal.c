@@ -20,6 +20,7 @@
 #include "ir_dec.h"
 #include "ir_rcv.h"
 #include "ir_tx.h"
+#include "ir_file.h"
 #include "nvs.h"
 #include "poom_led_rainbow.h"
 #include "poom_sd_browser.h"
@@ -196,17 +197,9 @@ static bool s_menu_ir_univ_led_owned = false;
 
 #define MENU_IR_UNIV_SD_PATH_MAX (256U)
 #define MENU_IR_UNIV_REMOTES_DIR "/ir/remotes"
-#define MENU_IR_UNIV_SD_MAX_COMMANDS (48U)
+#define MENU_IR_UNIV_SD_MAX_COMMANDS (255U)
 #define MENU_IR_UNIV_SD_NAME_MAX (20U)
 #define MENU_IR_UNIV_SD_TITLE_MAX (21U)
-
-typedef struct
-{
-    char name[MENU_IR_UNIV_SD_NAME_MAX + 1U];
-    menu_ir_univ_proto_t proto;
-    uint32_t address;
-    uint32_t command;
-} menu_ir_univ_sd_cmd_t;
 
 static char s_menu_ir_univ_sd_selected_path[MENU_IR_UNIV_SD_PATH_MAX] = {0};
 static bool s_menu_ir_univ_sd_path_pending = false;
@@ -215,8 +208,9 @@ static bool s_menu_ir_univ_sd_select_for_learn = false;
 static bool s_menu_ir_univ_sd_bad_ext_pending = false;
 static char s_menu_ir_univ_sd_start_dir[MENU_IR_UNIV_SD_PATH_MAX] = "/sdcard/ir/remotes";
 static char s_menu_ir_univ_sd_title[MENU_IR_UNIV_SD_TITLE_MAX + 1U] = {0};
-static menu_ir_univ_sd_cmd_t* s_menu_ir_univ_sd_cmds = NULL;
+static ir_file_command_t* s_menu_ir_univ_sd_cmds = NULL;
 static uint8_t s_menu_ir_univ_sd_cmd_count = 0U;
+static bool s_menu_ir_univ_sd_full_nec_ext;
 
 static void menu_ir_univ_draw_sd_commands_(const menu_ir_univ_state_t* s);
 static bool menu_ir_univ_sd_load_file_(const char* abs_path);
@@ -550,7 +544,7 @@ static void menu_ir_univ_draw_sd_commands_(const menu_ir_univ_state_t* s)
         }
 
         const int16_t y = (int16_t)(list_y0 + (int16_t)row * row_step);
-        const menu_ir_univ_sd_cmd_t* cmd = &s_menu_ir_univ_sd_cmds[idx];
+        const ir_file_command_t* cmd = &s_menu_ir_univ_sd_cmds[idx];
 
         poom_arduboy_set_cursor(2, y);
         (void)poom_arduboy_print(cmd->name);
@@ -978,72 +972,6 @@ static void menu_ir_univ_launch_sd_browser_and_handover_(void)
 }
 
 /**
- * @brief Parses input data for this menu module.
- *
- * @param[in] s Parameter passed to the helper.
- * @param[in] out_byte Parameter passed to the helper.
- * @return bool
- */
-static bool menu_ir_univ_sd_parse_hex_byte_(const char* s, uint8_t* out_byte)
-{
-    if((s == NULL) || (out_byte == NULL))
-    {
-        return false;
-    }
-
-    unsigned int v = 0U;
-    if(sscanf(s, " %2x", &v) != 1)
-    {
-        return false;
-    }
-    if(v > 0xFFU)
-    {
-        return false;
-    }
-    *out_byte = (uint8_t)v;
-    return true;
-}
-
-/**
- * @brief Parses input data for this menu module.
- *
- * @param[in] s Parameter passed to the helper.
- * @param[in] out_bytes Parameter passed to the helper.
- * @return bool
- */
-static bool menu_ir_univ_sd_parse_hex4_(const char* s, uint8_t out_bytes[4])
-{
-    const char* p = s;
-
-    if((p == NULL) || (out_bytes == NULL))
-    {
-        return false;
-    }
-
-    for(int i = 0; i < 4; i++)
-    {
-        while((*p == ' ') || (*p == '\t'))
-        {
-            p++;
-        }
-        if(*p == '\0')
-        {
-            return false;
-        }
-        if(!menu_ir_univ_sd_parse_hex_byte_(p, &out_bytes[i]))
-        {
-            return false;
-        }
-        while((*p != '\0') && (*p != ' ') && (*p != '\t') && (*p != '\r') && (*p != '\n'))
-        {
-            p++;
-        }
-    }
-
-    return true;
-}
-
-/**
  * @brief Internal helper for `menu_ir_univ_sd_set_title_from_text`.
  *
  * @param[in] text Parameter passed to the helper.
@@ -1152,150 +1080,88 @@ static void menu_ir_univ_sd_set_title_from_path_(const char* abs_path)
  * @param[in] abs_path Parameter passed to the helper.
  * @return bool
  */
+/* Read title metadata before the first command. Old POOM exports store an
+ * 8-bit NECext command and rely on the transmitter to add the complement. */
+static bool menu_ir_univ_sd_read_header_(FILE* file, bool set_title)
+{
+    char line[96];
+    bool full_nec_ext = false;
+    long offset;
+    while((offset = ftell(file)) >= 0 && fgets(line, sizeof(line), file))
+    {
+        if(strncmp(line, "name:", 5) == 0)
+        {
+            (void)fseek(file, offset, SEEK_SET);
+            break;
+        }
+        line[strcspn(line, "\r\n")] = '\0';
+        if(strcmp(line, "# POOM IR IDENTIFY") == 0) full_nec_ext = true;
+        else if(set_title) menu_ir_univ_sd_set_title_from_comment_(line);
+    }
+    return full_nec_ext;
+}
+
 static bool menu_ir_univ_sd_load_file_(const char* abs_path)
 {
-    FILE* f;
-    char line[96];
-
+    free(s_menu_ir_univ_sd_cmds);
+    s_menu_ir_univ_sd_cmds = NULL;
     s_menu_ir_univ_sd_cmd_count = 0U;
     s_menu_ir_univ_sd_title[0] = '\0';
-    if (s_menu_ir_univ_sd_cmds != NULL)
+    if(!abs_path || !*abs_path) return false;
+
+    FILE* file = fopen(abs_path, "r");
+    if(!file) return false;
+    s_menu_ir_univ_sd_full_nec_ext = menu_ir_univ_sd_read_header_(file, true);
+    char* line = malloc(IR_FILE_LINE_SIZE);
+    ir_raw_signal_t* raw = malloc(IR_FILE_RAW_SIZE);
+    ir_file_command_t cmd;
+    unsigned capacity = 0;
+    while(line && raw && s_menu_ir_univ_sd_cmd_count < MENU_IR_UNIV_SD_MAX_COMMANDS &&
+          ir_file_read(file, line, raw, &cmd))
     {
-        (void)memset(s_menu_ir_univ_sd_cmds, 0, MENU_IR_UNIV_SD_MAX_COMMANDS * sizeof(s_menu_ir_univ_sd_cmds[0]));
+        if(s_menu_ir_univ_sd_full_nec_ext && !ir_file_command_valid(&cmd)) continue;
+        if(s_menu_ir_univ_sd_cmd_count == capacity)
+        {
+            capacity += 16;
+            ir_file_command_t* grown = realloc(s_menu_ir_univ_sd_cmds, capacity * sizeof(cmd));
+            if(!grown) break;
+            s_menu_ir_univ_sd_cmds = grown;
+        }
+        s_menu_ir_univ_sd_cmds[s_menu_ir_univ_sd_cmd_count++] = cmd;
     }
+    free(raw);
+    free(line);
+    fclose(file);
 
-    if((abs_path == NULL) || (abs_path[0] == '\0'))
-    {
-        return false;
-    }
-
-    f = fopen(abs_path, "r");
-    if(f == NULL)
-    {
-        return false;
-    }
-
-    char cur_name[MENU_IR_UNIV_SD_NAME_MAX + 1U] = {0};
-    char cur_type[16] = {0};
-    char cur_proto[16] = {0};
-    uint8_t cur_addr[4] = {0};
-    uint8_t cur_cmd[4] = {0};
-    bool have_name = false;
-    bool have_type = false;
-    bool have_proto = false;
-    bool have_addr = false;
-    bool have_cmd = false;
-
-    while(fgets(line, (int)sizeof(line), f) != NULL)
-    {
-        size_t n = strlen(line);
-        while((n > 0U) && ((line[n - 1U] == '\r') || (line[n - 1U] == '\n')))
-        {
-            line[n - 1U] = '\0';
-            n--;
-        }
-
-        if(line[0] == '#')
-        {
-            menu_ir_univ_sd_set_title_from_comment_(line);
-            continue;
-        }
-
-        if((strncmp(line, "name:", 5) == 0) || (strncmp(line, "name: ", 6) == 0))
-        {
-            const char* v = strchr(line, ':');
-            v = (v != NULL) ? (v + 1) : "";
-            while((*v == ' ') || (*v == '\t'))
-            {
-                v++;
-            }
-            (void)snprintf(cur_name, sizeof(cur_name), "%.*s", (int)MENU_IR_UNIV_SD_NAME_MAX, v);
-            have_name = (cur_name[0] != '\0');
-        }
-        else if((strncmp(line, "type:", 5) == 0) || (strncmp(line, "type: ", 6) == 0))
-        {
-            const char* v = strchr(line, ':');
-            v = (v != NULL) ? (v + 1) : "";
-            while((*v == ' ') || (*v == '\t'))
-            {
-                v++;
-            }
-            (void)snprintf(cur_type, sizeof(cur_type), "%.*s", 15, v);
-            have_type = (cur_type[0] != '\0');
-        }
-        else if((strncmp(line, "protocol:", 9) == 0) || (strncmp(line, "protocol: ", 10) == 0))
-        {
-            const char* v = strchr(line, ':');
-            v = (v != NULL) ? (v + 1) : "";
-            while((*v == ' ') || (*v == '\t'))
-            {
-                v++;
-            }
-            (void)snprintf(cur_proto, sizeof(cur_proto), "%.*s", 15, v);
-            have_proto = (cur_proto[0] != '\0');
-        }
-        else if((strncmp(line, "address:", 8) == 0) || (strncmp(line, "address: ", 9) == 0))
-        {
-            const char* v = strchr(line, ':');
-            v = (v != NULL) ? (v + 1) : "";
-            have_addr = menu_ir_univ_sd_parse_hex4_(v, cur_addr);
-        }
-        else if((strncmp(line, "command:", 8) == 0) || (strncmp(line, "command: ", 9) == 0))
-        {
-            const char* v = strchr(line, ':');
-            v = (v != NULL) ? (v + 1) : "";
-            have_cmd = menu_ir_univ_sd_parse_hex4_(v, cur_cmd);
-        }
-
-        if(have_name && have_type && have_proto && have_addr && have_cmd)
-        {
-            if(strcasecmp(cur_type, "parsed") == 0)
-            {
-                menu_ir_univ_sd_cmd_t* out = NULL;
-                menu_ir_univ_proto_t proto = MENU_IR_UNIV_PROTO_NONE;
-
-                (void)ir_protocol_parse_name(cur_proto, (ir_protocol_t*)&proto);
-
-                if((proto != MENU_IR_UNIV_PROTO_NONE) &&
-                   (s_menu_ir_univ_sd_cmds != NULL) &&
-                   (s_menu_ir_univ_sd_cmd_count < MENU_IR_UNIV_SD_MAX_COMMANDS))
-                {
-                    out = &s_menu_ir_univ_sd_cmds[s_menu_ir_univ_sd_cmd_count];
-                    (void)snprintf(out->name, sizeof(out->name), "%s", cur_name);
-                    out->proto = proto;
-                    out->address = (uint32_t)cur_addr[0] |
-                        ((uint32_t)cur_addr[1] << 8) |
-                        ((uint32_t)cur_addr[2] << 16) |
-                        ((uint32_t)cur_addr[3] << 24);
-                    out->command = (uint32_t)cur_cmd[0] |
-                        ((uint32_t)cur_cmd[1] << 8) |
-                        ((uint32_t)cur_cmd[2] << 16) |
-                        ((uint32_t)cur_cmd[3] << 24);
-                    s_menu_ir_univ_sd_cmd_count++;
-                }
-            }
-
-            have_name = false;
-            have_type = false;
-            have_proto = false;
-            have_addr = false;
-            have_cmd = false;
-            cur_name[0] = '\0';
-            cur_type[0] = '\0';
-            cur_proto[0] = '\0';
-            (void)memset(cur_addr, 0, sizeof(cur_addr));
-            (void)memset(cur_cmd, 0, sizeof(cur_cmd));
-        }
-    }
-
-    (void)fclose(f);
-
-    if(s_menu_ir_univ_sd_title[0] == '\0')
-    {
-        menu_ir_univ_sd_set_title_from_path_(abs_path);
-    }
-
+    if(!s_menu_ir_univ_sd_title[0]) menu_ir_univ_sd_set_title_from_path_(abs_path);
     return s_menu_ir_univ_sd_cmd_count > 0U;
+}
+
+static esp_err_t menu_ir_univ_sd_send_(ir_tx_handle_t* tx, const ir_file_command_t* cmd)
+{
+    if(!cmd->raw)
+    {
+        return s_menu_ir_univ_sd_full_nec_ext
+            ? ir_file_send(tx, cmd, NULL, true)
+            : ir_tx_send(tx, cmd->protocol, cmd->address, cmd->command);
+    }
+    FILE* file = fopen(s_menu_ir_univ_sd_selected_path, "r");
+    if(!file) return ESP_ERR_NOT_FOUND;
+    char* line = malloc(IR_FILE_LINE_SIZE);
+    ir_raw_signal_t* raw = malloc(IR_FILE_RAW_SIZE);
+    ir_file_command_t loaded;
+    esp_err_t result = ESP_ERR_NO_MEM;
+    if(line && raw)
+    {
+        result = ir_file_read_at(file, line, raw, &loaded, cmd->offset) && loaded.raw &&
+                 strcmp(loaded.name, cmd->name) == 0
+            ? ir_file_send(tx, &loaded, raw, false)
+            : ESP_ERR_INVALID_RESPONSE;
+    }
+    free(raw);
+    free(line);
+    fclose(file);
+    return result;
 }
 
 typedef enum
@@ -1561,10 +1427,22 @@ static bool menu_ir_univ_sd_append_learned_code_(const char* abs_path, const men
         return false;
     }
 
-    f = fopen(abs_path, "a");
+    f = fopen(abs_path, "a+");
     if(f == NULL) return false;
+    rewind(f);
+    uint32_t command_value = code->command;
+    if(code->protocol == IR_PROTOCOL_NEC_EXT && menu_ir_univ_sd_read_header_(f, false))
+    {
+        command_value &= 0xFFU;
+        command_value |= (command_value ^ 0xFFU) << 8U;
+    }
+    if(fseek(f, 0, SEEK_END) != 0)
+    {
+        fclose(f);
+        return false;
+    }
     address = (const uint8_t*)&code->address;
-    command = (const uint8_t*)&code->command;
+    command = (const uint8_t*)&command_value;
     (void)fprintf(f,
                   "\nname: %s\ntype: parsed\nprotocol: %s\n"
                   "address: %02X %02X %02X %02X\n"
@@ -1820,18 +1698,6 @@ static void menu_ir_univ_task_(void* arg)
     s.right_down = false;
     (void)memset(&s.pending_code, 0, sizeof(s.pending_code));
     menu_ir_univ_load_remote_name_(s.remote_name, sizeof(s.remote_name));
-
-    free(s_menu_ir_univ_sd_cmds);
-    s_menu_ir_univ_sd_cmds = (menu_ir_univ_sd_cmd_t*)calloc(MENU_IR_UNIV_SD_MAX_COMMANDS, sizeof(*s_menu_ir_univ_sd_cmds));
-    if(s_menu_ir_univ_sd_cmds == NULL)
-    {
-        menu_ir_univ_draw_status_("No RAM", "IR SD cache", " ");
-        vTaskDelay(pdMS_TO_TICKS(MENU_IR_UNIV_ERROR_HOLD_MS));
-        menu_ir_univ_exit_();
-        s_menu_ir_univ_task = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
 
     s_menu_ir_univ_button_queue = xQueueCreate(MENU_IR_UNIV_BUTTON_QUEUE_DEPTH, sizeof(menu_ir_univ_button_msg_t));
     if(s_menu_ir_univ_button_queue == NULL)
@@ -2449,7 +2315,7 @@ static void menu_ir_univ_task_(void* arg)
                 {
                     if(s_menu_ir_univ_sd_cmd_count > 0U)
                     {
-                        const menu_ir_univ_sd_cmd_t* cmd = &s_menu_ir_univ_sd_cmds[s.sd_selected];
+                        const ir_file_command_t* cmd = &s_menu_ir_univ_sd_cmds[s.sd_selected];
 
                         if(!transmitter_ready)
                         {
@@ -2464,8 +2330,7 @@ static void menu_ir_univ_task_(void* arg)
                             transmitter_ready = true;
                         }
 
-                        esp_err_t send_err =
-                            ir_tx_send(&transmitter, (ir_protocol_t)cmd->proto, cmd->address, cmd->command);
+                        esp_err_t send_err = menu_ir_univ_sd_send_(&transmitter, cmd);
 
                         if(send_err == ESP_OK)
                         {
