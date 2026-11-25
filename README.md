@@ -81,7 +81,7 @@ idf.py build
 idf.py flash monitor
 ```
 
-See [IR Discovery](docs/IR_IDENTIFY.md) for TV remote identification and [Remote Suite](docs/REMOTE_SUITE.md) for custom button layouts.
+See [IR Discovery](docs/IR_DISCOVERY.md) for TV remote identification and [Remote Suite](docs/REMOTE_SUITE.md) for custom button layouts.
 
 ## Security and Legal
 
