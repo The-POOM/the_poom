@@ -41,9 +41,9 @@ The checkout at `d126fb1b6f1e114c52b4a8c19839ea65e3a9c24d` produced 93 Mute sign
 
 ## Identify from standby
 
-Open **THE ZEN → IR DISCOVERY** and select **Power On**. Put the TV in standby and press **A** at the group prompt. POOM tests the group automatically, pausing 1.5 seconds between signals. Press **A** as soon as the standby light changes or the TV starts to turn on. If the group finishes, answer **YES** if the TV powered on at any point, **NO** to advance, or **REPEAT** to retest the group. Use **B** to stop.
+Open **THE ZEN → IR DISCOVERY** and select **Power On**. Put the TV in standby and press **A** at the group prompt. POOM tests the group automatically, pausing 0.75 seconds between signals. Press **A** as soon as the standby light changes or the TV starts to turn on. If the group finishes, answer **YES** if the TV powered on at any point, **NO** to advance, or **REPEAT** to retest the group. Use **B** to stop.
 
-POOM narrows a positive group and asks you to put the TV back in standby before starting the next group. Once three or fewer candidates remain, send and confirm each individually. A confirmed candidate opens the compatible profile list. If needed, **SLOW RETRY** uses a three-second gap. Dedicated Power On signals come first in the index, followed by power toggles, which can also turn a running TV off.
+POOM narrows a positive group and asks you to put the TV back in standby before starting the next group. Once three or fewer candidates remain, send and confirm each individually. A confirmed candidate opens the compatible profile list. If needed, **SLOW RETRY** uses a 1.5-second gap. Dedicated Power On signals come first in the index, followed by power toggles, which can also turn a running TV off.
 
 For direct button shortcuts, import the saved Flipper file in [Remote Suite](REMOTE_SUITE.md).
 

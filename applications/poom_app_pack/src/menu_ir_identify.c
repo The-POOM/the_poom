@@ -1060,8 +1060,12 @@ static void run_identify(identify_t* app)
         return;
     }
 
-    const unsigned normal_gap_ms = app->power_on ? 1500U : 350U;
-    const unsigned slow_gap_ms = app->power_on ? 3000U : 800U;
+    /* A running TV ignores a discrete Power On, and a HIT confirms every
+     * candidate in the tested prefix individually. The gap only has to keep
+     * the responsible signal within the last RECENT_COUNT sends while the
+     * standby light changes and the user reacts. */
+    const unsigned normal_gap_ms = app->power_on ? 750U : 350U;
+    const unsigned slow_gap_ms = app->power_on ? 1500U : 800U;
     app->gap = pdMS_TO_TICKS(normal_gap_ms);
     const char* const retry[] = {"SLOW RETRY", "RESTART", "VIEW OTHER HITS"};
     while(true)
