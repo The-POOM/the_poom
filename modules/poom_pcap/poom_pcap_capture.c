@@ -20,6 +20,7 @@
 #include "sdkconfig.h"
 
 #include "esp_err.h"
+#include "esp_timer.h"
 
 #include "poom_ble_scan.h"
 #include "poom_wifi_ctrl.h"
@@ -127,7 +128,6 @@ typedef struct
     poom_pcap_handshake_client_t clients[POOM_PCAP_HANDSHAKE_CLIENT_MAX];
     uint8_t pmkid_count;
     uint8_t valid_pair_count;
-    uint16_t eapol_frame_count;
     uint16_t deauth_count;
     bool has_beacon;
     bool hash22000_saved;
@@ -137,6 +137,16 @@ typedef struct
 
 static poom_pcap_handshake_state_t *s_hs = NULL;
 static poom_pcap_wifi_handshake_status_t s_hs_status = {0};
+
+/* "Focus" client for the RX activity signal: the station the capture screen is
+ * watching. Tracks the time of the last frame seen to/from it so the UI can
+ * show whether that client is still exchanging traffic. */
+static uint8_t s_hs_focus_client[6] = {0};
+static bool s_hs_focus_valid = false;
+static int64_t s_hs_focus_last_us = 0; /* 0 = not seen since focus was set */
+/* Path of the current handshake .pcap, kept so the session's files can be
+ * discarded on stop if no valid handshake was ever written. */
+static char s_hs_pcap_path[160] = {0};
 
 static bool poom_pcap_mem_nonzero_(const uint8_t *data, size_t len)
 {
@@ -217,7 +227,6 @@ static void poom_pcap_handshake_status_update_(void)
     }
 
     s_hs_status.pmkid_count = s_hs->pmkid_count;
-    s_hs_status.eapol_frame_count = s_hs->eapol_frame_count;
     s_hs_status.deauth_count = s_hs->deauth_count;
     s_hs_status.has_beacon = s_hs->has_beacon;
     s_hs_status.hash22000_saved = s_hs->hash22000_saved;
@@ -259,6 +268,9 @@ static esp_err_t poom_pcap_handshake_reset_(const uint8_t *target_bssid)
 {
     poom_pcap_handshake_free_();
     memset(&s_hs_status, 0, sizeof(s_hs_status));
+    /* The focus client is (re)set by the caller after the capture starts. */
+    s_hs_focus_valid = false;
+    s_hs_focus_last_us = 0;
 
     s_hs = calloc(1U, sizeof(*s_hs));
     if (s_hs == NULL)
@@ -838,12 +850,6 @@ static void poom_pcap_handshake_parse_eapol_(const uint8_t *frame, size_t len)
         return;
     }
 
-    if(s_hs->eapol_frame_count < UINT16_MAX)
-    {
-        s_hs->eapol_frame_count++;
-    }
-    poom_pcap_handshake_status_update_();
-
     const uint8_t *eapol = &frame[off];
     const size_t eapol_avail = len - off;
     if (eapol_avail < 99U || eapol[1] != POOM_PCAP_EAPOL_TYPE_KEY)
@@ -1035,6 +1041,8 @@ static void poom_pcap_handshake_finalize_(void)
     {
         return;
     }
+    /* Remember the path so the session can be discarded on stop if empty. */
+    (void)snprintf(s_hs_pcap_path, sizeof(s_hs_pcap_path), "%s", pcap_path);
 
     if (poom_pcap_replace_ext_(pcap_path, ".22000", out_path, sizeof(out_path)))
     {
@@ -1047,6 +1055,47 @@ static void poom_pcap_handshake_finalize_(void)
     }
 
     poom_pcap_handshake_status_update_();
+}
+
+/* On stop, drop a capture that produced no usable handshake: if the session's
+ * .22000 is empty or missing, delete both it and the (now useless) .pcap, so the
+ * card only keeps captures with a crackable hash. Deletion is gated strictly on
+ * the .22000 being provably empty — a non-empty hash file is never touched. */
+static void poom_pcap_handshake_discard_if_empty_(void)
+{
+    char path22000[160];
+    long size = -1;
+    FILE *file;
+
+    if (s_hs_pcap_path[0] == '\0')
+    {
+        return;
+    }
+
+    if (poom_pcap_replace_ext_(s_hs_pcap_path, ".22000", path22000, sizeof(path22000)))
+    {
+        file = fopen(path22000, "r");
+        if (file != NULL)
+        {
+            if (fseek(file, 0, SEEK_END) == 0)
+            {
+                size = ftell(file);
+            }
+            (void)fclose(file);
+        }
+        else
+        {
+            size = 0; /* no hash file written at all */
+        }
+
+        if (size == 0)
+        {
+            (void)remove(path22000);
+            (void)remove(s_hs_pcap_path);
+        }
+    }
+
+    s_hs_pcap_path[0] = '\0';
 }
 
 /**
@@ -1273,6 +1322,35 @@ static bool poom_pcap_wifi_should_capture_(const uint8_t *frame, size_t len)
  * Receives 802.11 frames from the ESP-IDF WiFi driver and forwards them to
  * `poom_pcap_manager_write_packet()` (which adds radiotap for WiFi captures).
  */
+/* Stamp the last-seen time if this frame is addressed to or from the focus
+ * client (addr1 = destination, addr2 = source in the 802.11 header). Any frame
+ * type counts: the signal is "is this station on the air", not a handshake. */
+static void poom_pcap_handshake_note_focus_rx_(const uint8_t *frame, size_t len)
+{
+    if (!s_hs_focus_valid || (frame == NULL) || (len < 16U))
+    {
+        return;
+    }
+    if ((memcmp(&frame[4], s_hs_focus_client, 6) == 0) ||
+        (memcmp(&frame[10], s_hs_focus_client, 6) == 0))
+    {
+        s_hs_focus_last_us = esp_timer_get_time();
+    }
+}
+
+void poom_pcap_manager_wifi_handshake_set_focus_client(const uint8_t mac[6])
+{
+    if (mac == NULL)
+    {
+        s_hs_focus_valid = false;
+        s_hs_focus_last_us = 0;
+        return;
+    }
+    memcpy(s_hs_focus_client, mac, sizeof(s_hs_focus_client));
+    s_hs_focus_valid = true;
+    s_hs_focus_last_us = 0; /* not seen yet */
+}
+
 static void poom_pcap_sniffer_wifi_promisc_cb_(void *buf, wifi_promiscuous_pkt_type_t type)
 {
     const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
@@ -1295,6 +1373,7 @@ static void poom_pcap_sniffer_wifi_promisc_cb_(void *buf, wifi_promiscuous_pkt_t
 
     if (s_wifi_capture == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE)
     {
+        poom_pcap_handshake_note_focus_rx_(pkt->payload, len);
         poom_pcap_handshake_parse_client_(pkt->payload, len);
         poom_pcap_handshake_parse_deauth_(pkt->payload, len);
     }
@@ -1679,7 +1758,15 @@ static esp_err_t poom_pcap_manager_sniffer_start_wifi_capture_(uint8_t channel,
     s_mode = POOM_PCAP_SNIFFER_MODE_WIFI;
     s_wifi_capture = capture_mode;
 
-    ret = poom_pcap_manager_wifi_start_monitor_mode(poom_pcap_sniffer_wifi_promisc_cb_, filter_mask);
+    /* Handshake capture wants APSTA so it can inject deauth while sniffing.
+     * But the C5 SoftAP can't tune to 5 GHz, so on a 5 GHz channel APSTA's
+     * set_channel() fails with INVALID_ARG (ESP-IDF #18334). Use STA-only on
+     * 5 GHz -- it tunes 5 GHz and still injects via WIFI_IF_STA; 2.4 GHz keeps
+     * APSTA. */
+    bool use_apsta = (capture_mode == POOM_PCAP_WIFI_CAPTURE_HANDSHAKE) &&
+                     (channel <= POOM_WIFI_CTRL_WIFI_CHANNEL_MAX);
+    ret = poom_pcap_manager_wifi_start_monitor_mode(
+        poom_pcap_sniffer_wifi_promisc_cb_, filter_mask, use_apsta);
     if (ret != ESP_OK)
     {
         s_mode = POOM_PCAP_SNIFFER_MODE_NONE;
@@ -1761,7 +1848,12 @@ esp_err_t poom_pcap_manager_sniffer_retarget_wifi_handshake(uint8_t channel,
     }
     if (ret == ESP_OK)
     {
-        ret = poom_pcap_manager_wifi_start_monitor_mode(poom_pcap_sniffer_wifi_promisc_cb_, filter_mask);
+        /* Handshake retarget: APSTA on 2.4 GHz so in-capture deauth injects via
+         * WIFI_IF_AP. On 5 GHz the C5 SoftAP can't tune there (INVALID_ARG), so
+         * use STA-only and inject via WIFI_IF_STA -- matches capture start. */
+        bool use_apsta = (channel <= POOM_WIFI_CTRL_WIFI_CHANNEL_MAX);
+        ret = poom_pcap_manager_wifi_start_monitor_mode(
+            poom_pcap_sniffer_wifi_promisc_cb_, filter_mask, use_apsta);
     }
     if (ret != ESP_OK)
     {
@@ -1981,6 +2073,8 @@ esp_err_t poom_pcap_manager_sniffer_stop(void)
 
     (void)poom_pcap_manager_close();
     (void)poom_pcap_manager_deinit();
+    /* Files are now closed: drop the session if it has no usable handshake. */
+    poom_pcap_handshake_discard_if_empty_();
     return ESP_OK;
 }
 
@@ -2039,6 +2133,19 @@ bool poom_pcap_manager_wifi_handshake_get_status(poom_pcap_wifi_handshake_status
     }
 
     *out_status = s_hs_status;
+
+    /* Derive the focus-client RX age against the current clock. */
+    out_status->client_rx_valid = s_hs_focus_valid;
+    if (!s_hs_focus_valid || (s_hs_focus_last_us == 0))
+    {
+        out_status->client_rx_age_ms = UINT32_MAX;
+    }
+    else
+    {
+        int64_t age_us = esp_timer_get_time() - s_hs_focus_last_us;
+        out_status->client_rx_age_ms =
+            (age_us <= 0) ? 0U : (uint32_t)(age_us / 1000);
+    }
     return true;
 }
 

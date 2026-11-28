@@ -1032,7 +1032,8 @@ const char *poom_pcap_manager_get_file_path(void)
 }
 
 esp_err_t poom_pcap_manager_wifi_start_monitor_mode(wifi_promiscuous_cb_t callback,
-                                                    uint32_t filter_mask)
+                                                    uint32_t filter_mask,
+                                                    bool use_apsta)
 {
     esp_err_t ret;
     wifi_promiscuous_filter_t filter = {0};
@@ -1042,11 +1043,26 @@ esp_err_t poom_pcap_manager_wifi_start_monitor_mode(wifi_promiscuous_cb_t callba
         return ESP_ERR_INVALID_ARG;
     }
 
-    ret = poom_wifi_ctrl_init_sta();
+    /* APSTA keeps WIFI_IF_AP up so raw deauth frames can be injected while
+     * sniffing (the Fox Hunt uses the same recipe); STA-only stays passive. */
+    ret = use_apsta ? poom_wifi_ctrl_init_apsta() : poom_wifi_ctrl_init_sta();
     if (ret != ESP_OK)
     {
+        POOM_PCAP_PRINTF_E("monitor_mode: init_%s failed: %s",
+                           use_apsta ? "apsta" : "sta", esp_err_to_name(ret));
         return ret;
     }
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    /* Put the C5 radio in dual-band AUTO so a later 5 GHz set_channel is valid.
+     * Kept here, in the capture's APSTA path, rather than in the shared
+     * poom_wifi_ctrl_init_apsta() so other APSTA apps (Karma, Captive, Fox Hunt)
+     * are unaffected. STA mode already sets AUTO in poom_wifi_ctrl_init_sta(). */
+    if (use_apsta)
+    {
+        (void)esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+    }
+#endif
 
     (void)poom_wifi_ctrl_sta_disconnect();
 
@@ -1054,18 +1070,24 @@ esp_err_t poom_pcap_manager_wifi_start_monitor_mode(wifi_promiscuous_cb_t callba
     ret = esp_wifi_set_promiscuous_filter(&filter);
     if (ret != ESP_OK)
     {
+        POOM_PCAP_PRINTF_E("monitor_mode: set_promiscuous_filter failed: %s",
+                           esp_err_to_name(ret));
         return ret;
     }
 
     ret = esp_wifi_set_promiscuous_rx_cb(callback);
     if (ret != ESP_OK)
     {
+        POOM_PCAP_PRINTF_E("monitor_mode: set_promiscuous_rx_cb failed: %s",
+                           esp_err_to_name(ret));
         return ret;
     }
 
     ret = esp_wifi_set_promiscuous(true);
     if (ret != ESP_OK)
     {
+        POOM_PCAP_PRINTF_E("monitor_mode: set_promiscuous(true) failed: %s",
+                           esp_err_to_name(ret));
         (void)esp_wifi_set_promiscuous_rx_cb(NULL);
         return ret;
     }

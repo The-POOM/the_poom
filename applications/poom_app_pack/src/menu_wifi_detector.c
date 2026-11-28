@@ -18,12 +18,16 @@
 #include "input_events.h"
 #include "menu_detector_view.h"
 #include "menu_fox_hunt.h"
+#include "menu_handshake_crack.h"
 #include "menu_wifi_detector_oui.h"
 #include "poom_sbus.h"
 #include "poom_secrets_store.h"
 #include "poom_ui_keyboard.h"
 #include "poom_wifi_attacks.h"
+#include "poom_pcap_manager.h"
 #include "poom_wifi_detector.h"
+
+#include <sys/stat.h>
 
 #define POOM_MENU_RESUME_TOPIC          "poom/menu/resume"
 #define MENU_WIFI_DETECTOR_SCAN_MS      (350U)
@@ -50,6 +54,25 @@
 #define BUTTON_LONG_PRESS_START (7U)
 #endif
 
+/* Raw press/release events (iot_button publishes PRESS_DOWN as 0, PRESS_UP as
+ * 1). Used to track A held as an FN modifier for the capture-screen deauth
+ * chord, mirroring the AP-client Fox Hunt. */
+#ifndef BUTTON_PRESS_DOWN
+#define BUTTON_PRESS_DOWN (0U)
+#endif
+#ifndef BUTTON_PRESS_UP
+#define BUTTON_PRESS_UP (1U)
+#endif
+
+/* Capture-screen manual deauth. Off by default; A+UP toggles a continuous
+ * nudge and A+DOWN fires one manual burst, so a quiet client is pushed into
+ * reauthenticating while the passive monitor captures the handshake. Cadence
+ * and burst sizes mirror the AP-client Fox Hunt. */
+#define MENU_WIFI_DETECTOR_HS_DEAUTH_GAP_MS (250U) /* continuous tick cadence */
+#define MENU_WIFI_DETECTOR_HS_DEAUTH_BURST  (2)    /* frames per tick while ON */
+#define MENU_WIFI_DETECTOR_HS_DEAUTH_NUDGE  (5)    /* A+DOWN one-shot burst */
+#define MENU_WIFI_DETECTOR_HS_BURST_MS      (1200U) /* "Burst" indicator dwell */
+
 typedef enum
 {
     MENU_WIFI_DETECTOR_SCREEN_SELECT = 0,
@@ -57,6 +80,8 @@ typedef enum
     MENU_WIFI_DETECTOR_SCREEN_DETAIL,
     MENU_WIFI_DETECTOR_SCREEN_ALIAS,
     MENU_WIFI_DETECTOR_SCREEN_OPTIONS,
+    MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE,
+    MENU_WIFI_DETECTOR_SCREEN_HS_OPTIONS,
     MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM,
     MENU_WIFI_DETECTOR_SCREEN_DEAUTH_RUNNING,
 } menu_wifi_detector_screen_t;
@@ -64,6 +89,7 @@ typedef enum
 typedef enum
 {
     MENU_WIFI_DETECTOR_OPTION_DEAUTH = 0,
+    MENU_WIFI_DETECTOR_OPTION_HANDSHAKE,
     MENU_WIFI_DETECTOR_OPTION_HUNT,
     MENU_WIFI_DETECTOR_OPTION_ALIAS,
     MENU_WIFI_DETECTOR_OPTION_COUNT,
@@ -71,6 +97,7 @@ typedef enum
 
 static const char *const s_option_labels[] = {
     "DEAUTH CLIENT",
+    "CAPTURE HANDSHAKE",
     "HUNT CLIENT",
     "SET ALIAS",
 };
@@ -95,7 +122,8 @@ static poom_wifi_detector_record_t *s_record_storage;
 static poom_wifi_detector_record_t *s_scan_record_storage;
 static char (*s_names)[MENU_WIFI_DETECTOR_NAME_LEN];
 static menu_wifi_detector_alias_cache_t *s_alias_cache;
-static int s_record_count;
+static int s_record_count;      /* entries shown (after same-network dedup) */
+static int s_record_count_full; /* entries from the scan before dedup        */
 static int s_selected_index;
 static int s_scroll;
 static int s_filter_index;
@@ -125,6 +153,33 @@ static uint8_t s_monitor_channel;
 static bool s_ap_clients_selected;
 static uint8_t s_selected_ap_bssid[6];
 static int s_options_index;
+static volatile bool s_hs_start_requested;
+static volatile bool s_hs_stop_requested;
+static bool s_hs_active;
+static esp_err_t s_hs_error;
+/* Capture-screen manual deauth state (see HS_DEAUTH_* above). */
+static uint8_t s_hs_client[6];            /* client nudged during capture */
+static volatile bool s_hs_deauth_on;      /* continuous deauth (A+UP); off by default */
+static volatile bool s_hs_a_held;         /* A held = FN modifier (chord) */
+static volatile bool s_hs_toggle_deauth;  /* A+UP request, serviced on the task */
+static volatile bool s_hs_burst_deauth;   /* A+DOWN request, serviced on the task */
+static uint32_t s_hs_last_deauth_ms;      /* continuous tick cadence timer */
+static uint32_t s_hs_burst_until_ms;      /* show "Burst" until this time (0 = none) */
+static volatile bool s_hs_retry_requested; /* re-arm/retarget capture, serviced on task */
+
+/* Cross-band capture targeting. Captured at AP-select from the scan list so the
+ * HS-options menu can retarget the live capture to the SAME network on the other
+ * band -- the client often roams to a different BSSID per band, so if deauth on
+ * one band does nothing the client is likely on the other. Index 0 = 2.4 GHz,
+ * 1 = 5 GHz. A channel >= 36 is 5 GHz on the C5. */
+#define MENU_WIFI_DETECTOR_BAND_IDX(ch) (((ch) >= 36U) ? 1 : 0)
+static char    s_xband_ssid[POOM_WIFI_DETECTOR_SSID_LEN];
+static bool    s_xband_have[2];       /* a BSSID for this SSID was seen on band i */
+static uint8_t s_xband_bssid[2][6];
+static uint8_t s_xband_channel[2];
+static int     s_xband_sel;           /* band index the capture is currently on */
+static int     s_hs_opt_index;        /* selected line in the HS-options menu */
+
 static volatile bool s_deauth_active;
 static volatile bool s_deauth_start_requested;
 static volatile bool s_deauth_stop_requested;
@@ -145,11 +200,24 @@ static char s_hunt_name[20];
 static bool s_resume_ap_valid;
 static uint8_t s_resume_ap_bssid[6];
 static uint8_t s_resume_channel;
+static bool s_resume_client_pending;
+static uint8_t s_resume_client_mac[6];
 static poom_ui_keyboard_t s_alias_keyboard;
 static char s_alias_buffer[MENU_WIFI_DETECTOR_ALIAS_LEN];
+/* Hand-off to the handshake cracker: when set, cleanup opens the cracker on the
+ * just-captured .22000 instead of returning to the menu. */
+static bool s_crack_launch;
+static char s_crack_path[160];
+static bool s_hs_crack_requested;
+/* Target snapshot kept across the crack hand-off so the cracker's exit callback
+ * can re-open this AP/client's Options screen instead of dropping to the menu. */
+static uint8_t s_crack_return_bssid[6];
+static uint8_t s_crack_return_client[6];
+static uint8_t s_crack_return_channel;
 
 static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user_ctx);
 static void menu_wifi_detector_free_(void);
+static bool menu_wifi_detector_hs_crackable_(void);
 static void menu_wifi_detector_scan_task_(void *arg);
 static void menu_wifi_detector_normalize_selection_(void);
 static void menu_wifi_detector_apply_names_(void);
@@ -534,6 +602,9 @@ static bool menu_wifi_detector_take_scan_(esp_err_t *status,
     return ready;
 }
 
+/* Defined further down; used by apply_scan_ to dedup cross-band twins. */
+static bool menu_wifi_detector_ssid_same_network_(const char *a, const char *b);
+
 static void menu_wifi_detector_apply_scan_(size_t count)
 {
     uint8_t previous_bssid[6] = {0};
@@ -562,6 +633,73 @@ static void menu_wifi_detector_apply_scan_(size_t count)
     }
 
     s_record_count = (int)count;
+    s_record_count_full = (int)count;
+
+    /* Collapse the two bands of one network (e.g. "Net" + "Net-5G") into one
+     * list entry, keeping the 2.4 GHz member as the representative. 5 GHz --
+     * DFS channels especially -- often can't be tuned for capture on the C5,
+     * while 2.4 GHz always can, so defaulting selection/capture to 2.4 GHz both
+     * de-clutters the list and makes handshake capture work; the capture
+     * screen's band switch still reaches 5 GHz via the paired BSSID.
+     *
+     * This is a pure pointer permutation: dropped twins move past
+     * s_record_count but stay in the pool (and visible to the cross-band
+     * pairing, which scans s_record_count_full). Only cross-band twins merge,
+     * so same-SSID same-band APs (mesh/extenders) remain distinct entries.
+     * Skipped in the client view, where records are client MACs, not APs. */
+    if(!s_ap_clients_selected)
+    {
+        int w = 0;
+        int r;
+        for(r = 0; r < s_record_count_full; ++r)
+        {
+            bool dup = false;
+            int k;
+            for(k = 0; k < w; ++k)
+            {
+                if((s_records[k]->ssid[0] != '\0') &&
+                   menu_wifi_detector_ssid_same_network_(s_records[k]->ssid,
+                                                         s_records[r]->ssid) &&
+                   (MENU_WIFI_DETECTOR_BAND_IDX(s_records[k]->channel) !=
+                    MENU_WIFI_DETECTOR_BAND_IDX(s_records[r]->channel)))
+                {
+                    /* Keep the 2.4 GHz member in the visible slot. */
+                    if(MENU_WIFI_DETECTOR_BAND_IDX(s_records[r]->channel) == 0)
+                    {
+                        poom_wifi_detector_record_t *t = s_records[k];
+                        s_records[k] = s_records[r];
+                        s_records[r] = t;
+                    }
+                    dup = true;
+                    break;
+                }
+            }
+            if(!dup)
+            {
+                poom_wifi_detector_record_t *t = s_records[w];
+                s_records[w] = s_records[r];
+                s_records[r] = t;
+                ++w;
+            }
+        }
+        s_record_count = w;
+    }
+
+    if(s_resume_client_pending && s_ap_clients_selected)
+    {
+        for(int idx = 0; idx < s_record_count; ++idx)
+        {
+            if(memcmp(s_records[idx]->bssid, s_resume_client_mac, 6U) == 0)
+            {
+                s_selected_index = idx;
+                s_detail_index = idx;
+                s_options_index = MENU_WIFI_DETECTOR_OPTION_HUNT;
+                s_screen = MENU_WIFI_DETECTOR_SCREEN_OPTIONS;
+                s_resume_client_pending = false;
+                break;
+            }
+        }
+    }
     if(had_previous)
     {
         for(i = 0; i < s_record_count; ++i)
@@ -919,12 +1057,228 @@ static void menu_wifi_detector_format_client_mac_(char *out, size_t out_len)
                    s_deauth_client[3], s_deauth_client[4], s_deauth_client[5]);
 }
 
+static void menu_wifi_detector_render_handshake_(void)
+{
+    poom_pcap_wifi_handshake_status_t hs = {0};
+    menu_detector_view_handshake_t view = {0};
+    char rx[12];
+    bool burst_active;
+
+    if(s_hs_error != ESP_OK)
+    {
+        /* Include the channel: a 5 GHz channel (>=36), especially a DFS channel
+         * (52-144), that the C5 can't tune in monitor mode is the usual cause
+         * of ESP_ERR_INVALID_ARG here -- a dual-band network captures fine on
+         * its 2.4 GHz twin instead. */
+        char fail_line[28];
+        (void)snprintf(fail_line, sizeof(fail_line), "START FAIL ch%u",
+                       (unsigned)s_monitor_channel);
+        menu_detector_view_draw_error("HS CAPTURE", fail_line,
+                                      esp_err_to_name(s_hs_error));
+        return;
+    }
+    if(!s_hs_active)
+    {
+        menu_detector_view_draw_waiting("HS STARTING");
+        return;
+    }
+
+    (void)poom_pcap_manager_wifi_handshake_get_status(&hs);
+
+    view.channel = s_monitor_channel;
+    view.msg_captured[0] = (hs.eapol_message_mask & 0x1U) != 0U;
+    view.msg_captured[1] = (hs.eapol_message_mask & 0x2U) != 0U;
+    view.msg_captured[2] = (hs.eapol_message_mask & 0x4U) != 0U;
+    view.msg_captured[3] = (hs.eapol_message_mask & 0x8U) != 0U;
+    view.pmkid_count = hs.pmkid_count;
+    view.ssid_known = hs.has_beacon;
+    view.handshake_ready = (hs.valid_pair_count > 0U);
+
+    /* Deauth indicator: "Burst" briefly after an A+DOWN burst, else On/Off. */
+    burst_active = (s_hs_burst_until_ms != 0U) &&
+                   ((int32_t)(s_hs_burst_until_ms - menu_wifi_detector_now_ms_()) > 0);
+    view.deauth_state = burst_active ? "Burst" : (s_hs_deauth_on ? "On" : "Off");
+
+    /* RX signal: how recently a frame to/from the selected client was seen. */
+    if(!hs.client_rx_valid || (hs.client_rx_age_ms == UINT32_MAX))
+    {
+        view.rx_text = "--";
+    }
+    else if(hs.client_rx_age_ms < 1000U)
+    {
+        view.rx_text = "live";
+    }
+    else
+    {
+        (void)snprintf(rx, sizeof(rx), "%us",
+                       (unsigned)(hs.client_rx_age_ms / 1000U));
+        view.rx_text = rx;
+    }
+
+    menu_detector_view_draw_handshake(&view);
+}
+
 static void menu_wifi_detector_render_options_(void)
 {
     menu_detector_view_draw_selector("CLIENT OPTS",
                                      s_option_labels,
                                      MENU_WIFI_DETECTOR_OPTION_COUNT,
                                      s_options_index);
+}
+
+/* Capture-screen options: switch bands (retarget the same SSID to its BSSID on
+ * the other band) and re-arm. Reached with RIGHT from the HS capture screen. */
+/* True while the live capture holds at least one crackable target (a full
+ * handshake pair or a PMKID). */
+static bool menu_wifi_detector_hs_crackable_(void)
+{
+    poom_pcap_wifi_handshake_status_t hs = {0};
+
+    if (!s_hs_active)
+    {
+        return false;
+    }
+    if (!poom_pcap_manager_wifi_handshake_get_status(&hs))
+    {
+        return false;
+    }
+    return (hs.valid_pair_count > 0U) || (hs.pmkid_count > 0U);
+}
+
+/* Number of entries in the HS-options menu (the Crack line appears only once a
+ * handshake/PMKID has been captured). */
+static int menu_wifi_detector_hs_options_count_(void)
+{
+    return menu_wifi_detector_hs_crackable_() ? 3 : 2;
+}
+
+static void menu_wifi_detector_render_hs_options_(void)
+{
+    char band_label[28];
+    const char *band_name = (s_xband_sel == 1) ? "5GHz" : "2.4GHz";
+    int other = (s_xband_sel == 1) ? 0 : 1;
+
+    (void)snprintf(band_label, sizeof(band_label), "Band: %s%s",
+                   band_name, s_xband_have[other] ? "" : " (only)");
+    const char *const labels[3] = { band_label, "Rescan", "Crack handshake" };
+    menu_detector_view_draw_selector("HS OPTIONS", labels,
+                                     menu_wifi_detector_hs_options_count_(),
+                                     s_hs_opt_index);
+}
+
+/* Send a short burst of unicast deauth frames at the client selected for this
+ * capture. Reuses the same one-shot primitive as the Fox Hunt; the frames go
+ * out on the radio's current channel (already tuned to the AP by capture
+ * start), so no radio reconfiguration is needed and the passive monitor keeps
+ * running. Target the equipment you are authorised to test. */
+static void menu_wifi_detector_hs_deauth_send_(int frames)
+{
+    wifi_ap_record_t ap;
+    int i;
+
+    (void)memset(&ap, 0, sizeof(ap));
+    (void)memcpy(ap.bssid, s_selected_ap_bssid, sizeof(ap.bssid));
+    ap.primary = s_monitor_channel;
+    for(i = 0; i < frames; ++i)
+    {
+        poom_wifi_attacks_deauth_client_once(&ap, s_hs_client);
+    }
+}
+
+static void menu_wifi_detector_start_handshake_(void)
+{
+    const uint32_t mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+    (void)poom_wifi_detector_stop();
+    s_monitor_active = false;
+    s_hs_error = poom_pcap_manager_sniffer_start_wifi_capture_target(
+        s_monitor_channel, mask, s_selected_ap_bssid);
+    s_hs_active = (s_hs_error == ESP_OK);
+    if(s_hs_active)
+    {
+        /* Watch the selected client for the RX activity signal. */
+        poom_pcap_manager_wifi_handshake_set_focus_client(s_hs_client);
+    }
+    s_input_dirty = true;
+}
+
+/* Re-arm the capture in place (LEFT/RIGHT): save what we have and start a fresh
+ * session on the same AP/channel, without leaving the capture screen. */
+static void menu_wifi_detector_retry_handshake_(void)
+{
+    const uint32_t mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+    esp_err_t err;
+
+    if(!s_hs_active)
+    {
+        /* Not capturing (e.g. a prior START FAILED on the other band): start
+         * fresh on the current target instead of retargeting a dead session. */
+        menu_wifi_detector_start_handshake_();
+        return;
+    }
+    err = poom_pcap_manager_sniffer_retarget_wifi_handshake(
+        s_monitor_channel, mask, s_selected_ap_bssid);
+    if(err == ESP_OK)
+    {
+        poom_pcap_manager_wifi_handshake_set_focus_client(s_hs_client);
+        s_hs_burst_until_ms = 0U;
+    }
+    else
+    {
+        s_hs_error = err;
+        s_hs_active = false;
+    }
+    s_input_dirty = true;
+}
+
+/* Restore the selected AP's monitor before returning to the client
+ * options. The detector was released when PCAP capture began. Re-opening
+ * discovery alone would lose the caller's menu context. */
+static void menu_wifi_detector_stop_handshake_(void)
+{
+    esp_err_t status;
+
+    if(s_hs_active)
+    {
+        (void)poom_pcap_manager_sniffer_stop();
+        s_hs_active = false;
+    }
+    poom_pcap_manager_wifi_handshake_set_focus_client(NULL);
+
+    status = poom_wifi_detector_monitor_start(
+        POOM_WIFI_DETECTOR_FILTER_AP_CLIENTS,
+        NULL,
+        0U,
+        MENU_DETECTOR_VIEW_MAX_ITEMS);
+    if(status == ESP_OK)
+    {
+        status = poom_wifi_detector_monitor_select_ap(
+            s_monitor_channel, s_selected_ap_bssid);
+    }
+
+    if(status == ESP_OK && s_detail_index >= 0 &&
+       s_detail_index < s_record_count)
+    {
+        s_monitor_active = true;
+        s_ap_clients_selected = true;
+        s_last_monitor_refresh = 0U;
+        s_screen = MENU_WIFI_DETECTOR_SCREEN_OPTIONS;
+    }
+    else
+    {
+        /* Recovery fallback: avoid presenting stale client details if
+         * the Wi-Fi driver failed to restart after capture. */
+        (void)poom_wifi_detector_stop();
+        s_monitor_active = false;
+        s_ap_clients_selected = false;
+        s_monitor_channel = 0U;
+        s_record_count = 0;
+        s_selected_index = 0;
+        s_detail_index = -1;
+        s_last_monitor_refresh = 0U;
+        s_screen = MENU_WIFI_DETECTOR_SCREEN_SCAN;
+    }
+    menu_wifi_detector_reset_text_scroll_();
+    s_input_dirty = true;
 }
 
 static void menu_wifi_detector_render_deauth_confirm_(void)
@@ -1027,19 +1381,46 @@ static void menu_wifi_detector_start_deauth_(void)
  * letting the main loop restart the client monitor from a clean radio state. */
 static void menu_wifi_detector_stop_deauth_(void)
 {
+    const bool return_to_options = !s_deauth_is_set &&
+        (s_detail_index >= 0) && (s_detail_index < s_record_count);
+    esp_err_t status = ESP_FAIL;
+
     poom_wifi_attacks_stop_all();
     s_deauth_active = false;
     menu_wifi_detector_set_clear_();
 
-    s_ap_clients_selected = false;
-    s_monitor_active = false;
-    s_monitor_channel = 0U;
-    s_record_count = 0;
-    s_selected_index = 0;
-    s_scroll = 0;
-    s_detail_index = -1;
-    s_last_monitor_refresh = 0U;
-    s_screen = MENU_WIFI_DETECTOR_SCREEN_SCAN;
+    if(return_to_options)
+    {
+        status = poom_wifi_detector_monitor_start(
+            POOM_WIFI_DETECTOR_FILTER_AP_CLIENTS,
+            NULL, 0U, MENU_DETECTOR_VIEW_MAX_ITEMS);
+        if(status == ESP_OK)
+        {
+            status = poom_wifi_detector_monitor_select_ap(
+                s_monitor_channel, s_selected_ap_bssid);
+        }
+    }
+
+    if(return_to_options && status == ESP_OK)
+    {
+        s_monitor_active = true;
+        s_ap_clients_selected = true;
+        s_last_monitor_refresh = 0U;
+        s_screen = MENU_WIFI_DETECTOR_SCREEN_OPTIONS;
+    }
+    else
+    {
+        (void)poom_wifi_detector_stop();
+        s_ap_clients_selected = false;
+        s_monitor_active = false;
+        s_monitor_channel = 0U;
+        s_record_count = 0;
+        s_selected_index = 0;
+        s_scroll = 0;
+        s_detail_index = -1;
+        s_last_monitor_refresh = 0U;
+        s_screen = MENU_WIFI_DETECTOR_SCREEN_SCAN;
+    }
     menu_wifi_detector_reset_text_scroll_();
     s_input_dirty = true;
 }
@@ -1064,6 +1445,14 @@ static void menu_wifi_detector_render_(void)
     else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_OPTIONS)
     {
         menu_wifi_detector_render_options_();
+    }
+    else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE)
+    {
+        menu_wifi_detector_render_handshake_();
+    }
+    else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_HS_OPTIONS)
+    {
+        menu_wifi_detector_render_hs_options_();
     }
     else if(s_screen == MENU_WIFI_DETECTOR_SCREEN_DEAUTH_CONFIRM)
     {
@@ -1126,7 +1515,9 @@ static void menu_wifi_detector_accept_alias_(void)
                        "%.32s",
                        (s_alias_buffer[0] != '\0') ? s_alias_buffer : record->ssid);
     }
-    s_screen = MENU_WIFI_DETECTOR_SCREEN_DETAIL;
+    s_screen = menu_wifi_detector_is_ap_clients_() && s_ap_clients_selected
+                   ? MENU_WIFI_DETECTOR_SCREEN_OPTIONS
+                   : MENU_WIFI_DETECTOR_SCREEN_DETAIL;
     s_input_dirty = true;
 }
 
@@ -1153,6 +1544,122 @@ static void menu_wifi_detector_return_to_ap_list_(void)
     s_input_dirty = true;
 }
 
+static char menu_wifi_detector_lc_(char c)
+{
+    return ((c >= 'A') && (c <= 'Z')) ? (char)(c + 32) : c;
+}
+
+/* Length of the SSID with a trailing band tag removed, so the two bands of one
+ * network pair up even when the AP names them differently (common on ISP gear,
+ * e.g. "Telstra-5G" vs "Telstra"). Handles -, _, space or '.' separators and
+ * the usual 2.4/5 GHz tags, case-insensitively. Band itself is decided by the
+ * channel, never the name, so a misleading tag can't pick the wrong band. */
+static size_t menu_wifi_detector_ssid_base_len_(const char *ssid)
+{
+    static const char *const tags[] = {
+        "5ghz", "2.4ghz", "2.4g", "24g", "5g", "2g"
+    };
+    size_t n = strlen(ssid);
+    size_t t;
+
+    for(t = 0U; t < (sizeof(tags) / sizeof(tags[0])); ++t)
+    {
+        size_t tl = strlen(tags[t]);
+        size_t k;
+        bool match = (n > tl);
+        for(k = 0U; match && (k < tl); ++k)
+        {
+            if(menu_wifi_detector_lc_(ssid[n - tl + k]) != tags[t][k])
+            {
+                match = false;
+            }
+        }
+        if(match)
+        {
+            size_t base = n - tl;
+            char sep = (base > 0U) ? ssid[base - 1U] : '\0';
+            if((sep == '-') || (sep == '_') || (sep == ' ') || (sep == '.'))
+            {
+                base--;
+            }
+            return base;
+        }
+    }
+    return n;
+}
+
+/* True if two SSIDs name the same network ignoring a band tag (see above). */
+static bool menu_wifi_detector_ssid_same_network_(const char *a, const char *b)
+{
+    size_t la = menu_wifi_detector_ssid_base_len_(a);
+    size_t lb = menu_wifi_detector_ssid_base_len_(b);
+    size_t i;
+
+    if((la == 0U) || (la != lb))
+    {
+        return false;
+    }
+    for(i = 0U; i < la; ++i)
+    {
+        if(menu_wifi_detector_lc_(a[i]) != menu_wifi_detector_lc_(b[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Record the selected network's per-band BSSIDs/channels from the current AP
+ * scan list (s_records still holds the AP list at AP-select time), so the
+ * capture screen can retarget across bands. Pairs bands by base SSID (band tag
+ * stripped); a hidden/blank SSID can't be cross-matched, so only the selected
+ * band is stored. */
+static void menu_wifi_detector_capture_xband_(int selected_index)
+{
+    const poom_wifi_detector_record_t *sel = s_records[selected_index];
+    int sel_band = MENU_WIFI_DETECTOR_BAND_IDX(sel->channel);
+    int i;
+
+    s_xband_have[0] = false;
+    s_xband_have[1] = false;
+    (void)memset(s_xband_bssid, 0, sizeof(s_xband_bssid));
+    s_xband_channel[0] = 0U;
+    s_xband_channel[1] = 0U;
+    (void)strncpy(s_xband_ssid, sel->ssid, sizeof(s_xband_ssid) - 1U);
+    s_xband_ssid[sizeof(s_xband_ssid) - 1U] = '\0';
+
+    /* Always store the selected AP in its own band. */
+    s_xband_have[sel_band] = true;
+    (void)memcpy(s_xband_bssid[sel_band], sel->bssid, 6);
+    s_xband_channel[sel_band] = sel->channel;
+    s_xband_sel = sel_band;
+
+    if(s_xband_ssid[0] == '\0')
+    {
+        return; /* hidden/blank SSID: can't pair the bands */
+    }
+    for(i = 0; i < s_record_count_full; ++i) /* full list: twin may be dropped */
+    {
+        const poom_wifi_detector_record_t *r = s_records[i];
+        int band;
+        if((i == selected_index) || (r == NULL) || (r->ssid[0] == '\0'))
+        {
+            continue;
+        }
+        if(!menu_wifi_detector_ssid_same_network_(r->ssid, s_xband_ssid))
+        {
+            continue;
+        }
+        band = MENU_WIFI_DETECTOR_BAND_IDX(r->channel);
+        if(!s_xband_have[band]) /* first match per band wins */
+        {
+            s_xband_have[band] = true;
+            (void)memcpy(s_xband_bssid[band], r->bssid, 6);
+            s_xband_channel[band] = r->channel;
+        }
+    }
+}
+
 static void menu_wifi_detector_select_ap_(void)
 {
     uint8_t bssid[6];
@@ -1166,6 +1673,7 @@ static void menu_wifi_detector_select_ap_(void)
     channel = s_records[s_selected_index]->channel;
     (void)memcpy(bssid, s_records[s_selected_index]->bssid, sizeof(bssid));
     (void)memcpy(s_selected_ap_bssid, bssid, sizeof(s_selected_ap_bssid));
+    menu_wifi_detector_capture_xband_(s_selected_index);
     status = poom_wifi_detector_monitor_select_ap(channel, bssid);
     if(status != ESP_OK)
     {
@@ -1187,6 +1695,28 @@ static void menu_wifi_detector_select_ap_(void)
     s_input_dirty = true;
 }
 
+/* Invoked by the handshake cracker when it exits (registered before hand-off).
+ * Re-opens the same AP/client's Options screen so B from the cracker lands back
+ * in the capture flow rather than all the way out at THE BEAST menu. */
+static void menu_wifi_detector_crack_return_cb_(void *ctx)
+{
+    (void)ctx;
+    if(s_crack_return_channel != 0U)
+    {
+        menu_wifi_detector_show_client_options(s_crack_return_bssid,
+                                               s_crack_return_channel,
+                                               s_crack_return_client);
+        if(s_active)
+        {
+            return; /* detector re-opened on the same client */
+        }
+    }
+    /* Couldn't re-open (bad target, or no memory): resume the main menu so the
+     * UI never ends up with no active screen. */
+    const uint8_t token = 1U;
+    (void)poom_sbus_publish(POOM_MENU_RESUME_TOPIC, &token, sizeof(token), 0);
+}
+
 static void menu_wifi_detector_cleanup_(void)
 {
     const uint8_t token = 1U;
@@ -1195,6 +1725,11 @@ static void menu_wifi_detector_cleanup_(void)
     s_scan_requested = false;
     s_scan_complete = false;
     s_scan_task = NULL;
+    if(s_hs_active)
+    {
+        (void)poom_pcap_manager_sniffer_stop();
+        s_hs_active = false;
+    }
     if(s_deauth_active || poom_wifi_attacks_deauth_client_is_running())
     {
         poom_wifi_attacks_stop_all();
@@ -1211,7 +1746,22 @@ static void menu_wifi_detector_cleanup_(void)
     }
     menu_wifi_detector_free_();
     s_task = NULL;
-    if(s_hunt_launch)
+    if(s_crack_launch)
+    {
+        /* The sniffer was stopped above (finalizing the .22000) and the radio
+         * released; the cracker takes over and, on exit, invokes our return
+         * callback to re-open this client's Options screen. */
+        s_crack_launch = false;
+        /* Snapshot the target (boot_ will clear the live copies) and arm the
+         * cracker's return callback so leaving it re-opens this client's
+         * Options screen instead of returning to THE BEAST. */
+        (void)memcpy(s_crack_return_bssid, s_selected_ap_bssid, sizeof(s_crack_return_bssid));
+        (void)memcpy(s_crack_return_client, s_hs_client, sizeof(s_crack_return_client));
+        s_crack_return_channel = s_monitor_channel;
+        menu_handshake_crack_set_exit_callback(menu_wifi_detector_crack_return_cb_, NULL);
+        menu_handshake_crack_show_file(s_crack_path);
+    }
+    else if(s_hunt_launch)
     {
         /* Radio is already released above; Fox Hunt takes over and will publish
          * the resume token itself when it exits. */
@@ -1243,6 +1793,75 @@ static void menu_wifi_detector_task_(void *arg)
             break;
         }
 
+        if(s_hs_start_requested)
+        {
+            s_hs_start_requested = false;
+            menu_wifi_detector_start_handshake_();
+        }
+        if(s_hs_stop_requested)
+        {
+            s_hs_stop_requested = false;
+            menu_wifi_detector_stop_handshake_();
+        }
+        if(s_hs_retry_requested)
+        {
+            s_hs_retry_requested = false;
+            menu_wifi_detector_retry_handshake_();
+        }
+        if(s_hs_crack_requested)
+        {
+            s_hs_crack_requested = false;
+            /* Snapshot the hash-file path while the capture is still live, then
+             * leave the menu: cleanup stops the sniffer (finalizing the .22000)
+             * and hands off to the cracker on that file. */
+            const char *pcap_path = poom_pcap_manager_get_file_path();
+            if((pcap_path != NULL) && (pcap_path[0] != '\0'))
+            {
+                int w = snprintf(s_crack_path, sizeof(s_crack_path), "%s", pcap_path);
+                char *dot = ((w > 0) && ((size_t)w < sizeof(s_crack_path)))
+                                ? strrchr(s_crack_path, '.')
+                                : NULL;
+                if(dot != NULL)
+                {
+                    const size_t prefix = (size_t)(dot - s_crack_path);
+                    w = snprintf(dot, sizeof(s_crack_path) - prefix, ".22000");
+                    if((w > 0) && ((size_t)w < (sizeof(s_crack_path) - prefix)))
+                    {
+                        s_crack_launch = true;
+                        s_exit_requested = true;
+                    }
+                }
+            }
+        }
+        if((s_screen == MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE) && s_hs_active)
+        {
+            uint32_t now_ms = menu_wifi_detector_now_ms_();
+
+            /* A+UP: toggle the continuous nudge (serviced here, off the button
+             * callback, so the TX work stays on the menu task). */
+            if(s_hs_toggle_deauth)
+            {
+                s_hs_toggle_deauth = false;
+                s_hs_deauth_on = !s_hs_deauth_on;
+                s_hs_last_deauth_ms = now_ms - MENU_WIFI_DETECTOR_HS_DEAUTH_GAP_MS;
+            }
+            /* A+DOWN: one manual burst to wake a quiet client. */
+            if(s_hs_burst_deauth)
+            {
+                s_hs_burst_deauth = false;
+                menu_wifi_detector_hs_deauth_send_(MENU_WIFI_DETECTOR_HS_DEAUTH_NUDGE);
+                s_hs_burst_until_ms = now_ms + MENU_WIFI_DETECTOR_HS_BURST_MS;
+            }
+            /* Continuous cadence while toggled on. */
+            if(s_hs_deauth_on &&
+               ((uint32_t)(now_ms - s_hs_last_deauth_ms) >=
+                MENU_WIFI_DETECTOR_HS_DEAUTH_GAP_MS))
+            {
+                s_hs_last_deauth_ms = now_ms;
+                menu_wifi_detector_hs_deauth_send_(MENU_WIFI_DETECTOR_HS_DEAUTH_BURST);
+            }
+            s_input_dirty = true;
+        }
         if(s_deauth_start_requested)
         {
             s_deauth_start_requested = false;
@@ -1477,6 +2096,14 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
     }
     (void)memcpy(&event, msg->data, sizeof(event));
 
+    /* Track A held as an FN modifier (chord) via raw press/release events.
+     * Only consumed on the capture screen; harmless elsewhere. */
+    if(event.button == BUTTON_A)
+    {
+        if(event.event == BUTTON_PRESS_DOWN) s_hs_a_held = true;
+        else if(event.event == BUTTON_PRESS_UP) s_hs_a_held = false;
+    }
+
     /* Long-press A launches the tagged-set deauth (moved off a LEFT tap so a
      * stray press can't fire frames, and so LEFT is free for the name/MAC
      * toggle). Only in the client list, with at least one client tagged. */
@@ -1501,7 +2128,9 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
         poom_ui_keyboard_action_t action;
         if(event.button == BUTTON_B)
         {
-            s_screen = MENU_WIFI_DETECTOR_SCREEN_DETAIL;
+            s_screen = menu_wifi_detector_is_ap_clients_() && s_ap_clients_selected
+                           ? MENU_WIFI_DETECTOR_SCREEN_OPTIONS
+                           : MENU_WIFI_DETECTOR_SCREEN_DETAIL;
             s_input_dirty = true;
             return;
         }
@@ -1513,6 +2142,85 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
         else
         {
             poom_ui_keyboard_draw(&s_alias_keyboard);
+        }
+        return;
+    }
+
+    if(s_screen == MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE)
+    {
+        if(event.button == BUTTON_B)
+        {
+            s_hs_stop_requested = true;
+        }
+        else if((event.button == BUTTON_UP) && s_hs_a_held)
+        {
+            /* A+UP: toggle the continuous deauth nudge. */
+            s_hs_toggle_deauth = true;
+        }
+        else if((event.button == BUTTON_DOWN) && s_hs_a_held)
+        {
+            /* A+DOWN: fire one manual deauth burst. */
+            s_hs_burst_deauth = true;
+        }
+        else if(event.button == BUTTON_RIGHT)
+        {
+            /* Open the HS options menu (band switch / rescan). LEFT is unbound
+             * so a stray tap can't disturb an in-flight capture. */
+            s_hs_opt_index = 0;
+            s_screen = MENU_WIFI_DETECTOR_SCREEN_HS_OPTIONS;
+            s_input_dirty = true;
+        }
+        return;
+    }
+
+    if(s_screen == MENU_WIFI_DETECTOR_SCREEN_HS_OPTIONS)
+    {
+        if(event.button == BUTTON_B)
+        {
+            s_screen = MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE;
+            s_input_dirty = true;
+        }
+        else if((event.button == BUTTON_UP) && (s_hs_opt_index > 0))
+        {
+            --s_hs_opt_index;
+            s_input_dirty = true;
+        }
+        else if((event.button == BUTTON_DOWN) &&
+                (s_hs_opt_index < (menu_wifi_detector_hs_options_count_() - 1)))
+        {
+            ++s_hs_opt_index;
+            s_input_dirty = true;
+        }
+        else if((event.button == BUTTON_A) && (s_hs_opt_index == 2) &&
+                menu_wifi_detector_hs_crackable_())
+        {
+            /* Crack line: hand the just-captured handshake to the cracker. */
+            s_hs_crack_requested = true;
+            s_input_dirty = true;
+        }
+        else if(((event.button == BUTTON_LEFT) || (event.button == BUTTON_RIGHT)) &&
+                (s_hs_opt_index == 0))
+        {
+            /* Band line: flip to the other band and retarget the live capture
+             * there (same SSID, that band's BSSID/channel). Only if we saw it
+             * in the scan. Radio work is deferred to the task via the flag. */
+            int other = (s_xband_sel == 1) ? 0 : 1;
+            if(s_xband_have[other])
+            {
+                s_xband_sel = other;
+                (void)memcpy(s_selected_ap_bssid, s_xband_bssid[other],
+                             sizeof(s_selected_ap_bssid));
+                s_monitor_channel = s_xband_channel[other];
+                s_hs_retry_requested = true;
+            }
+            s_input_dirty = true;
+        }
+        else if((event.button == BUTTON_A) && (s_hs_opt_index == 1))
+        {
+            /* Rescan line: re-arm on the current target, then show the capture. */
+            s_hs_retry_requested = true;
+            s_screen = MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE;
+            s_input_dirty = true;
         }
         return;
     }
@@ -1543,7 +2251,24 @@ static void menu_wifi_detector_button_cb_(const poom_sbus_msg_t *msg, void *user
             }
             else if((s_detail_index >= 0) && (s_detail_index < s_record_count))
             {
-                if(s_options_index == MENU_WIFI_DETECTOR_OPTION_HUNT)
+                if(s_options_index == MENU_WIFI_DETECTOR_OPTION_HANDSHAKE)
+                {
+                    /* Remember the selected client so the optional in-capture
+                     * deauth can target it. Deauth always starts OFF. */
+                    (void)memcpy(s_hs_client,
+                                 s_records[s_detail_index]->bssid,
+                                 sizeof(s_hs_client));
+                    s_hs_deauth_on = false;
+                    s_hs_toggle_deauth = false;
+                    s_hs_burst_deauth = false;
+                    s_hs_burst_until_ms = 0U;
+                    s_hs_active = false;
+                    s_hs_error = ESP_OK;
+                    s_screen = MENU_WIFI_DETECTOR_SCREEN_HANDSHAKE;
+                    s_hs_start_requested = true;
+                    s_input_dirty = true;
+                }
+                else if(s_options_index == MENU_WIFI_DETECTOR_OPTION_HUNT)
                 {
                     /* Capture the target and hand off to Fox Hunt on exit. */
                     (void)memcpy(s_hunt_client,
@@ -1765,10 +2490,25 @@ static void menu_wifi_detector_boot_(bool resume_clients,
     s_monitor_channel = 0U;
     s_ap_clients_selected = false;
     s_options_index = 0;
+    s_hs_active = false;
+    s_hs_start_requested = false;
+    s_hs_stop_requested = false;
+    s_hs_error = ESP_OK;
+    s_hs_deauth_on = false;
+    s_hs_a_held = false;
+    s_hs_toggle_deauth = false;
+    s_hs_burst_deauth = false;
+    s_hs_last_deauth_ms = 0U;
+    s_hs_burst_until_ms = 0U;
+    s_hs_retry_requested = false;
+    (void)memset(s_hs_client, 0, sizeof(s_hs_client));
     s_deauth_active = false;
     s_deauth_start_requested = false;
     s_deauth_stop_requested = false;
     s_hunt_launch = false;
+    s_crack_launch = false;
+    s_hs_crack_requested = false;
+    s_resume_client_pending = false;
     menu_wifi_detector_set_clear_();
     (void)memset(s_selected_ap_bssid, 0, sizeof(s_selected_ap_bssid));
     (void)memset(s_deauth_client, 0, sizeof(s_deauth_client));
@@ -1840,4 +2580,20 @@ void menu_wifi_detector_show(void)
 void menu_wifi_detector_show_clients(const uint8_t ap_bssid[6], uint8_t channel)
 {
     menu_wifi_detector_boot_(true, ap_bssid, channel);
+}
+
+void menu_wifi_detector_show_client_options(const uint8_t ap_bssid[6],
+                                           uint8_t channel,
+                                           const uint8_t client_mac[6])
+{
+    if((ap_bssid == NULL) || (client_mac == NULL) || (channel == 0U))
+    {
+        return;
+    }
+    menu_wifi_detector_boot_(true, ap_bssid, channel);
+    if(s_active)
+    {
+        (void)memcpy(s_resume_client_mac, client_mac, sizeof(s_resume_client_mac));
+        s_resume_client_pending = true;
+    }
 }

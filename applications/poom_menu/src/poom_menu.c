@@ -37,6 +37,7 @@
 #include "menu_cli_web.h"
 #include "menu_handshake_crack.h"
 #include "menu_security_audit.h"
+#include "menu_handshake_vault.h"
 #include "menu_control_music.h"
 #include "menu_deauth.h"
 #include "menu_deauth_detector.h"
@@ -565,11 +566,11 @@ static void action_wifi_detector_(void)
     menu_wifi_detector_show();
 }
 
-static void action_handshake_crack_(void)
+static void action_handshake_vault_(void)
 {
     detach_menu_();
     vTaskDelay(pdMS_TO_TICKS(180U));
-    menu_handshake_crack_show();
+    menu_handshake_vault_show();
 }
 
 static void action_poomgotchi_(void)
@@ -1225,7 +1226,7 @@ static const poom_menu_item_t s_apps_beast[] = {
     {"BLE DETECT", action_ble_detector_},
     {"FIND MY BEEP", action_findmy_beep_},
     {"WIFI DETECT", action_wifi_detector_},
-    {"CRACK HS", action_handshake_crack_},
+    {"HANDSHAKE VAULT", action_handshake_vault_},
     {"POOMGOTCHI", action_poomgotchi_},
     {"SNIFFER", action_pcap_snf_},
     {"SNNIFER RT", action_sniffer_rt_},

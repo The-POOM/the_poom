@@ -26,11 +26,13 @@
 #define POOMGOTCHI_STACK              (2560U)
 #define POOMGOTCHI_TASK_PRIO          (4U)
 #define POOMGOTCHI_TARGET_MAX         (8U)
+#define POOMGOTCHI_HISTORY_MAX        (24U)    /* remember more captured BSSIDs than we chase per scan (#45) */
 #define POOMGOTCHI_CAPTURE_FILE_LEN   (21U)
-#define POOMGOTCHI_CAPTURE_MS         (15000U)
+#define POOMGOTCHI_CAPTURE_MS         (20000U) /* dwell per target; longer gives a reconnect time to finish (#45) */
 #define POOMGOTCHI_RESULT_MS          (1500U)
-#define POOMGOTCHI_ASSIST_WAIT_MS     (6000U)
-#define POOMGOTCHI_DEAUTH_MIN_MS      (10000U)
+#define POOMGOTCHI_ASSIST_WAIT_MS     (3000U)  /* first ASSIST nudge sooner so it fits the window (#45) */
+#define POOMGOTCHI_DEAUTH_MIN_MS      (7000U)  /* re-nudge spacing; ~3 bursts per 20 s window (#45) */
+#define POOMGOTCHI_DEAUTH_BURST       (5U)     /* broadcast frames per nudge; matches the WiFi Detect burst (#45) */
 #define POOMGOTCHI_HEADER_H           (11)
 #define POOMGOTCHI_BOX_Y              (12)
 #define POOMGOTCHI_BOX_H              (40)
@@ -46,7 +48,8 @@
 #endif
 
 typedef enum {
-    POOMGOTCHI_SCREEN_SCAN = 0,
+    POOMGOTCHI_SCREEN_BAND = 0,
+    POOMGOTCHI_SCREEN_SCAN,
     POOMGOTCHI_SCREEN_CAPTURE,
     POOMGOTCHI_SCREEN_RESULT,
     POOMGOTCHI_SCREEN_IDLE,
@@ -77,7 +80,7 @@ typedef struct {
 
 typedef struct {
     poomgotchi_target_t targets[POOMGOTCHI_TARGET_MAX];
-    poomgotchi_history_t history[POOMGOTCHI_TARGET_MAX];
+    poomgotchi_history_t history[POOMGOTCHI_HISTORY_MAX];
     uint8_t history_replace_index;
 } poomgotchi_session_t;
 
@@ -96,7 +99,6 @@ static bool s_active;
 static bool s_buttons_subscribed;
 static bool s_scan_in_progress;
 static bool s_capture_running;
-static bool s_assist_sent;
 static bool s_dirty;
 static volatile bool s_exit_requested;
 static volatile bool s_stop_requested;
@@ -117,6 +119,8 @@ static uint32_t s_capture_started_ms;
 static uint32_t s_result_until_ms;
 static uint32_t s_last_deauth_ms;
 static bool s_result_captured;
+static bool s_include_5g; /* false => 2.4 GHz-only targeting; chosen on the band screen (issue #45) */
+static bool s_show_stats; /* CAPTURE screen: L/R shows the session handshake tally without stopping */
 static char s_capture_file[POOMGOTCHI_CAPTURE_FILE_LEN];
 
 static void poomgotchi_button_cb_(const poom_sbus_msg_t *msg, void *user);
@@ -169,7 +173,7 @@ static poomgotchi_history_t *poomgotchi_target_history_(void)
     poomgotchi_target_t *target = poomgotchi_target_meta_();
 
     if((s_session == NULL) || (target == NULL) ||
-       (target->history_index >= POOMGOTCHI_TARGET_MAX)) {
+       (target->history_index >= POOMGOTCHI_HISTORY_MAX)) {
         return NULL;
     }
     return &s_session->history[target->history_index];
@@ -229,6 +233,26 @@ static uint8_t poomgotchi_display_count_(uint16_t count)
     return (count > 99U) ? 99U : (uint8_t)count;
 }
 
+/* Animated pet face for the capture screen: blinks, glances left/right while
+ * idle, and widens its eyes when there is activity (clients/EAPOL seen) so the
+ * capture screen feels alive. Time-driven; same 5-char width to avoid jitter. */
+static const char *poomgotchi_face_(bool active)
+{
+    uint32_t t = poomgotchi_now_ms_();
+
+    if((t % 3200U) < 300U) {
+        return "(-_-)"; /* brief blink roughly every ~3 s (>=1 refresh so it shows) */
+    }
+    if(active) {
+        return ((t / 250U) & 1U) ? "(O_O)" : "(o_o)"; /* excited flicker on activity */
+    }
+    switch((t / 1200U) % 8U) {
+        case 2:  return "(<_<)"; /* glance left  */
+        case 5:  return "(>_>)"; /* glance right */
+        default: return "(o_o)";
+    }
+}
+
 static void poomgotchi_draw_(void)
 {
     char line[24];
@@ -238,10 +262,21 @@ static void poomgotchi_draw_(void)
     poomgotchi_draw_header_();
     poom_arduboy_draw_rect(0, POOMGOTCHI_BOX_Y, ARDUBOY_WIDTH, POOMGOTCHI_BOX_H, WHITE);
 
-    if(s_screen == POOMGOTCHI_SCREEN_SCAN) {
-        const int16_t sweep_x = (int16_t)(8U + ((poomgotchi_now_ms_() / 70U) % 100U));
+    if(s_screen == POOMGOTCHI_SCREEN_BAND) {
         poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, POOMGOTCHI_ROW0_Y);
-        (void)poom_arduboy_print(F("(o_o) SCANNING"));
+        (void)poom_arduboy_print(F("(o_o) PICK BAND"));
+        (void)snprintf(line, sizeof(line), "%c 2.4 GHz", s_include_5g ? ' ' : '>');
+        poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + POOMGOTCHI_ROW_STEP));
+        (void)poom_arduboy_print(line);
+        (void)snprintf(line, sizeof(line), "%c 2.4 + 5 GHz", s_include_5g ? '>' : ' ');
+        poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + 2 * POOMGOTCHI_ROW_STEP));
+        (void)poom_arduboy_print(line);
+        poomgotchi_draw_footer_("A:GO", "B:EXIT");
+    } else if(s_screen == POOMGOTCHI_SCREEN_SCAN) {
+        const int16_t sweep_x = (int16_t)(8U + ((poomgotchi_now_ms_() / 70U) % 100U));
+        (void)snprintf(line, sizeof(line), "(o_o) SCAN %s", s_include_5g ? "2.4+5G" : "2.4G");
+        poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, POOMGOTCHI_ROW0_Y);
+        (void)poom_arduboy_print(line);
         (void)snprintf(line, sizeof(line), "AP %u TRY %u", (unsigned)s_stats.aps_seen,
                        (unsigned)s_stats.targets_tried);
         poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + POOMGOTCHI_ROW_STEP));
@@ -252,17 +287,38 @@ static void poomgotchi_draw_(void)
     } else if(s_screen == POOMGOTCHI_SCREEN_CAPTURE) {
         poom_pcap_wifi_handshake_status_t hs = {0};
         (void)poom_pcap_manager_wifi_handshake_get_status(&hs);
-        (void)snprintf(line, sizeof(line), "(o_o) %s C%u", poomgotchi_policy_label_(),
-                       target != NULL ? (unsigned)target->primary : 0U);
-        poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, POOMGOTCHI_ROW0_Y);
-        (void)poom_arduboy_print(line);
-        poomgotchi_draw_target_name_(target, (int16_t)(POOMGOTCHI_ROW0_Y + POOMGOTCHI_ROW_STEP));
-        (void)snprintf(line, sizeof(line), "E%X P%u U%u D%u", (unsigned)hs.eapol_message_mask,
-                       (unsigned)hs.pmkid_count, (unsigned)hs.client_count,
-                       (unsigned)poomgotchi_display_count_(hs.deauth_count));
-        poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + 2 * POOMGOTCHI_ROW_STEP));
-        (void)poom_arduboy_print(line);
-        poomgotchi_draw_footer_(s_policy == POOMGOTCHI_POLICY_OFF ? "A:OFF" : "A:TX", "B:STOP");
+        if(s_show_stats) {
+            /* On-demand session tally; capture keeps running underneath (issue #45). */
+            poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, POOMGOTCHI_ROW0_Y);
+            (void)poom_arduboy_print(F("(^_^) CAUGHT"));
+            (void)snprintf(line, sizeof(line), "HS %u PMK %u",
+                           (unsigned)s_stats.handshakes, (unsigned)s_stats.pmkids);
+            poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + POOMGOTCHI_ROW_STEP));
+            (void)poom_arduboy_print(line);
+            (void)snprintf(line, sizeof(line), "AP%u T%u D%u",
+                           (unsigned)poomgotchi_display_count_(s_stats.aps_seen),
+                           (unsigned)poomgotchi_display_count_(s_stats.targets_tried),
+                           (unsigned)poomgotchi_display_count_(s_stats.deauths));
+            poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + 2 * POOMGOTCHI_ROW_STEP));
+            (void)poom_arduboy_print(line);
+            poomgotchi_draw_footer_("L:LIVE R:BAND", NULL);
+        } else {
+            (void)snprintf(line, sizeof(line), "%s %s C%u%s",
+                           poomgotchi_face_((hs.client_count > 0U) || (hs.eapol_message_mask != 0U)),
+                           poomgotchi_policy_label_(),
+                           target != NULL ? (unsigned)target->primary : 0U,
+                           s_include_5g ? "+5G" : "");
+            poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, POOMGOTCHI_ROW0_Y);
+            (void)poom_arduboy_print(line);
+            poomgotchi_draw_target_name_(target, (int16_t)(POOMGOTCHI_ROW0_Y + POOMGOTCHI_ROW_STEP));
+            (void)snprintf(line, sizeof(line), "E%X P%u U%u D%u", (unsigned)hs.eapol_message_mask,
+                           (unsigned)hs.pmkid_count, (unsigned)hs.client_count,
+                           (unsigned)poomgotchi_display_count_(hs.deauth_count));
+            poom_arduboy_set_cursor(POOMGOTCHI_TEXT_X, (int16_t)(POOMGOTCHI_ROW0_Y + 2 * POOMGOTCHI_ROW_STEP));
+            (void)poom_arduboy_print(line);
+            poomgotchi_draw_footer_(s_policy == POOMGOTCHI_POLICY_OFF ? "A:OFF L:HS R:BAND"
+                                                                     : "A:TX L:HS R:BAND", NULL);
+        }
     } else if(s_screen == POOMGOTCHI_SCREEN_RESULT) {
         poom_pcap_wifi_handshake_status_t hs = {0};
         (void)poom_pcap_manager_wifi_handshake_get_status(&hs);
@@ -332,14 +388,22 @@ static esp_err_t poomgotchi_alloc_session_(void)
 
 static bool poomgotchi_ap_is_usable_(const wifi_ap_record_t *ap)
 {
-    return (ap != NULL) && poom_wifi_ctrl_channel_is_valid(ap->primary) &&
-           (memcmp(ap->bssid, "\0\0\0\0\0\0", 6U) != 0);
+    if((ap == NULL) || !poom_wifi_ctrl_channel_is_valid(ap->primary) ||
+       (memcmp(ap->bssid, "\0\0\0\0\0\0", 6U) == 0)) {
+        return false;
+    }
+    /* 2.4 GHz only unless 5 GHz is toggled on: 5 GHz targets waste dwell and
+     * some channels the C5 cannot tune for monitor capture (issue #45). */
+    if(!s_include_5g && (ap->primary > POOM_WIFI_CTRL_WIFI_CHANNEL_MAX)) {
+        return false;
+    }
+    return true;
 }
 
 static int poomgotchi_history_find_(const uint8_t bssid[6])
 {
     if((s_session == NULL) || (bssid == NULL)) return -1;
-    for(uint8_t i = 0U; i < POOMGOTCHI_TARGET_MAX; ++i) {
+    for(uint8_t i = 0U; i < POOMGOTCHI_HISTORY_MAX; ++i) {
         if(s_session->history[i].used &&
            (memcmp(s_session->history[i].bssid, bssid, 6U) == 0)) return i;
     }
@@ -352,14 +416,14 @@ static uint8_t poomgotchi_history_get_(const uint8_t bssid[6])
     if(found >= 0) return (uint8_t)found;
 
     uint8_t slot = POOMGOTCHI_HISTORY_NONE;
-    for(uint8_t i = 0U; i < POOMGOTCHI_TARGET_MAX; ++i) {
+    for(uint8_t i = 0U; i < POOMGOTCHI_HISTORY_MAX; ++i) {
         if(!s_session->history[i].used) {
             slot = i;
             break;
         }
     }
     if(slot == POOMGOTCHI_HISTORY_NONE) {
-        slot = s_session->history_replace_index++ % POOMGOTCHI_TARGET_MAX;
+        slot = s_session->history_replace_index++ % POOMGOTCHI_HISTORY_MAX;
     }
     (void)memset(&s_session->history[slot], 0, sizeof(s_session->history[slot]));
     (void)memcpy(s_session->history[slot].bssid, bssid, 6U);
@@ -403,6 +467,12 @@ static void poomgotchi_copy_targets_(void)
         uint8_t insert_at;
 
         if(!poomgotchi_ap_is_usable_(ap)) continue;
+        /* Skip a network we already grabbed a handshake from this session, so we
+         * move on instead of re-hammering it (issue #45). */
+        if((history_index >= 0) &&
+           ((s_session->history[history_index].flags & POOMGOTCHI_HISTORY_CAPTURED) != 0U)) {
+            continue;
+        }
         candidate.scan_index = (uint8_t)i;
         candidate.score = poomgotchi_score_(ap,
             (history_index >= 0) ? &s_session->history[history_index] : NULL);
@@ -444,7 +514,16 @@ static bool poomgotchi_send_deauth_(void)
 
     if((s_policy == POOMGOTCHI_POLICY_OFF) || !s_capture_running ||
        (target == NULL) || !poomgotchi_deauth_allowed_()) return false;
-    poom_wifi_attacks_broadcast_once(target);
+
+    /* Broadcast deauth burst. On this base the pcap layer brings the radio up
+     * APSTA for 2.4 GHz capture, so the frame goes out the live AP interface
+     * (band-aware inject, ESP-IDF #18334) and actually knocks clients off to
+     * force the 4-way handshake. A short burst matches the WiFi Detect option
+     * the user confirmed works; one frame is widely ignored (issue #45). */
+    for(uint8_t rep = 0U; rep < POOMGOTCHI_DEAUTH_BURST; ++rep) {
+        poom_wifi_attacks_broadcast_once(target);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
     s_last_deauth_ms = poomgotchi_now_ms_();
     ++s_stats.deauths;
     poomgotchi_request_render_();
@@ -465,36 +544,50 @@ static void poomgotchi_remember_capture_file_(void)
 
 static void poomgotchi_start_capture_(void)
 {
-    const wifi_ap_record_t *target = poomgotchi_target_();
     const uint32_t filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+    uint16_t tries;
 
-    if(target == NULL) {
-        s_screen = POOMGOTCHI_SCREEN_IDLE;
-        poomgotchi_request_render_();
-        return;
-    }
-    if(s_capture_running) {
-        s_last_error = poom_pcap_manager_sniffer_retarget_wifi_handshake(
-            target->primary, filter_mask, target->bssid);
-    } else {
-        s_capture_file[0] = '\0';
-        s_last_error = poom_pcap_manager_sniffer_start_wifi_capture_target(
-            target->primary, filter_mask, target->bssid);
-    }
-    if(s_last_error != ESP_OK) {
+    /* Try targets in priority order. A target that will not start (e.g. a 5 GHz
+     * channel the radio rejects with INVALID_ARG) is skipped to the next one
+     * instead of halting the whole session on the ERROR screen (issue #45). */
+    for(tries = 0U; tries < s_target_count; ++tries) {
+        const wifi_ap_record_t *target = poomgotchi_target_();
+
+        if(target == NULL) break;
+
+        if(s_capture_running) {
+            s_last_error = poom_pcap_manager_sniffer_retarget_wifi_handshake(
+                target->primary, filter_mask, target->bssid);
+        } else {
+            s_capture_file[0] = '\0';
+            s_last_error = poom_pcap_manager_sniffer_start_wifi_capture_target(
+                target->primary, filter_mask, target->bssid);
+        }
+
+        if(s_last_error == ESP_OK) {
+            poomgotchi_remember_capture_file_();
+            s_capture_running = true;
+            s_capture_started_ms = poomgotchi_now_ms_();
+            ++s_stats.targets_tried;
+            s_screen = POOMGOTCHI_SCREEN_CAPTURE;
+            poomgotchi_request_render_();
+            return;
+        }
+
+        /* Start/retarget failed: the pcap layer has already stopped the sniffer,
+         * so treat the link as down and move on to the next target. */
+        printf("[poomgotchi] skip target ch=%u rc=%s\n",
+               (unsigned)target->primary, esp_err_to_name(s_last_error));
         s_capture_running = false;
-        s_screen = POOMGOTCHI_SCREEN_ERROR;
-        poomgotchi_request_render_();
-        return;
+        ++s_target_index;
+        if(s_target_index >= s_target_count) {
+            s_scan_requested = true; /* exhausted this scan's targets; rescan */
+            return;
+        }
     }
 
-    poomgotchi_remember_capture_file_();
-    s_assist_sent = false;
-    s_capture_running = true;
-    s_capture_started_ms = poomgotchi_now_ms_();
-    ++s_stats.targets_tried;
-    s_screen = POOMGOTCHI_SCREEN_CAPTURE;
-    poomgotchi_request_render_();
+    /* No usable target this round (none left, or none at all). */
+    s_scan_requested = true;
 }
 
 static void poomgotchi_record_capture_observations_(const poom_pcap_wifi_handshake_status_t *hs,
@@ -603,6 +696,7 @@ static void poomgotchi_reset_session_(void)
     s_target_index = 0U;
     s_last_deauth_ms = 0U;
     s_result_captured = false;
+    s_show_stats = false;
     s_capture_file[0] = '\0';
 }
 
@@ -638,21 +732,34 @@ static void poomgotchi_button_cb_(const poom_sbus_msg_t *msg, void *user)
     if((event.event != BUTTON_SINGLE_CLICK) || !s_active) return;
 
     if(event.button == BUTTON_B) {
-        if(s_screen == POOMGOTCHI_SCREEN_SUMMARY) s_exit_requested = true;
+        if((s_screen == POOMGOTCHI_SCREEN_SUMMARY) ||
+           (s_screen == POOMGOTCHI_SCREEN_BAND)) s_exit_requested = true;
         else {
             s_stop_requested = true;
             if(s_scan_in_progress) (void)esp_wifi_scan_stop();
         }
     } else if(event.button == BUTTON_A) {
-        if(s_screen == POOMGOTCHI_SCREEN_CAPTURE) s_deauth_requested = true;
+        if(s_screen == POOMGOTCHI_SCREEN_BAND) s_scan_requested = true; /* confirm band, start scanning */
+        else if(s_screen == POOMGOTCHI_SCREEN_CAPTURE) s_deauth_requested = true;
         else if(s_screen == POOMGOTCHI_SCREEN_SUMMARY) {
             s_restart_requested = true;
         } else if((s_screen == POOMGOTCHI_SCREEN_IDLE) || (s_screen == POOMGOTCHI_SCREEN_ERROR)) {
             s_scan_requested = true;
         }
+    } else if(s_screen == POOMGOTCHI_SCREEN_BAND) {
+        if((event.button == BUTTON_LEFT) || (event.button == BUTTON_RIGHT) ||
+           (event.button == BUTTON_UP) || (event.button == BUTTON_DOWN)) {
+            s_include_5g = !s_include_5g; /* pick 2.4 GHz vs 2.4+5 GHz before scanning (issue #45) */
+        }
     } else if(s_screen == POOMGOTCHI_SCREEN_CAPTURE) {
         if(event.button == BUTTON_UP) s_policy_delta = 1;
         else if(event.button == BUTTON_DOWN) s_policy_delta = -1;
+        else if(event.button == BUTTON_LEFT) {
+            s_show_stats = !s_show_stats; /* toggle live view / session tally without stopping capture */
+        } else if(event.button == BUTTON_RIGHT) {
+            s_include_5g = !s_include_5g; /* switch band mid-session (issue #45) */
+            s_scan_requested = true;      /* rebuild the target list for the new band set */
+        }
     }
     poomgotchi_request_render_();
 }
@@ -672,7 +779,7 @@ static void poomgotchi_task_(void *arg)
 {
     (void)arg;
     poomgotchi_request_render_();
-    s_scan_requested = (s_session != NULL);
+    s_scan_requested = false; /* wait on the band-select screen before scanning (issue #45) */
 
     while(s_active) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(POOMGOTCHI_REFRESH_MS));
@@ -686,8 +793,8 @@ static void poomgotchi_task_(void *arg)
         if(s_restart_requested) {
             s_restart_requested = false;
             poomgotchi_reset_session_();
-            s_screen = POOMGOTCHI_SCREEN_SCAN;
-            s_scan_requested = (s_session != NULL);
+            s_screen = POOMGOTCHI_SCREEN_BAND; /* re-pick the band each session (issue #45) */
+            s_scan_requested = false;
         }
         if(s_scan_requested && !s_scan_in_progress) {
             s_scan_requested = false;
@@ -702,12 +809,16 @@ static void poomgotchi_task_(void *arg)
         if(s_screen == POOMGOTCHI_SCREEN_CAPTURE) {
             poom_pcap_wifi_handshake_status_t hs = {0};
             (void)poom_pcap_manager_wifi_handshake_get_status(&hs);
+            /* ASSIST: once the AP is heard, keep nudging (throttled by
+             * DEAUTH_MIN_MS) until a full pair lands, so a client that reconnects
+             * late in the window still completes the 4-way (issue #45). */
+            if((s_policy == POOMGOTCHI_POLICY_ASSIST) && (hs.valid_pair_count == 0U) &&
+               (hs.has_beacon || (hs.client_count > 0U)) &&
+               poomgotchi_elapsed_(s_capture_started_ms, POOMGOTCHI_ASSIST_WAIT_MS)) {
+                (void)poomgotchi_send_deauth_();
+            }
             if((hs.valid_pair_count > 0U) || (hs.pmkid_count > 0U)) {
                 poomgotchi_finish_capture_(true);
-            } else if((s_policy == POOMGOTCHI_POLICY_ASSIST) && !s_assist_sent &&
-                      (hs.client_count > 0U) && (hs.eapol_message_mask == 0U) &&
-                      poomgotchi_elapsed_(s_capture_started_ms, POOMGOTCHI_ASSIST_WAIT_MS)) {
-                s_assist_sent = poomgotchi_send_deauth_();
             } else if(poomgotchi_elapsed_(s_capture_started_ms, POOMGOTCHI_CAPTURE_MS)) {
                 poomgotchi_finish_capture_(false);
             } else if(!poom_pcap_manager_sniffer_is_active()) {
@@ -738,15 +849,15 @@ void menu_poomgotchi_show(void)
     s_buttons_subscribed = false;
     s_scan_in_progress = false;
     s_capture_running = false;
-    s_assist_sent = false;
     s_exit_requested = false;
     s_stop_requested = false;
     s_scan_requested = false;
     s_restart_requested = false;
     s_deauth_requested = false;
     s_policy_delta = 0;
+    s_show_stats = false;
     s_dirty = true;
-    s_screen = POOMGOTCHI_SCREEN_SCAN;
+    s_screen = POOMGOTCHI_SCREEN_BAND;
     s_policy = POOMGOTCHI_POLICY_MANUAL;
     s_last_error = ESP_OK;
     poomgotchi_reset_session_();
