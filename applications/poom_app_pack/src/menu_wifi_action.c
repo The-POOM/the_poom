@@ -26,6 +26,10 @@
 #define ACTION_CLIENTS POOM_MARAUDER_MAX_CLIENTS
 #define ACTION_TICK_MS 100U
 #define ACTION_RESUME_TOPIC "poom/menu/resume"
+#define ACTION_VISIBLE_APS 4U
+#define ACTION_AP_LABEL_CHARS 13U
+#define ACTION_AP_SCROLL_MS 250U
+#define ACTION_AP_SCROLL_GAP 3U
 
 enum { ACTION_A = 0, ACTION_B = 1, ACTION_LEFT = 2, ACTION_RIGHT = 3,
        ACTION_UP = 4, ACTION_DOWN = 5 };
@@ -49,6 +53,7 @@ typedef struct {
     wifi_ap_record_t aps[POOM_WIFI_SCANNER_MAX_AP];
     uint16_t ap_count;
     uint16_t selected_ap;
+    uint32_t ap_selected_ms;
     poom_wifi_detector_record_t clients[ACTION_CLIENTS];
     poom_wifi_detector_record_t *client_ptrs[ACTION_CLIENTS];
     bool client_observed[ACTION_CLIENTS];
@@ -160,6 +165,25 @@ static void ap_name_(char *out, size_t len, const wifi_ap_record_t *ap)
     /* SSIDs are bytes supplied by nearby radios, not display commands. */
     for(char *p = out; *p; ++p) if((unsigned char)*p < 32U || (unsigned char)*p > 126U) *p = '?';
 }
+static void ap_label_(const action_session_t *s, const wifi_ap_record_t *ap,
+                      bool selected, char *out, size_t out_len)
+{
+    char name[33];
+    ap_name_(name, sizeof(name), ap);
+    const size_t length = strnlen(name, sizeof(name));
+    if(!selected || length <= ACTION_AP_LABEL_CHARS) {
+        (void)snprintf(out, out_len, "%.*s", (int)ACTION_AP_LABEL_CHARS, name);
+        return;
+    }
+    const size_t cycle = length + ACTION_AP_SCROLL_GAP;
+    const size_t phase = ((now_ms_() - s->ap_selected_ms) / ACTION_AP_SCROLL_MS) % cycle;
+    size_t used = 0U;
+    while(used < ACTION_AP_LABEL_CHARS && used + 1U < out_len) {
+        const size_t source = (phase + used) % cycle;
+        out[used++] = source < length ? name[source] : ' ';
+    }
+    out[used] = '\0';
+}
 
 static void draw_(action_session_t *s)
 {
@@ -170,69 +194,88 @@ static void draw_(action_session_t *s)
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 10, INVERT);
     switch(s->view) {
     case VIEW_SCAN:
-        print_(16, s->cancel_scan ? "Finishing scan..." : "Scanning networks...");
-        print_(29, s->action == POOM_WIFI_ACTION_SAE_COMMIT ? "Looking for WPA3" : "2.4 / 5 GHz on C5");
-        print_(42, "No prior scan needed");
-        print_(56, "B:BACK");
+        print_(26, s->cancel_scan ? "Finishing scan..." : "Scanning...");
+        print_(36, "Please wait");
+        poom_arduboy_set_cursor(72, 56);
+        (void)poom_arduboy_print(F("B:BACK"));
         break;
     case VIEW_APS:
         if(!s->ap_count) {
             print_(16, s->action == POOM_WIFI_ACTION_SAE_COMMIT ? "No WPA3 APs found" : "No networks found");
             print_(30, "A: scan again");
         } else {
-            const uint16_t first = (s->selected_ap / 2U) * 2U;
-            for(uint16_t i = first; i < s->ap_count && i < first + 2U; ++i) {
+            const uint16_t first = (s->selected_ap / ACTION_VISIBLE_APS) * ACTION_VISIBLE_APS;
+            for(uint16_t i = first; i < s->ap_count && i < first + ACTION_VISIBLE_APS; ++i) {
                 const wifi_ap_record_t *ap = &s->aps[i];
-                const int y = 13 + (i - first) * 20;
-                char name[34];
-                ap_name_(name, sizeof(name), ap);
-                (void)snprintf(line, sizeof(line), "%c%.20s", i == s->selected_ap ? '>' : ' ', name);
-                print_(y, line);
-                (void)snprintf(line, sizeof(line), " CH%3u %ddB %02X%02X%02X", ap->primary,
-                               ap->rssi, ap->bssid[3], ap->bssid[4], ap->bssid[5]);
-                print_(y + 9, line);
+                const int16_t y = (int16_t)(14 + (i - first) * 10);
+                ap_label_(s, ap, i == s->selected_ap, line, sizeof(line));
+                poom_arduboy_set_cursor(2, y);
+                (void)poom_arduboy_print(line);
+                (void)snprintf(line, sizeof(line), "%ddBm", ap->rssi);
+                poom_arduboy_set_cursor(84, y);
+                (void)poom_arduboy_print(line);
+                if(i == s->selected_ap)
+                    poom_arduboy_fill_rect(0, y - 1, ARDUBOY_WIDTH, 9, INVERT);
             }
+            if(first) poom_arduboy_fill_triangle(124, 11, 120, 15, 127, 15, WHITE);
+            if(first + ACTION_VISIBLE_APS < s->ap_count)
+                poom_arduboy_fill_triangle(120, 50, 127, 50, 124, 54, WHITE);
         }
-        print_(56, "A:PICK >:SCAN B:BACK");
+        print_(56, "A:SELECT");
+        poom_arduboy_set_cursor(82, 56);
+        (void)poom_arduboy_print(F("B:BACK"));
         break;
     case VIEW_SCOPE:
-        ap_name_(line, sizeof(line), &s->config.ap);
-        print_(13, line);
-        print_(28, s->client_scope == CLIENT_SCOPE_ALL ? "> ALL CLIENTS" : "  ALL CLIENTS");
-        print_(40, s->client_scope == CLIENT_SCOPE_CHOOSE ? "> CHOOSE CLIENTS" : "  CHOOSE CLIENTS");
-        print_(56, "UP/DN A:PICK B:BACK");
+        poom_arduboy_draw_rect(0, 12, ARDUBOY_WIDTH, 41, WHITE);
+        poom_arduboy_set_cursor(4, 17);
+        (void)poom_arduboy_print(F("ALL CLIENTS"));
+        if(s->client_scope == CLIENT_SCOPE_ALL)
+            poom_arduboy_fill_rect(1, 15, ARDUBOY_WIDTH - 2, 9, INVERT);
+        poom_arduboy_set_cursor(4, 30);
+        (void)poom_arduboy_print(F("CHOOSE CLIENTS"));
+        if(s->client_scope == CLIENT_SCOPE_CHOOSE)
+            poom_arduboy_fill_rect(1, 28, ARDUBOY_WIDTH - 2, 9, INVERT);
+        print_(56, "A:SELECT");
+        poom_arduboy_set_cursor(82, 56);
+        (void)poom_arduboy_print(F("B:BACK"));
         break;
     case VIEW_CLIENTS:
-        ap_name_(line, sizeof(line), &s->config.ap);
-        print_(13, line);
-        if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
-            (void)snprintf(line, sizeof(line), "%u clients, %u picked", (unsigned)s->client_count,
-                           (unsigned)s->config.client_count);
-        } else {
-            (void)snprintf(line, sizeof(line), "%u clients / %lus", (unsigned)s->client_count,
-                           (unsigned long)((now_ms_() - s->discover_started_ms) / 1000U));
-        }
-        print_(24, line);
         if(!s->client_count) {
-            print_(35, "Listening for clients");
-            print_(45, "Use lab client Wi-Fi");
+            poom_arduboy_set_cursor(22, 28);
+            (void)poom_arduboy_print(F("Listening..."));
+            poom_arduboy_set_cursor(72, 56);
+            (void)poom_arduboy_print(F("B:BACK"));
         } else if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
-            const uint8_t *mac = s->clients[s->selected_client].bssid;
-            (void)snprintf(line, sizeof(line), "[%c]%02X:%02X:%02X:%02X:%02X:%02X",
-                           selected_client_index_(s, mac) >= 0 ? 'x' : ' ',
-                           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-            print_(35, line);
-            (void)snprintf(line, sizeof(line), "%u/%u  %s", (unsigned)s->selected_client + 1U,
-                           (unsigned)s->client_count,
-                           s->client_observed[s->selected_client] ? "UP/DOWN: browse" : "seen earlier");
-            print_(45, line);
+            const size_t first = (s->selected_client / ACTION_VISIBLE_APS) * ACTION_VISIBLE_APS;
+            for(size_t i = first; i < s->client_count && i < first + ACTION_VISIBLE_APS; ++i) {
+                const poom_wifi_detector_record_t *client = &s->clients[i];
+                const int16_t y = (int16_t)(14 + (i - first) * 10U);
+                (void)snprintf(line, sizeof(line), "%c %02X:%02X:%02X:%02X",
+                               selected_client_index_(s, client->bssid) >= 0 ? '*' : ' ',
+                               client->bssid[0], client->bssid[1], client->bssid[2], client->bssid[3]);
+                poom_arduboy_set_cursor(2, y);
+                (void)poom_arduboy_print(line);
+                if(client->rssi_known) (void)snprintf(line, sizeof(line), "%ddBm", client->rssi);
+                else (void)snprintf(line, sizeof(line), "---");
+                poom_arduboy_set_cursor(84, y);
+                (void)poom_arduboy_print(line);
+                if(i == s->selected_client)
+                    poom_arduboy_fill_rect(0, y - 1, ARDUBOY_WIDTH, 9, INVERT);
+            }
+            if(first) poom_arduboy_fill_triangle(124, 11, 120, 15, 127, 15, WHITE);
+            if(first + ACTION_VISIBLE_APS < s->client_count)
+                poom_arduboy_fill_triangle(120, 50, 127, 50, 124, 54, WHITE);
+            print_(56, "A:MARK");
+            poom_arduboy_set_cursor(48, 56);
+            (void)poom_arduboy_print(F("R:RUN"));
+            poom_arduboy_set_cursor(88, 56);
+            (void)poom_arduboy_print(F("B:BACK"));
         } else {
-            print_(35, "Selecting all clients");
-            print_(45, "Only this network");
+            poom_arduboy_set_cursor(18, 28);
+            (void)poom_arduboy_print(F("Collecting clients..."));
+            poom_arduboy_set_cursor(72, 56);
+            (void)poom_arduboy_print(F("B:BACK"));
         }
-        if(s->client_scope == CLIENT_SCOPE_CHOOSE) {
-            print_(56, s->config.client_count ? "A:MARK >:NEXT B:BACK" : "A:MARK        B:BACK");
-        } else print_(56, s->client_count ? "A:USE CLIENTS B:BACK" : "B:BACK");
         break;
     case VIEW_READY:
         ap_name_(line, sizeof(line), &s->config.ap);
@@ -332,6 +375,7 @@ static void begin_scan_(action_session_t *s)
     s->error = poom_wifi_marauder_stop();
     if(s->error != ESP_OK) { s->view = VIEW_ERROR; return; }
     s->selected_ap = 0U;
+    s->ap_selected_ms = now_ms_();
     portENTER_CRITICAL(&s_input_lock);
     s->cancel_scan = false;
     portEXIT_CRITICAL(&s_input_lock);
@@ -506,6 +550,7 @@ static bool button_(action_session_t *s, uint8_t button)
         const bool next = button == ACTION_DOWN;
         if(s->view == VIEW_APS && s->ap_count) {
             s->selected_ap = (s->selected_ap + (next ? 1U : s->ap_count - 1U)) % s->ap_count;
+            s->ap_selected_ms = now_ms_();
         } else if(s->view == VIEW_SCOPE) {
             s->client_scope = s->client_scope == CLIENT_SCOPE_ALL ? CLIENT_SCOPE_CHOOSE : CLIENT_SCOPE_ALL;
         } else if(s->view == VIEW_CLIENTS && s->client_count && s->client_scope == CLIENT_SCOPE_CHOOSE) {
@@ -516,8 +561,7 @@ static bool button_(action_session_t *s, uint8_t button)
                                           (duration == 60000U ? 30000U : duration == 30000U ? 15000U : 60000U);
         }
     } else if(button == ACTION_LEFT || button == ACTION_RIGHT) {
-        if(s->view == VIEW_APS && button == ACTION_RIGHT) begin_scan_(s);
-        else if(s->view == VIEW_CLIENTS && s->client_scope == CLIENT_SCOPE_CHOOSE && button == ACTION_RIGHT) {
+        if(s->view == VIEW_CLIENTS && s->client_scope == CLIENT_SCOPE_CHOOSE && button == ACTION_RIGHT) {
             use_clients_(s);
         }
         else if(s->view == VIEW_READY && s->action == POOM_WIFI_ACTION_CHANNEL_SWITCH) {
@@ -567,6 +611,7 @@ static void ui_task_(void *arg)
                 if(cancelled_(s)) { active = false; continue; }
                 s->error = event.error;
                 s->view = event.error == ESP_OK ? VIEW_APS : VIEW_ERROR;
+                if(s->view == VIEW_APS) s->ap_selected_ms = now_ms_();
             } else active = button_(s, event.button);
         }
         if(!active) break;

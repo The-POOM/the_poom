@@ -15,6 +15,7 @@
 #include "poom_wifi_ctrl.h"
 
 enum { KEY_A, KEY_B, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN };
+enum { HEADER_H = 11, BOX_Y = 12, BOX_H = 41, ROW_Y0 = 14, ROW_STEP = 10, ROW_H = 9 };
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_events;
 static bool s_active;
@@ -42,29 +43,47 @@ static void button_(const poom_sbus_msg_t *msg, void *user)
     if(s_events) (void)xQueueSend(s_events, &key, 0);
     portEXIT_CRITICAL(&s_lock);
 }
-static void line_(int y, const char *text)
+static void line_(int x, int y, const char *text)
 {
-    poom_arduboy_set_cursor(0, y);
+    poom_arduboy_set_cursor(x, y);
     (void)poom_arduboy_print(text);
 }
-static void draw_(poom_wifi_spam_mode_t mode, uint8_t channel,
+static void footer_(const char *left, const char *middle)
+{
+    line_(0, 56, left);
+    if(middle) line_(44, 56, middle);
+    line_(88, 56, "B:BACK");
+}
+static void option_(int y, const char *text, bool selected)
+{
+    line_(4, y, text);
+    if(selected) poom_arduboy_fill_rect(1, y - 1, ARDUBOY_WIDTH - 2, ROW_H, INVERT);
+}
+static void draw_(poom_wifi_spam_mode_t mode, uint8_t channel, uint8_t selected,
                   const poom_wifi_spam_status_t *status, esp_err_t error)
 {
     char text[32];
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-    line_(1, "WIFI SPAM");
-    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 10, INVERT);
-    (void)snprintf(text, sizeof(text), "UD: %.17s", poom_wifi_spam_mode_label(mode));
-    line_(13, text);
-    (void)snprintf(text, sizeof(text), "LR: Ch %u  30 seconds", (unsigned)channel);
-    line_(23, text);
-    if(error != ESP_OK) (void)snprintf(text, sizeof(text), "%.21s", esp_err_to_name(error));
-    else (void)snprintf(text, sizeof(text), "Sent %lu Err %lu", (unsigned long)status->sent, (unsigned long)status->errors);
-    line_(33, text);
-    (void)snprintf(text, sizeof(text), "%s %lus / 30s", status->running ? "RUN" : "READY", (unsigned long)(status->elapsed_ms / 1000U));
-    line_(43, text);
-    line_(56, status->running ? "A:STOP       B:BACK" : "A:START      B:BACK");
+    line_(34, 2, "WIFI SPAM");
+    poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, HEADER_H, INVERT);
+    poom_arduboy_draw_rect(0, BOX_Y, ARDUBOY_WIDTH, BOX_H, WHITE);
+    if(status->running) {
+        (void)snprintf(text, sizeof(text), "%.18s", poom_wifi_spam_mode_label(mode));
+        line_(4, 14, text);
+        (void)snprintf(text, sizeof(text), "Sent: %lu", (unsigned long)status->sent);
+        line_(4, 25, text);
+        (void)snprintf(text, sizeof(text), "Time: %lu / 30s", (unsigned long)(status->elapsed_ms / 1000U));
+        line_(4, 36, text);
+        footer_("A:STOP", NULL);
+    } else {
+        (void)snprintf(text, sizeof(text), "TYPE: %.14s", poom_wifi_spam_mode_label(mode));
+        option_(ROW_Y0, text, selected == 0U);
+        (void)snprintf(text, sizeof(text), "CHANNEL: %u", (unsigned)channel);
+        option_(ROW_Y0 + ROW_STEP, text, selected == 1U);
+        if(error != ESP_OK) line_(4, 44, "Start failed");
+        footer_("A:RUN", "L/R:CH");
+    }
     poom_arduboy_display();
 }
 static void worker_(void *arg)
@@ -72,12 +91,13 @@ static void worker_(void *arg)
     QueueHandle_t events = arg;
     poom_wifi_spam_mode_t mode = POOM_WIFI_SPAM_SAVED;
     size_t channel_index = 0;
+    uint8_t selected = 0U;
     esp_err_t error = ESP_OK;
     poom_wifi_spam_status_t status = {0};
     for(;;) {
         poom_wifi_spam_get_status(&status);
         if(status.last_error != ESP_OK) error = status.last_error;
-        draw_(mode, s_channels[channel_index], &status, error);
+        draw_(mode, s_channels[channel_index], selected, &status, error);
         uint8_t key;
         if(xQueueReceive(events, &key, pdMS_TO_TICKS(250)) != pdTRUE) continue;
         if(key == KEY_B) break;
@@ -86,13 +106,18 @@ static void worker_(void *arg)
             else error = poom_wifi_spam_start_mode(mode, s_channels[channel_index], 30000U);
         } else if(!status.running) {
             if(key == KEY_UP || key == KEY_DOWN) {
-                mode = (poom_wifi_spam_mode_t)((mode + (key == KEY_DOWN ? 1 : POOM_WIFI_SPAM_MODE_COUNT - 1)) % POOM_WIFI_SPAM_MODE_COUNT);
+                selected ^= 1U;
                 error = ESP_OK;
             } else if(key == KEY_LEFT || key == KEY_RIGHT) {
-                const size_t count = sizeof(s_channels) / sizeof(s_channels[0]);
-                for(size_t i = 0; i < count; ++i) {
-                    channel_index = (channel_index + (key == KEY_RIGHT ? 1 : count - 1)) % count;
-                    if(poom_wifi_ctrl_channel_is_valid(s_channels[channel_index])) break;
+                if(selected == 0U) {
+                    mode = (poom_wifi_spam_mode_t)((mode +
+                        (key == KEY_RIGHT ? 1U : POOM_WIFI_SPAM_MODE_COUNT - 1U)) % POOM_WIFI_SPAM_MODE_COUNT);
+                } else {
+                    const size_t count = sizeof(s_channels) / sizeof(s_channels[0]);
+                    for(size_t i = 0; i < count; ++i) {
+                        channel_index = (channel_index + (key == KEY_RIGHT ? 1U : count - 1U)) % count;
+                        if(poom_wifi_ctrl_channel_is_valid(s_channels[channel_index])) break;
+                    }
                 }
                 error = ESP_OK;
             }

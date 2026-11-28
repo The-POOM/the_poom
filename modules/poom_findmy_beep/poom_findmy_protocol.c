@@ -29,7 +29,7 @@ bool poom_findmy_parse_ad(const uint8_t *data, size_t length, uint8_t *candidate
         const uint8_t type = data[offset];
         const uint8_t *p = data + offset + 1;
         const size_t bytes = n - 1;
-        if(type == 0xff && bytes >= 29 && p[0] == 0x4c && p[1] == 0 && p[2] == 0x12 && p[3] == 0x19) {
+        if(type == 0xff && bytes >= 4 && p[0] == 0x4c && p[1] == 0 && p[2] == 0x12) {
             flags |= POOM_FINDMY_APPLE;
         } else if(type == 0x02 || type == 0x03 || type == 0x16) {
             if(bytes % 2 && type != 0x16) return false;
@@ -55,6 +55,9 @@ bool poom_findmy_parse_ad(const uint8_t *data, size_t length, uint8_t *candidate
     }
     *candidates |= flags;
     if(parsed_name[0]) memcpy(name, parsed_name, sizeof(parsed_name));
+    else if((flags & POOM_FINDMY_APPLE) && !name[0]) {
+        memcpy(name, "Find My tag", sizeof("Find My tag"));
+    }
     return true;
 }
 

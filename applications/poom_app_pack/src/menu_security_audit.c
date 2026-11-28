@@ -24,6 +24,7 @@
 #include "menu_security_audit.h"
 
 #include <stdarg.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,10 +32,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "Arduboy2.h"
 #include "button_driver.h"
+#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -43,6 +47,7 @@
 
 #include "menu_wifi_detector_oui.h"
 #include "poom_net_audit.h"
+#include "poom_secrets_store.h"
 #include "poom_security_audit.h"
 #include "poom_sbus.h"
 #include "poom_ui_keyboard.h"
@@ -74,11 +79,19 @@
 #define SA_REFRESH_MS        (200)
 #define SA_CONNECT_TIMEOUT_MS (15000)
 #define SA_PROGRESS_MIN_MS   (120)   /* min gap between progress redraws */
+#define SA_EDB_URL "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+#define SA_EDB_DIR "/searchsploit"
+#define SA_EDB_PART_PATH POOM_NET_AUDIT_CSV_PATH ".part"
+#define SA_EDB_BACKUP_PATH POOM_NET_AUDIT_CSV_PATH ".bak"
+#define SA_EDB_MAX_BYTES (32U * 1024U * 1024U)
 
 #define SA_RESULT_CAP        (32U)   /* OPEN ports kept per single-host scan */
 #define SA_PORT_CHUNK        (256U)  /* ports materialised per scan window   */
 #define SA_HOST_PORTS        (12U)   /* open ports kept per host in Scan All */
 #define SA_VISIBLE_ROWS      (4U)    /* list rows visible at once           */
+#define SA_AP_NAME_CHARS     (15U)
+#define SA_AP_SCROLL_STEP_MS (350U)
+#define SA_AP_SCROLL_GAP     (3U)
 
 /* UI-side device cap. Deliberately smaller than the engine's hard ceiling so
  * the per-session struct stays a modest, reliably-allocatable block (a large
@@ -141,6 +154,7 @@ typedef enum
     SA_SCR_VULN_EXPOSURES,/* exposure findings of one host (text page)  */
     SA_SCR_DEVICE_INFO,   /* what a host is: identity + open services (page) */
     SA_SCR_SAVE_CONFIRM,  /* offer to save a freshly-entered network */
+    SA_SCR_EDB_DOWNLOADING, /* stream Exploit-DB CSV to SD */
     SA_SCR_INFO,          /* transient message                     */
 } sa_screen_t;
 
@@ -324,6 +338,8 @@ static int  s_sel = 0;              /* generic list selection            */
 static int  s_list_top = 0;         /* list scroll window top            */
 static int  s_result_top = 0;       /* results scroll                    */
 static int  s_host_sel = 0;         /* remembered Devices-list row        */
+static int  s_ap_scroll_sel = -1;
+static int64_t s_ap_scroll_started_ms = 0;
 static int  s_summary_sel = 0;      /* remembered Net-Summary row          */
 static int  s_ss_sel = 0;           /* selected SearchSploit match          */
 static bool s_services_on = true;   /* identify services after a port scan */
@@ -347,6 +363,11 @@ static uint16_t s_cur_conf = 0;                /* confirmed web-check hits of th
 static uint16_t s_cur_web_port = 0;
 static volatile bool s_chk_phase = false;      /* web checks running (draw) */
 static volatile bool s_report_pending = false; /* "Save report" chosen (SD I/O in task) */
+static volatile bool s_edb_download_pending = false;
+static volatile bool s_edb_downloading = false;
+static volatile bool s_edb_connecting = false;
+static uint32_t s_edb_received = 0;
+static uint32_t s_edb_total = 0;
 static bool s_last_run_full = false;           /* last Assess All was part of a Full NetAudit */
 
 /* Selected port shown in PORT_DETAIL. */
@@ -842,6 +863,218 @@ static void sa_log_db_pass_(void)
     s_idx_building = false;
 }
 
+typedef struct
+{
+    FILE *file;
+    esp_err_t error;
+    uint32_t received;
+    uint32_t total;
+    int64_t last_draw_ms;
+} sa_edb_download_t;
+
+static esp_err_t sa_edb_http_event_(esp_http_client_event_t *event)
+{
+    sa_edb_download_t *download = (sa_edb_download_t *)event->user_data;
+    if (download == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_cancel)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key != NULL &&
+        strcmp(event->header_key, "Content-Length") == 0 && event->header_value != NULL)
+    {
+        unsigned long value = strtoul(event->header_value, NULL, 10);
+        download->total = (value <= UINT32_MAX) ? (uint32_t)value : 0U;
+        s_edb_total = download->total;
+    }
+    else if (event->event_id == HTTP_EVENT_ON_DATA && event->data != NULL && event->data_len > 0)
+    {
+        if (s_cancel)
+        {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (download->file == NULL || download->received > (SA_EDB_MAX_BYTES - (uint32_t)event->data_len))
+        {
+            download->error = (download->file == NULL) ? ESP_ERR_INVALID_STATE : ESP_ERR_INVALID_SIZE;
+            return download->error;
+        }
+        if (fwrite(event->data, 1U, (size_t)event->data_len, download->file) != (size_t)event->data_len)
+        {
+            download->error = ESP_FAIL;
+            return download->error;
+        }
+        download->received += (uint32_t)event->data_len;
+        s_edb_received = download->received;
+        int64_t now = sa_now_ms_();
+        if ((now - download->last_draw_ms) >= SA_PROGRESS_MIN_MS)
+        {
+            download->last_draw_ms = now;
+            sa_draw_();
+        }
+    }
+    return ESP_OK;
+}
+
+static void sa_run_edb_download_(void)
+{
+    sa_edb_download_t download = {0};
+    esp_http_client_handle_t client = NULL;
+    esp_err_t err = ESP_OK;
+    struct stat st;
+    bool had_database = false;
+
+    s_cancel = false;
+    s_edb_downloading = true;
+    s_edb_received = 0;
+    s_edb_total = 0;
+    s_screen = SA_SCR_EDB_DOWNLOADING;
+    sa_draw_();
+
+    if (!poom_wifi_ctrl_sta_has_ip())
+    {
+        char ssid[POOM_WIFI_PROFILE_SSID_CAP] = {0};
+        char password[POOM_WIFI_PROFILE_PASS_CAP] = {0};
+        size_t ssid_len = sizeof(ssid);
+        size_t password_len = sizeof(password);
+        s_edb_connecting = true;
+        sa_draw_();
+        err = poom_secrets_init();
+        if (err == ESP_OK)
+        {
+            err = poom_secrets_get_wifi_ssid(ssid, &ssid_len);
+        }
+        if (err == ESP_OK && ssid[0] != '\0')
+        {
+            if (poom_secrets_get_wifi_pass(password, &password_len) != ESP_OK)
+            {
+                password[0] = '\0';
+            }
+            err = poom_wifi_ctrl_sta_connect(ssid, password[0] != '\0' ? password : NULL);
+        }
+        else if (err == ESP_OK)
+        {
+            err = ESP_ERR_NOT_FOUND;
+        }
+        const int64_t started = sa_now_ms_();
+        while (err == ESP_OK && !poom_wifi_ctrl_sta_has_ip())
+        {
+            if (s_cancel)
+            {
+                err = ESP_ERR_INVALID_STATE;
+                break;
+            }
+            if ((sa_now_ms_() - started) >= SA_CONNECT_TIMEOUT_MS)
+            {
+                err = ESP_ERR_TIMEOUT;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(SA_REFRESH_MS));
+        }
+        s_edb_connecting = false;
+        if (err != ESP_OK)
+        {
+            goto cleanup;
+        }
+    }
+
+    /* db_status mounts the SD with the lean two-file configuration and leaves
+     * it mounted for this streaming transfer. Either existing or absent CSV is
+     * acceptable; a mount failure is not. */
+    err = poom_net_audit_db_status();
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND)
+    {
+        goto cleanup;
+    }
+    err = sd_card_create_dir(SA_EDB_DIR);
+    if (err != ESP_OK)
+    {
+        goto cleanup;
+    }
+    (void)unlink(SA_EDB_PART_PATH);
+    download.file = fopen(SA_EDB_PART_PATH, "wb");
+    if (download.file == NULL)
+    {
+        err = ESP_ERR_FILE_OPEN_FAILED;
+        goto cleanup;
+    }
+
+    const esp_http_client_config_t config = {
+        .url = SA_EDB_URL,
+        .event_handler = sa_edb_http_event_,
+        .user_data = &download,
+        .timeout_ms = 5000,
+        .buffer_size = 512,
+        .buffer_size_tx = 256,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    client = esp_http_client_init(&config);
+    if (client == NULL)
+    {
+        err = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+    (void)esp_http_client_set_header(client, "Accept", "text/csv");
+    (void)esp_http_client_set_header(client, "Accept-Encoding", "identity");
+    err = esp_http_client_perform(client);
+    if (download.error != ESP_OK)
+    {
+        err = download.error;
+    }
+    if (s_cancel)
+    {
+        err = ESP_ERR_INVALID_STATE;
+    }
+    if (err == ESP_OK && esp_http_client_get_status_code(client) != 200)
+    {
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+    if (err == ESP_OK && download.received < 128U)
+    {
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+
+cleanup:
+    if (client != NULL)
+    {
+        (void)esp_http_client_cleanup(client);
+    }
+    if (download.file != NULL && fclose(download.file) != 0 && err == ESP_OK)
+    {
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK)
+    {
+        had_database = stat(POOM_NET_AUDIT_CSV_PATH, &st) == 0;
+        (void)unlink(SA_EDB_BACKUP_PATH);
+        if (had_database && rename(POOM_NET_AUDIT_CSV_PATH, SA_EDB_BACKUP_PATH) != 0)
+        {
+            err = ESP_FAIL;
+        }
+        if (err == ESP_OK && rename(SA_EDB_PART_PATH, POOM_NET_AUDIT_CSV_PATH) != 0)
+        {
+            if (had_database) { (void)rename(SA_EDB_BACKUP_PATH, POOM_NET_AUDIT_CSV_PATH); }
+            err = ESP_FAIL;
+        }
+        (void)unlink(SA_EDB_BACKUP_PATH);
+        (void)unlink(POOM_NET_AUDIT_IDX_PATH); /* rebuilt on the next Assess */
+    }
+    if (err != ESP_OK)
+    {
+        (void)unlink(SA_EDB_PART_PATH);
+    }
+    poom_net_audit_release();
+    s_edb_downloading = false;
+    s_edb_connecting = false;
+    sa_set_info_((err == ESP_OK) ? "DB ready for Assess" :
+                 (s_cancel ? "Download cancelled" :
+                  ((err == ESP_ERR_NOT_FOUND) ? "Set WiFi in Settings" : "DB download failed")),
+                 SA_SCR_WIFI);
+}
+
 /* Mount the SD (if needed) and check the Exploit-DB CSV. On failure shows a
  * message that says WHICH problem it is, returning to @p back. */
 static bool sa_db_ready_(sa_screen_t back)
@@ -855,7 +1088,7 @@ static bool sa_db_ready_(sa_screen_t back)
         return true;
     }
     poom_net_audit_release();
-    if (st == ESP_ERR_NOT_FOUND) { sa_set_info_("No EDB on SD card", back); return false; }
+    if (st == ESP_ERR_NOT_FOUND) { sa_set_info_("Download Exploit DB", back); return false; }
 
     esp_err_t raw = sd_card_last_raw_err();
     printf("[security_audit] SD mount failed: %s (raw %s)\n",
@@ -953,7 +1186,7 @@ static void sa_run_assess_(void)
     /* Wi-Fi stays off; sa_need_link_() rejoins when a network action needs it. */
     if (!ready) { return; } /* message already set */
 
-    if (err == ESP_ERR_NOT_FOUND) { sa_set_info_("EDB file missing", SA_SCR_RESULTS); return; }
+    if (err == ESP_ERR_NOT_FOUND) { sa_set_info_("Download Exploit DB", SA_SCR_RESULTS); return; }
     if (err != ESP_OK)            { sa_set_info_("SD read error", SA_SCR_RESULTS); return; }
 
     /* Drop leads whose platform cannot run on this host's known OS. */
@@ -1597,7 +1830,7 @@ static bool sa_run_assess_all_(void)
         /* Wi-Fi stays off; sa_need_link_() rejoins when a network action needs it. */
         if (!ready) { return false; } /* message already set */
 
-        if (err == ESP_ERR_NOT_FOUND) { sa_set_info_("EDB file missing", SA_SCR_NET_SUMMARY); return false; }
+    if (err == ESP_ERR_NOT_FOUND) { sa_set_info_("Download Exploit DB", SA_SCR_NET_SUMMARY); return false; }
         if (err != ESP_OK)            { sa_set_info_("SD read error", SA_SCR_NET_SUMMARY); return false; }
         s_net_partial = s_cancel;
     }
@@ -1760,7 +1993,7 @@ static void sa_run_netaudit_(void)
         poom_net_audit_release();
         if (st == ESP_ERR_NOT_FOUND)
         {
-            sa_set_info_("No EDB on SD card", SA_SCR_HOSTS);
+            sa_set_info_("Download Exploit DB", SA_SCR_HOSTS);
             goto done;
         }
         if (st != ESP_OK && sd_card_last_raw_err() != ESP_ERR_NO_MEM)
@@ -2117,6 +2350,7 @@ static void sa_run_scan_aps_(void)
         return;
     }
     sa_reset_list_();
+    s_ap_scroll_sel = -1;
 }
 
 /* ---- connect handling --------------------------------------------------- */
@@ -2148,17 +2382,61 @@ static void sa_update_connecting_(void)
 
 static void sa_draw_title_(const char *t)
 {
+    char title[21] = {0};
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-    poom_arduboy_set_cursor(2, 2);
-    (void)poom_arduboy_print(t);
+    size_t len = (t != NULL) ? strnlen(t, 20U) : 0U;
+    if (len > 0U) { memcpy(title, t, len); }
+    int16_t x = (int16_t)((ARDUBOY_WIDTH - (int)(len * 6U)) / 2);
+    if (x < 2) { x = 2; }
+    poom_arduboy_set_cursor(x, 2);
+    (void)poom_arduboy_print(title);
     poom_arduboy_fill_rect(0, 0, ARDUBOY_WIDTH, 11, INVERT);
 }
 
 static void sa_draw_footer_(const char *t)
 {
-    poom_arduboy_set_cursor(2, 56);
-    (void)poom_arduboy_print(t);
+    char left[26] = {0};
+    char right[18] = {0};
+    const char *back = NULL;
+    const char *text = (t != NULL) ? t : "";
+
+    for (const char *p = text; p[0] != '\0'; ++p)
+    {
+        if ((p[0] == 'B' || p[0] == 'b') && p[1] == ':') { back = p; }
+    }
+
+    size_t left_len = back != NULL ? (size_t)(back - text) : strlen(text);
+    while (left_len > 0U && text[left_len - 1U] == ' ') { --left_len; }
+    if (left_len >= sizeof(left)) { left_len = sizeof(left) - 1U; }
+    for (size_t i = 0; i < left_len; ++i) { left[i] = (char)toupper((unsigned char)text[i]); }
+
+    if (back != NULL)
+    {
+        (void)snprintf(right, sizeof(right), "%s", back);
+        for (size_t i = 0; right[i] != '\0'; ++i) { right[i] = (char)toupper((unsigned char)right[i]); }
+    }
+
+    if (left[0] != '\0')
+    {
+        poom_arduboy_set_cursor(0, 56);
+        (void)poom_arduboy_print(left);
+    }
+    if (right[0] != '\0')
+    {
+        /* Keep the Back action on the far right, like the standard POOM
+         * menus.  The left action is rendered independently, so it cannot
+         * be pushed underneath B:BACK by a long label. */
+        int16_t x = (int16_t)(ARDUBOY_WIDTH - (int)(strlen(right) * 6U));
+        if (x < 72) { x = 72; }
+        poom_arduboy_set_cursor(x, 56);
+        (void)poom_arduboy_print(right);
+    }
+}
+
+static void sa_draw_selected_row_(int y)
+{
+    poom_arduboy_fill_rect(0, y - 1, ARDUBOY_WIDTH, 9, INVERT);
 }
 
 /* Draw a scrolling list; returns nothing. Caller supplies a row-text fn. */
@@ -2168,7 +2446,6 @@ static void sa_draw_list_(int count, sa_row_text_fn row_fn)
 {
     sa_fix_window_(count);
     char line[26];
-    char row[28];
     for (uint32_t r = 0; r < SA_VISIBLE_ROWS; ++r)
     {
         int idx = s_list_top + (int)r;
@@ -2176,9 +2453,9 @@ static void sa_draw_list_(int count, sa_row_text_fn row_fn)
         int y = 14 + (int)r * 10;
         bool sel = (idx == s_sel);
         row_fn(idx, line, sizeof(line));
-        (void)snprintf(row, sizeof(row), "%s%s", sel ? ">" : " ", line);
         poom_arduboy_set_cursor(2, y);
-        (void)poom_arduboy_print(row);
+        (void)poom_arduboy_print(line);
+        if (sel) { sa_draw_selected_row_(y); }
     }
 }
 
@@ -2186,14 +2463,14 @@ static void sa_draw_list_(int count, sa_row_text_fn row_fn)
 static void sa_row_wifi_(int idx, char *out, size_t cap)
 {
     bool up = poom_wifi_ctrl_sta_has_ip();
-    const char *const up_items[] = {"Scan Hosts", "Change Net", "Disconnect"};
-    const char *const dn_items[] = {"Saved Profiles", "Scan Networks"};
+    const char *const up_items[] = {"Scan Hosts", "Change Net", "Download Exploit DB", "Disconnect"};
+    const char *const dn_items[] = {"Saved Profiles", "Scan Networks", "Download Exploit DB"};
     if (up) { (void)snprintf(out, cap, "%s", up_items[idx]); }
     else    { (void)snprintf(out, cap, "%s", dn_items[idx]); }
 }
 static int sa_wifi_item_count_(void)
 {
-    return poom_wifi_ctrl_sta_has_ip() ? 3 : 2;
+    return poom_wifi_ctrl_sta_has_ip() ? 4 : 3;
 }
 
 static void sa_row_profile_(int idx, char *out, size_t cap)
@@ -2201,11 +2478,59 @@ static void sa_row_profile_(int idx, char *out, size_t cap)
     (void)snprintf(out, cap, "%.21s", s_ses->profiles[idx].ssid);
 }
 
-static void sa_row_ap_(int idx, char *out, size_t cap)
+static void sa_format_ap_name_(char *out, size_t cap, const char *ssid, bool selected)
 {
-    wifi_ap_record_t *ap = poom_wifi_scanner_get_ap_record((unsigned)idx);
-    if (ap == NULL) { (void)snprintf(out, cap, "?"); return; }
-    (void)snprintf(out, cap, "%.17s %d", (const char *)ap->ssid, (int)ap->rssi);
+    if (out == NULL || cap == 0U) { return; }
+    out[0] = '\0';
+    if (ssid == NULL || ssid[0] == '\0') { (void)snprintf(out, cap, "<hidden>"); return; }
+
+    const size_t len = strlen(ssid);
+    if (!selected || len <= SA_AP_NAME_CHARS)
+    {
+        (void)snprintf(out, cap, "%.*s", (int)SA_AP_NAME_CHARS, ssid);
+        return;
+    }
+
+    const size_t cycle = len + SA_AP_SCROLL_GAP;
+    const size_t phase = (size_t)(((sa_now_ms_() - s_ap_scroll_started_ms) /
+                                   SA_AP_SCROLL_STEP_MS) % cycle);
+    for (size_t i = 0U; i < SA_AP_NAME_CHARS && (i + 1U) < cap; ++i)
+    {
+        const size_t source = (phase + i) % cycle;
+        out[i] = (source < len) ? ssid[source] : ' ';
+        out[i + 1U] = '\0';
+    }
+}
+
+static void sa_draw_ap_list_(int count)
+{
+    sa_fix_window_(count);
+    if (s_sel != s_ap_scroll_sel)
+    {
+        s_ap_scroll_sel = s_sel;
+        s_ap_scroll_started_ms = sa_now_ms_();
+    }
+
+    for (uint32_t row = 0U; row < SA_VISIBLE_ROWS; ++row)
+    {
+        const int index = s_list_top + (int)row;
+        if (index >= count) { break; }
+        wifi_ap_record_t *ap = poom_wifi_scanner_get_ap_record((unsigned)index);
+        if (ap == NULL) { continue; }
+
+        const int y = 14 + (int)row * 10;
+        char raw_ssid[sizeof(ap->ssid) + 1U] = {0};
+        char ssid[SA_AP_NAME_CHARS + 1U] = {0};
+        char rssi[8] = {0};
+        memcpy(raw_ssid, ap->ssid, sizeof(ap->ssid));
+        sa_format_ap_name_(ssid, sizeof(ssid), raw_ssid, index == s_sel);
+        (void)snprintf(rssi, sizeof(rssi), "%d", (int)ap->rssi);
+        poom_arduboy_set_cursor(2, y);
+        (void)poom_arduboy_print(ssid);
+        poom_arduboy_set_cursor(100, y);
+        (void)poom_arduboy_print(rssi);
+        if (index == s_sel) { sa_draw_selected_row_(y); }
+    }
 }
 
 /* Action rows at the top of the Devices list. "View Last Results" is
@@ -2271,8 +2596,7 @@ static void sa_row_profchoice_(int idx, char *out, size_t cap)
 }
 
 /* Results focus on OPEN ports (the useful outcome); closed/filtered are rolled
- * into a count summary so the small screen is not flooded with noise. The list
- * has a '>' cursor moved by Up/Down (s_sel indexes open ports). */
+ * into a count summary so the small screen is not flooded with noise. */
 static void sa_draw_results_(void)
 {
     char l[26];
@@ -2313,7 +2637,7 @@ static void sa_draw_results_(void)
         if (s_ses->sb->results[i].state != POOM_SECURITY_AUDIT_PORT_OPEN) { continue; }
         if (k >= s_result_top && k < s_result_top + rows)
         {
-            int y = 26 + (k - s_result_top) * 10;
+            int y = 24 + (k - s_result_top) * 10;
             uint16_t port = s_ses->sb->results[i].port;
             /* Prefer a detected service name; fall back to the port guess. */
             poom_security_audit_service_t *sv = sa_find_svc_(port);
@@ -2321,14 +2645,14 @@ static void sa_draw_results_(void)
                                 sv->evidence >= POOM_SECURITY_AUDIT_EV_PROTO_RESPONSE)
                                    ? sv->service
                                    : poom_security_audit_service_name(port);
-            (void)snprintf(l, sizeof(l), "%s%5u %.12s", (k == s_sel) ? ">" : " ",
-                           (unsigned)port, name);
+            (void)snprintf(l, sizeof(l), "%5u %.12s", (unsigned)port, name);
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (k == s_sel) { sa_draw_selected_row_(y); }
         }
         k++;
     }
-    sa_draw_footer_("A:det L:assess B:bk");
+    sa_draw_footer_("A:INFO L:ASSESS B:BACK");
     poom_arduboy_display();
 }
 
@@ -2341,12 +2665,12 @@ static void sa_draw_progress_(const char *title, const char *action)
     uint32_t total = s_prog_total ? s_prog_total : 1;
     uint32_t done = (s_prog_done > total) ? total : s_prog_done;
     int w = (int)((uint32_t)(ARDUBOY_WIDTH - 8) * done / total);
-    poom_arduboy_draw_rect(4, 34, ARDUBOY_WIDTH - 8, 10, 1);
-    if (w > 0) { poom_arduboy_fill_rect(4, 34, w, 10, 1); }
+    poom_arduboy_draw_rect(4, 32, ARDUBOY_WIDTH - 8, 10, 1);
+    if (w > 0) { poom_arduboy_fill_rect(4, 32, w, 10, 1); }
 
     char l[24];
     (void)snprintf(l, sizeof(l), "%u / %u", (unsigned)done, (unsigned)total);
-    poom_arduboy_set_cursor(4, 46);
+    poom_arduboy_set_cursor(4, 44);
     (void)poom_arduboy_print(l);
     sa_draw_footer_("B:CANCEL");
     poom_arduboy_display();
@@ -2508,39 +2832,10 @@ static void sa_draw_(void)
     {
     case SA_SCR_WIFI:
     {
-        bool up = poom_wifi_ctrl_sta_has_ip();
         int n = sa_wifi_item_count_();
         sa_draw_title_("SECURITY AUDIT");
-
-        poom_arduboy_set_cursor(2, 14);
-        if (up)
-        {
-            sa_load_ssid_();
-            (void)snprintf(l, sizeof(l), "On: %.16s", s_ssid[0] ? s_ssid : "(net)");
-            (void)poom_arduboy_print(l);
-        }
-        else
-        {
-            (void)poom_arduboy_print(F("Not connected"));
-        }
-
-        /* Small menu below the status line: 3 rows visible, scrolls. */
-        if (s_sel < 0) { s_sel = 0; }
-        if (s_sel >= n) { s_sel = n - 1; }
-        if (s_sel < s_list_top) { s_list_top = s_sel; }
-        if (s_sel >= s_list_top + 3) { s_list_top = s_sel - 2; }
-        if (s_list_top > n - 3) { s_list_top = (n > 3) ? n - 3 : 0; }
-        if (s_list_top < 0) { s_list_top = 0; }
-        for (int i = s_list_top; i < n && i < s_list_top + 3; ++i)
-        {
-            int y = 26 + (i - s_list_top) * 10;
-            char row[28];
-            sa_row_wifi_(i, l, sizeof(l));
-            (void)snprintf(row, sizeof(row), "%s%s", (i == s_sel) ? ">" : " ", l);
-            poom_arduboy_set_cursor(2, y);
-            (void)poom_arduboy_print(row);
-        }
-        sa_draw_footer_("A:OK B:back");
+        sa_draw_list_(n, sa_row_wifi_);
+        sa_draw_footer_("A:SELECT B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2557,7 +2852,7 @@ static void sa_draw_(void)
         {
             sa_draw_list_((int)s_ses->profile_count, sa_row_profile_);
         }
-        sa_draw_footer_("A:connect B:back");
+        sa_draw_footer_("A:CONNECT B:BACK");
         poom_arduboy_display();
         break;
 
@@ -2570,6 +2865,7 @@ static void sa_draw_(void)
             (void)poom_arduboy_print(F("Scanning for"));
             poom_arduboy_set_cursor(2, 38);
             (void)poom_arduboy_print(F("networks..."));
+            sa_draw_footer_("B:BACK");
             poom_arduboy_display();
             break;
         }
@@ -2582,9 +2878,9 @@ static void sa_draw_(void)
         }
         else
         {
-            sa_draw_list_(n, sa_row_ap_);
+            sa_draw_ap_list_(n);
         }
-        sa_draw_footer_("A:pick B:back");
+        sa_draw_footer_("A:SELECT B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2616,7 +2912,7 @@ static void sa_draw_(void)
         sa_draw_title_(t);
         int total = sa_host_act_count_() + (int)s_ses->host_count;
         sa_draw_list_(total, sa_row_host_);
-        sa_draw_footer_("A:sel B:back");
+        sa_draw_footer_("A:SELECT B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2662,30 +2958,30 @@ static void sa_draw_(void)
         }
         if (id.ttl_known) { sa_page_addf_("Ping TTL: %u", (unsigned)id.ttl); }
 
-        sa_page_draw_("HOST", "A:Port Scan  B:back");
+        sa_page_draw_("HOST", "A:PORT SCAN B:BACK");
         break;
     }
 
     case SA_SCR_PORT_METHOD:
         sa_draw_title_("SCAN METHOD");
         sa_draw_list_(2, sa_row_method_);
-        sa_draw_footer_("A:ok B:back");
+        sa_draw_footer_("A:SELECT B:BACK");
         poom_arduboy_display();
         break;
 
     case SA_SCR_PORT_PROFILE:
     {
-        sa_draw_title_("PORT RANGE");
+        sa_draw_title_(s_audit_flow ? "PORT RANGE" :
+                       (s_services_on ? "PORT RANGE SVC ON" : "PORT RANGE SVC OFF"));
         sa_draw_list_(4, sa_row_profchoice_);
         char f[26];
         if (s_audit_flow)
         {
-            (void)snprintf(f, sizeof(f), "NetAudit A:next");
+            (void)snprintf(f, sizeof(f), "A:NEXT B:BACK");
         }
         else
         {
-            (void)snprintf(f, sizeof(f), "Svc:%s(L) A:start",
-                           s_services_on ? "ON" : "OFF");
+            (void)snprintf(f, sizeof(f), "L:SET A:START B:BACK");
         }
         sa_draw_footer_(f);
         poom_arduboy_display();
@@ -2755,14 +3051,14 @@ static void sa_draw_(void)
             if (n >= nhosts) { break; }
             int h = sa_nth_open_host_(n);
             if (h < 0) { break; }
-            int y = 26 + r * 10;
-            (void)snprintf(l, sizeof(l), "%s%.15s (%u)", (n == s_sel) ? ">" : " ",
-                           s_ses->hosts[h].ip_str,
+            int y = 24 + r * 10;
+            (void)snprintf(l, sizeof(l), "%.15s (%u)", s_ses->hosts[h].ip_str,
                            (unsigned)s_ses->nb->host_open[h].count);
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (n == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:view L:assess B:bk");
+        sa_draw_footer_("A:VIEW L:ASSESS B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2792,12 +3088,12 @@ static void sa_draw_(void)
             const char *name = (sid != 0) ? poom_security_audit_service_by_id(sid)
                                           : poom_security_audit_service_name(port);
             int y = 14 + r * 10;
-            (void)snprintf(l, sizeof(l), "%s%5u %.12s", (i == s_sel) ? ">" : " ",
-                           (unsigned)port, name);
+            (void)snprintf(l, sizeof(l), "%5u %.12s", (unsigned)port, name);
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (i == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:detail B:back");
+        sa_draw_footer_("A:DETAIL B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2844,7 +3140,7 @@ static void sa_draw_(void)
             sa_page_add_("Banner:");
             sa_page_add_(sv->banner);
         }
-        sa_page_draw_(t, got ? "A:redetect  B:back" : "A:detect  B:back");
+        sa_page_draw_(t, got ? "A:REDETECT B:BACK" : "A:DETECT B:BACK");
         break;
     }
 
@@ -2863,12 +3159,12 @@ static void sa_draw_(void)
         for (int i = 0; i < 4; ++i)
         {
             int y = 14 + i * 10;
-            (void)snprintf(l, sizeof(l), "%s%-11s (%u)", (i == s_sel) ? ">" : " ",
-                           rows3[i], cnt3[i] % 100U);
+            (void)snprintf(l, sizeof(l), "%-11s (%u)", rows3[i], cnt3[i] % 100U);
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (i == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:open B:back");
+        sa_draw_footer_("A:OPEN B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2893,12 +3189,13 @@ static void sa_draw_(void)
         if (s_sel >= nopt) { s_sel = nopt - 1; }
         for (int i = 0; i < nopt; ++i)
         {
-            int y = 25 + i * 10;
-            (void)snprintf(l, sizeof(l), "%s%s", (i == s_sel) ? ">" : " ", opt[i]);
+            int y = 24 + i * 10;
+            (void)snprintf(l, sizeof(l), "%s", opt[i]);
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (i == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:open B:back");
+        sa_draw_footer_("A:OPEN B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -2919,12 +3216,13 @@ static void sa_draw_(void)
             if (i >= n) { break; }
             int y = 14 + r * 10;
             uint8_t svc = s_ses->as->ss_term_svc[i];
-            (void)snprintf(l, sizeof(l), "%s%-12.12s x%d", (i == s_sel) ? ">" : " ",
+            (void)snprintf(l, sizeof(l), "%-12.12s x%d",
                            s_ses->as->svcs[svc].product, sa_term_match_count_((uint8_t)i));
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (i == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:exploits B:back");
+        sa_draw_footer_("A:EXPLOITS B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -3007,17 +3305,18 @@ static void sa_draw_(void)
             const char *label = (m->cve[0] != '\0') ? m->cve : m->title;
             if (s_ses->as->ss_disp[i].count > 1)
             {
-                (void)snprintf(l, sizeof(l), "%s%.14s x%u", (i == s_sel) ? ">" : " ",
+                (void)snprintf(l, sizeof(l), "%.14s x%u",
                                label, (unsigned)s_ses->as->ss_disp[i].count);
             }
             else
             {
-                (void)snprintf(l, sizeof(l), "%s%.18s", (i == s_sel) ? ">" : " ", label);
+                (void)snprintf(l, sizeof(l), "%.18s", label);
             }
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (i == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:view L/R:tier B:bk");
+        sa_draw_footer_("A:VIEW L/R:TIER B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -3073,17 +3372,18 @@ static void sa_draw_(void)
             int y = 14 + (i - s_result_top) * 10;
             if (i < 4)
             {
-                (void)snprintf(l, sizeof(l), "%s%-11s %u hst", (i == s_sel) ? ">" : " ",
+                (void)snprintf(l, sizeof(l), "%-11s %u hst",
                                rows3[i], (unsigned)cnt4[i]);
             }
             else
             {
-                (void)snprintf(l, sizeof(l), "%sSave report", (i == s_sel) ? ">" : " ");
+                (void)snprintf(l, sizeof(l), "Save report");
             }
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (i == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_("A:hosts B:back");
+        sa_draw_footer_("A:HOSTS B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -3129,18 +3429,19 @@ static void sa_draw_(void)
             const char *mark = (s_net_cat == 0 || s_net_cat == 3) ? "!" : "o";
             if (lab[0] != '\0')
             {
-                (void)snprintf(l, sizeof(l), "%s.%u %-12.12s %s%u", (n == s_sel) ? ">" : " ",
+                (void)snprintf(l, sizeof(l), ".%u %-12.12s %s%u",
                                (unsigned)(s_ses->hosts[h].ip & 0xFFU), lab, mark, v % 100U);
             }
             else
             {
-                (void)snprintf(l, sizeof(l), "%s%.15s %s%u", (n == s_sel) ? ">" : " ",
+                (void)snprintf(l, sizeof(l), "%.15s %s%u",
                                s_ses->hosts[h].ip_str, mark, v % 100U);
             }
             poom_arduboy_set_cursor(2, y);
             (void)poom_arduboy_print(l);
+            if (n == s_sel) { sa_draw_selected_row_(y); }
         }
-        sa_draw_footer_(cnt ? "A:open B:back" : "B:back");
+        sa_draw_footer_(cnt ? "A:OPEN B:BACK" : "B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -3170,7 +3471,7 @@ static void sa_draw_(void)
         poom_arduboy_set_cursor(2, 43);
         (void)snprintf(l, sizeof(l), "Est: up to ~%.6s", d);
         (void)poom_arduboy_print(l);
-        sa_draw_footer_("A:start B:back");
+        sa_draw_footer_("A:START B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -3256,12 +3557,31 @@ static void sa_draw_(void)
         poom_arduboy_display();
         break;
 
+    case SA_SCR_EDB_DOWNLOADING:
+    {
+        sa_draw_title_("EXPLOIT DB");
+        poom_arduboy_set_cursor(2, 20);
+        (void)poom_arduboy_print(s_edb_connecting ? F("Connecting WiFi...") : F("Downloading to SD..."));
+        int width = (s_edb_total > 0U)
+                        ? (int)((uint64_t)(ARDUBOY_WIDTH - 8) * s_edb_received / s_edb_total)
+                        : 0;
+        if (width > (ARDUBOY_WIDTH - 8)) { width = ARDUBOY_WIDTH - 8; }
+        poom_arduboy_draw_rect(4, 32, ARDUBOY_WIDTH - 8, 8, WHITE);
+        if (width > 0) { poom_arduboy_fill_rect(4, 32, width, 8, WHITE); }
+        (void)snprintf(l, sizeof(l), "%lu KB", (unsigned long)(s_edb_received / 1024U));
+        poom_arduboy_set_cursor(2, 45);
+        (void)poom_arduboy_print(l);
+        sa_draw_footer_("B:CANCEL");
+        poom_arduboy_display();
+        break;
+    }
+
     case SA_SCR_INFO:
     default:
         sa_draw_title_("SECURITY AUDIT");
         poom_arduboy_set_cursor(2, 28);
         (void)poom_arduboy_print(s_info);
-        sa_draw_footer_("A/B:ok");
+        sa_draw_footer_("A:OK B:BACK");
         poom_arduboy_display();
         break;
     }
@@ -3353,6 +3673,9 @@ static void sa_handle_back_(void)
     case SA_SCR_SWEEPING:
     case SA_SCR_SCANNING:
         s_cancel = true; /* cooperative cancel; worker returns to a screen */
+        break;
+    case SA_SCR_EDB_DOWNLOADING:
+        s_cancel = true;
         break;
     case SA_SCR_HOST_DETAIL:
     case SA_SCR_SPECIFIC_IP:
@@ -3500,11 +3823,15 @@ static void sa_handle_select_(void)
                 }
                 else { s_screen = SA_SCR_HOSTS; sa_reset_list_(); }
             }
-            else if (s_sel == 1) /* Change Net */
+        else if (s_sel == 1) /* Change Net */
             {
                 s_screen = SA_SCR_PROFILES; sa_reset_list_();
             }
-            else /* Disconnect */
+        else if (s_sel == 2) /* Download EDB */
+        {
+            s_edb_download_pending = true;
+        }
+        else /* Disconnect */
             {
                 (void)poom_wifi_ctrl_sta_disconnect();
                 sa_set_info_("Disconnected", SA_SCR_WIFI);
@@ -3513,7 +3840,8 @@ static void sa_handle_select_(void)
         else
         {
             if (s_sel == 0) { s_screen = SA_SCR_PROFILES; sa_reset_list_(); }
-            else            { s_scan_aps_pending = true; }
+            else if (s_sel == 1) { s_scan_aps_pending = true; }
+            else { s_edb_download_pending = true; }
         }
         break;
 
@@ -3797,6 +4125,9 @@ static void sa_handle_select_(void)
         }
         s_ses->offer_save = false;
         sa_set_info_("Saved to profiles", SA_SCR_HOSTS);
+        break;
+
+    case SA_SCR_EDB_DOWNLOADING:
         break;
 
     case SA_SCR_INFO:
@@ -4152,6 +4483,12 @@ static void sa_task_(void *arg)
 
         if (s_scan_aps_pending) { s_scan_aps_pending = false; sa_run_scan_aps_(); }
 
+        if (s_edb_download_pending)
+        {
+            s_edb_download_pending = false;
+            sa_run_edb_download_();
+        }
+
         if (s_report_pending)
         {
             s_report_pending = false;
@@ -4290,6 +4627,11 @@ void menu_security_audit_show(void)
     s_relink_pending = false;
     s_chk_phase = false;
     s_report_pending = false;
+    s_edb_download_pending = false;
+    s_edb_downloading = false;
+    s_edb_connecting = false;
+    s_edb_received = 0;
+    s_edb_total = 0;
     s_relink_keep = false;
     s_relink_full_tried = false;
     s_resume = SA_RESUME_NONE;

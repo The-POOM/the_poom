@@ -106,6 +106,10 @@ esp_err_t poom_scanner_core_start_wifi(uint32_t hop_ms);
  * `esp_ieee802154_receive_done()` to extract RSSI and update per-channel stats.
  */
 esp_err_t poom_scanner_core_start_ieee802154(uint32_t hop_ms);
+/** Set channel 11..26, or 0 to resume hopping. */
+esp_err_t poom_scanner_core_ieee802154_set_channel(uint8_t channel);
+/** Send an 802.15.4 frame without FCS while the scanner is fixed to a channel. */
+esp_err_t poom_scanner_core_ieee802154_transmit(const uint8_t* frame, size_t length);
 
 /**
  * @brief Stop scanning and release radio resources.

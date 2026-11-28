@@ -299,8 +299,10 @@ esp_ble_scan_params_t poom_ble_gatt_client_default_scan_params(void)
         .scan_type = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x0003,
-        .scan_window = 0x0003,
+        /* BLE requires both values to be at least 0x0004.  Keep a continuous
+         * 10 ms window so advertisement-only consumers do not miss packets. */
+        .scan_interval = 0x0010,
+        .scan_window = 0x0010,
         .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE,
     };
 
@@ -822,7 +824,22 @@ static void poom_ble_gatt_client_gap_event_handler_(esp_gap_ble_cb_event_t event
     switch (event)
     {
         case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-            (void)esp_ble_gap_start_scanning(POOM_BLE_GATT_CLIENT_SCAN_DURATION_SEC_DEFAULT);
+            if (param->scan_param_cmpl.status != ESP_BT_STATUS_SUCCESS)
+            {
+                POOM_BLE_GATT_CLIENT_PRINTF_E("scan parameter setup failed status=0x%x",
+                                               param->scan_param_cmpl.status);
+                break;
+            }
+
+            {
+                esp_err_t ret = esp_ble_gap_start_scanning(
+                    POOM_BLE_GATT_CLIENT_SCAN_DURATION_SEC_DEFAULT);
+                if (ret != ESP_OK)
+                {
+                    POOM_BLE_GATT_CLIENT_PRINTF_E("scan start request failed: %s",
+                                                   esp_err_to_name(ret));
+                }
+            }
             break;
 
         case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:

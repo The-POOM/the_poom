@@ -173,13 +173,18 @@ static void poom_ble_detector_match_manufacturer_(poom_ble_detector_record_t *re
     }
 
     company = (uint16_t)data[0] | ((uint16_t)data[1] << 8U);
-    if((company == 0x004CU) && (data_len >= 29U) &&
-       (data[2] == 0x12U) && (data[3] == 0x19U))
+    /* Apple Find My uses manufacturer type 0x12.  A complete offline-finding
+     * payload is subtype 0x19, but the C5 reports the short subtype 0x02
+     * advertisements seen from nearby Find My tags as well. */
+    if((company == 0x004CU) && (data_len >= 4U) && (data[2] == 0x12U))
     {
         poom_ble_detector_set_match_(record,
                                      POOM_BLE_DETECTOR_CLASS_AIRTAG,
-                                     POOM_DETECT_CONFIDENCE_POSSIBLE,
-                                     "FindMy candidate",
+                                     ((data[3] == 0x19U) && (data_len >= 29U)) ?
+                                         POOM_DETECT_CONFIDENCE_HIGH :
+                                         POOM_DETECT_CONFIDENCE_POSSIBLE,
+                                     ((data[3] == 0x19U) && (data_len >= 29U)) ?
+                                         "AirTag" : "Find My tag",
                                      "Apple");
     }
     else if(company == 0x0075U)

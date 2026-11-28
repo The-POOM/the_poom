@@ -5,6 +5,7 @@
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
+#include "esp_gatt_common_api.h"
 #include "esp_gattc_api.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -190,6 +191,7 @@ static void consume_(connection_t *c, const radio_event_t *e)
            (uint8_t)p->connect.ble_addr_type == c->target.address_type) {
             c->connection = p->connect.conn_id;
             c->connected = true;
+            (void)esp_ble_gattc_send_mtu_req(c->interface, c->connection);
         }
         break;
     case ESP_GATTC_OPEN_EVT:
@@ -315,6 +317,7 @@ static esp_err_t initialize_(esp_gatt_if_t *interface)
     error = esp_bluedroid_enable();
     if(error != ESP_OK) return error;
     host_enabled = true;
+    (void)esp_ble_gatt_set_local_mtu(500U);
     if((error = esp_ble_gap_register_callback(gap_)) != ESP_OK ||
        (error = esp_ble_gattc_register_callback(gatt_)) != ESP_OK ||
        (error = esp_ble_gattc_app_register(APP_ID)) != ESP_OK) return error;

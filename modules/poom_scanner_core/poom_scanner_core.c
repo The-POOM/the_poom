@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
 
 #include "poom_scanner_core_ieee802154_isr.h"
 #include "poom_wifi_ctrl.h"
@@ -49,6 +50,36 @@ static poom_scanner_core_state_t s_sc = {
 };
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint8_t s_ieee_fixed_channel;
+#if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(CONFIG_IDF_TARGET_ESP32C6)
+static StaticSemaphore_t s_tx_done_storage, s_tx_mutex_storage;
+static SemaphoreHandle_t s_tx_done, s_tx_mutex;
+static uint8_t s_tx_frame[128];
+static volatile bool s_tx_pending, s_tx_ok;
+static bool s_callbacks_owned;
+static void IRAM_ATTR ieee_tx_complete_(bool ok)
+{
+    BaseType_t woken = pdFALSE;
+    s_tx_ok = ok;
+    s_tx_pending = false;
+    if(s_sc.mode == POOM_SCANNER_CORE_MODE_IEEE802154) (void)esp_ieee802154_receive();
+    if(s_tx_done) xSemaphoreGiveFromISR(s_tx_done, &woken);
+    if(woken) portYIELD_FROM_ISR();
+}
+static void IRAM_ATTR ieee_tx_done_(const uint8_t* frame, const uint8_t* ack,
+                                   esp_ieee802154_frame_info_t* info)
+{
+    (void)ack; (void)info;
+    if(frame == s_tx_frame) ieee_tx_complete_(true);
+}
+static void IRAM_ATTR ieee_tx_failed_(const uint8_t* frame, esp_ieee802154_tx_error_t error)
+{
+    (void)error;
+    if(frame == s_tx_frame) ieee_tx_complete_(false);
+}
+static void IRAM_ATTR ieee_tx_sfd_(uint8_t* frame) { (void)frame; }
+#endif
+
 
 /* Wi-Fi channel model
  *
@@ -344,13 +375,21 @@ static void poom_scanner_core_hop_timer_cb_(TimerHandle_t tmr)
     }
     else if(mode == POOM_SCANNER_CORE_MODE_IEEE802154)
     {
-        const uint8_t next = poom_scanner_core_next_channel_(
-            POOM_SCANNER_CORE_IEEE802154_CH_MIN,
-            POOM_SCANNER_CORE_IEEE802154_CH_MAX,
-            s_sc.current_channel);
-        s_sc.current_channel = next;
-        (void)esp_ieee802154_set_channel(next);
-        (void)esp_ieee802154_receive();
+#if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(CONFIG_IDF_TARGET_ESP32C6)
+        // Do not hop while another task changes channel, transmits, or stops RX.
+        if(!s_tx_mutex || xSemaphoreTake(s_tx_mutex, 0) != pdTRUE) return;
+        if(s_sc.mode == POOM_SCANNER_CORE_MODE_IEEE802154 && !s_ieee_fixed_channel && !s_tx_pending)
+        {
+            const uint8_t next = poom_scanner_core_next_channel_(
+                POOM_SCANNER_CORE_IEEE802154_CH_MIN,
+                POOM_SCANNER_CORE_IEEE802154_CH_MAX,
+                s_sc.current_channel);
+            s_sc.current_channel = next;
+            (void)esp_ieee802154_set_channel(next);
+            (void)esp_ieee802154_receive();
+        }
+        xSemaphoreGive(s_tx_mutex);
+#endif
     }
 }
 
@@ -828,6 +867,17 @@ static esp_err_t poom_scanner_core_start_ieee802154_internal_(uint32_t hop_ms)
     (void)esp_coex_wifi_i154_enable();
 #endif
 
+    s_tx_done = xSemaphoreCreateBinaryStatic(&s_tx_done_storage);
+    s_tx_mutex = xSemaphoreCreateMutexStatic(&s_tx_mutex_storage);
+    if(!s_tx_done || !s_tx_mutex) return ESP_ERR_NO_MEM;
+    s_tx_pending = false;
+    esp_ieee802154_event_cb_list_t callbacks = {
+        .tx_done_cb = ieee_tx_done_, .tx_failed_cb = ieee_tx_failed_,
+        .tx_sfd_done_cb = ieee_tx_sfd_
+    };
+    status = esp_ieee802154_event_callback_list_register(callbacks);
+    if(status != ESP_OK) return status;
+    s_callbacks_owned = true;
     status = esp_ieee802154_enable();
     if(status != ESP_OK)
     {
@@ -892,6 +942,7 @@ esp_err_t poom_scanner_core_start_ieee802154(uint32_t hop_ms)
     }
 
     poom_scanner_core_reset_stats();
+    s_ieee_fixed_channel = 0;
     s_sc.mode = POOM_SCANNER_CORE_MODE_IEEE802154;
     ret = poom_scanner_core_start_ieee802154_internal_(hop_ms);
     if(ret != ESP_OK)
@@ -902,9 +953,61 @@ esp_err_t poom_scanner_core_start_ieee802154(uint32_t hop_ms)
     return ESP_OK;
 }
 
+esp_err_t poom_scanner_core_ieee802154_set_channel(uint8_t channel)
+{
+#if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(CONFIG_IDF_TARGET_ESP32C6)
+    if(channel && (channel < 11 || channel > 26)) return ESP_ERR_INVALID_ARG;
+    if(!s_tx_mutex || xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t result = ESP_OK;
+    if(s_sc.mode != POOM_SCANNER_CORE_MODE_IEEE802154 || s_tx_pending) result = ESP_ERR_INVALID_STATE;
+    else if(channel) {
+        result = esp_ieee802154_set_channel(channel);
+        if(result == ESP_OK) {
+            s_ieee_fixed_channel = channel;
+            s_sc.current_channel = channel;
+            (void)esp_ieee802154_receive();
+        }
+    } else s_ieee_fixed_channel = 0;
+    xSemaphoreGive(s_tx_mutex);
+    return result;
+#else
+    (void)channel; return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t poom_scanner_core_ieee802154_transmit(const uint8_t* frame, size_t length)
+{
+#if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(CONFIG_IDF_TARGET_ESP32C6)
+    if(!frame || length == 0 || length > 125) return ESP_ERR_INVALID_ARG;
+    if(!s_tx_mutex || xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t result = ESP_ERR_INVALID_STATE;
+    if(s_sc.mode == POOM_SCANNER_CORE_MODE_IEEE802154 && s_ieee_fixed_channel && !s_tx_pending)
+    {
+        while(xSemaphoreTake(s_tx_done, 0) == pdTRUE) { }
+        s_tx_frame[0] = (uint8_t)(length + 2);
+        memcpy(s_tx_frame + 1, frame, length);
+        s_tx_pending = true;
+        (void)esp_ieee802154_sleep();
+        result = esp_ieee802154_transmit(s_tx_frame, true);
+        if(result != ESP_OK) s_tx_pending = false;
+        else if(xSemaphoreTake(s_tx_done, pdMS_TO_TICKS(500)) != pdTRUE) result = ESP_ERR_TIMEOUT;
+        else result = s_tx_ok ? ESP_OK : ESP_FAIL;
+        if(!s_tx_pending) (void)esp_ieee802154_receive();
+    }
+    xSemaphoreGive(s_tx_mutex);
+    return result;
+#else
+    (void)frame; (void)length; return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 esp_err_t poom_scanner_core_stop(void)
 {
     const poom_scanner_core_mode_t prev_mode = s_sc.mode;
+#if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(CONFIG_IDF_TARGET_ESP32C6)
+    const bool tx_locked = prev_mode == POOM_SCANNER_CORE_MODE_IEEE802154 && s_tx_mutex &&
+                           xSemaphoreTake(s_tx_mutex, portMAX_DELAY) == pdTRUE;
+#endif
     if(prev_mode == POOM_SCANNER_CORE_MODE_NONE)
     {
         poom_scanner_core_wifi_air_free_();
@@ -931,6 +1034,12 @@ esp_err_t poom_scanner_core_stop(void)
         esp_coex_ieee802154_status_disable();
 #endif
         (void)esp_ieee802154_disable();
+        if(s_callbacks_owned) {
+            (void)esp_ieee802154_event_callback_list_unregister();
+            s_callbacks_owned = false;
+        }
+        s_tx_pending = false;
+        if(tx_locked) xSemaphoreGive(s_tx_mutex);
 #endif
     }
 

@@ -18,11 +18,12 @@
 #include "poom_sbus.h"
 
 enum {KEY_A,KEY_B,KEY_LEFT,KEY_RIGHT,KEY_UP,KEY_DOWN};
+enum { HEADER_H=11, BOX_Y=12, BOX_H=41, ROW_Y0=14, ROW_STEP=10, ROW_H=9 };
 typedef struct {
     QueueHandle_t input;
     bool subscribed;
-    bool has_run;
     bool awaiting_result;
+    uint8_t selected;
     poom_ble_spam_config_t config;
     poom_ble_spam_status_t status;
     esp_err_t error;
@@ -37,34 +38,62 @@ static void print_(int y,const char *text)
 {
     char line[22];
     (void)snprintf(line,sizeof(line),"%.21s",text);
-    poom_arduboy_set_cursor(1,y);
+    poom_arduboy_set_cursor(4,y);
     (void)poom_arduboy_print(line);
+}
+static void footer_(const char *left,const char *middle)
+{
+    poom_arduboy_set_cursor(0,56);
+    (void)poom_arduboy_print(left);
+    if(middle) {
+        poom_arduboy_set_cursor(44,56);
+        (void)poom_arduboy_print(middle);
+    }
+    poom_arduboy_set_cursor(88,56);
+    (void)poom_arduboy_print(F("B:BACK"));
+}
+static uint32_t duration_(uint32_t value, bool next)
+{
+    static const uint32_t values[]={15000U,30000U,60000U};
+    size_t index=1U;
+    for(size_t i=0U;i<sizeof(values)/sizeof(values[0]);++i)
+        if(values[i]==value) { index=i;break; }
+    const size_t count=sizeof(values)/sizeof(values[0]);
+    index=(index+(next?1U:count-1U))%count;
+    return values[index];
+}
+static void option_(int y,const char *text,bool selected)
+{
+    poom_arduboy_set_cursor(4,y);
+    (void)poom_arduboy_print(text);
+    if(selected)poom_arduboy_fill_rect(1,y-1,ARDUBOY_WIDTH-2,ROW_H,INVERT);
 }
 static void draw_(session_t *s)
 {
     char text[64];
     poom_arduboy_clear();
     poom_arduboy_set_text_size(1);
-    print_(1,"BLE ADVERTISING");
-    poom_arduboy_fill_rect(0,0,ARDUBOY_WIDTH,10,INVERT);
-    print_(14,poom_ble_spam_mode_name(s->status.active?s->status.mode:s->config.mode));
+    poom_arduboy_set_cursor(28,2);
+    (void)poom_arduboy_print(F("BLE SPAM"));
+    poom_arduboy_fill_rect(0,0,ARDUBOY_WIDTH,HEADER_H,INVERT);
     if(s->status.active) {
-        print_(25,s->status.label[0]?s->status.label:"Starting Bluetooth...");
-        (void)snprintf(text,sizeof(text),"%lu cycles %lu/%lus",(unsigned long)s->status.cycles,
+        poom_arduboy_draw_rect(0,BOX_Y,ARDUBOY_WIDTH,BOX_H,WHITE);
+        (void)snprintf(text,sizeof(text),"%.18s",poom_ble_spam_mode_name(s->status.mode));
+        print_(14,text);
+        (void)snprintf(text,sizeof(text),"Cycles: %lu",(unsigned long)s->status.cycles);
+        print_(25,text);
+        (void)snprintf(text,sizeof(text),"Time: %lu / %lus",
                        (unsigned long)(s->status.elapsed_ms/1000U),(unsigned long)(s->status.duration_ms/1000U));
         print_(36,text);
-        print_(46,"Receiver effect unknown");
-        print_(56,"A:STOP B:BACK");
+        footer_("A:STOP",NULL);
     } else {
-        (void)snprintf(text,sizeof(text),"%lus  LEFT/RIGHT: time",(unsigned long)(s->config.duration_ms/1000U));
-        print_(25,text);
-        if(s->error!=ESP_OK) print_(36,esp_err_to_name(s->error));
-        else if(s->has_run) {
-            (void)snprintf(text,sizeof(text),"Finished: %lu cycles",(unsigned long)s->status.cycles);
-            print_(36,text);
-        } else print_(36,"UP/DOWN: choose mode");
-        print_(46,s->has_run && !s->status.radio_released?"BT release failed":"A starts selected mode");
-        print_(56,"A:START B:BACK");
+        poom_arduboy_draw_rect(0,BOX_Y,ARDUBOY_WIDTH,BOX_H,WHITE);
+        (void)snprintf(text,sizeof(text),"TYPE: %.14s",poom_ble_spam_mode_name(s->config.mode));
+        option_(ROW_Y0,text,s->selected==0U);
+        (void)snprintf(text,sizeof(text),"TIME: %lu seconds",(unsigned long)(s->config.duration_ms/1000U));
+        option_(ROW_Y0+ROW_STEP,text,s->selected==1U);
+        if(s->error!=ESP_OK)print_(44,"Start failed");
+        footer_("A:RUN","L/R:CH");
     }
     poom_arduboy_display();
 }
@@ -115,7 +144,6 @@ static bool key_(session_t *s,uint8_t key)
             s->error=release_previous_();
             if(s->error==ESP_OK)s->error=poom_ble_spam_start_mode(&s->config);
             s->awaiting_result=s->error==ESP_OK;
-            s->has_run=true;
             poom_ble_spam_get_status(&s->status);
             if(s->awaiting_result && !s->status.active) {
                 s->error=s->status.error;
@@ -124,10 +152,14 @@ static bool key_(session_t *s,uint8_t key)
         }
     } else if(!s->status.active) {
         if(key==KEY_UP || key==KEY_DOWN) {
-            s->config.mode=(poom_ble_spam_mode_t)((s->config.mode+(key==KEY_DOWN?1:POOM_BLE_SPAM_MODE_COUNT-1))%POOM_BLE_SPAM_MODE_COUNT);
-            s->has_run=false;s->error=ESP_OK;
+            s->selected^=1U;
+            s->error=ESP_OK;
         } else if(key==KEY_LEFT || key==KEY_RIGHT) {
-            s->config.duration_ms=s->config.duration_ms==15000U?30000U:s->config.duration_ms==30000U?60000U:15000U;
+            if(s->selected==0U)
+                s->config.mode=(poom_ble_spam_mode_t)((s->config.mode+
+                    (key==KEY_RIGHT?1U:POOM_BLE_SPAM_MODE_COUNT-1U))%POOM_BLE_SPAM_MODE_COUNT);
+            else s->config.duration_ms=duration_(s->config.duration_ms,key==KEY_RIGHT);
+            s->error=ESP_OK;
         }
     }
     return true;
