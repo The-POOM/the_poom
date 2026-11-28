@@ -81,6 +81,8 @@
 #include "menu_ssid_spam.h"
 #include "menu_tone.h"
 #include "menu_tv_off.h"
+#include "menu_ir_identify.h"
+#include "menu_remote_suite.h"
 #include "menu_wifi_detector.h"
 #include "poom_breakout.h"
 
@@ -96,6 +98,8 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "sd_card.h"
+
+#define MENU_BUTTON_PRESS_DOWN 0U
 
 #ifndef BUTTON_SINGLE_CLICK
 #define BUTTON_SINGLE_CLICK 4
@@ -159,6 +163,7 @@ typedef struct
 static TaskHandle_t s_menu_task = NULL;
 static bool s_detached = false;
 static bool s_input_subscribed = false;
+static bool s_ignore_exit_b_click;
 
 static volatile poom_menu_screen_t s_screen = POOM_MENU_SCREEN_MAIN;
 
@@ -312,7 +317,6 @@ static void detach_menu_(void)
  */
 static void on_menu_resume_(const poom_sbus_msg_t *msg, void *user)
 {
-    (void)msg;
     (void)user;
 
     if (!s_detached)
@@ -320,6 +324,10 @@ static void on_menu_resume_(const poom_sbus_msg_t *msg, void *user)
         return;
     }
 
+    /* These IR apps handle B on press-down. Its click can arrive after resume. */
+    s_ignore_exit_b_click = msg && msg->len == 1 &&
+                            (((const uint8_t*)msg->data)[0] == MENU_IR_IDENTIFY_RESUME_TOKEN ||
+                             ((const uint8_t*)msg->data)[0] == MENU_REMOTE_SUITE_RESUME_TOKEN);
     s_detached = false;
     if (!s_input_subscribed)
     {
@@ -967,6 +975,20 @@ static void action_ir_universal_(void)
     menu_ir_universal_show();
 }
 
+static void action_remote_suite_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_remote_suite_show();
+}
+
+static void action_ir_identify_(void)
+{
+    detach_menu_();
+    vTaskDelay(pdMS_TO_TICKS(180U));
+    menu_ir_identify_show();
+}
+
 /**
  * @brief Internal helper for `action_tv_off`.
  *
@@ -1256,6 +1278,8 @@ static const poom_menu_item_t s_apps_zen[] = {
     {"NFC", action_nfc_},
     {"PICOPASS", action_picopass_},
     {"IR UNIV", action_ir_universal_},
+    {"IR DISCOVERY", action_ir_identify_},
+    {"REMOTE SUITE", action_remote_suite_},
     {"POOM WEB", action_cli_web_},
 };
 
@@ -1826,6 +1850,19 @@ static void on_button_any_(const poom_sbus_msg_t *msg, void *user)
 
     button_event_msg_t ev;
     memcpy(&ev, msg->data, sizeof(ev));
+
+    if (s_ignore_exit_b_click && ev.button == BUTTON_B)
+    {
+        if (ev.event == MENU_BUTTON_PRESS_DOWN)
+        {
+            s_ignore_exit_b_click = false;
+        }
+        else if (ev.event == BUTTON_SINGLE_CLICK)
+        {
+            s_ignore_exit_b_click = false;
+            return;
+        }
+    }
 
     if (ev.event != BUTTON_SINGLE_CLICK)
     {

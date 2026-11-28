@@ -13,7 +13,12 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
 #include "soc/soc_caps.h"
+
+/* RMT may allocate multiple channels routed to the same GPIO. */
+static portMUX_TYPE s_ir_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint64_t s_ir_tx_gpios;
 
 #define IR_TX_DEFAULT_TAG "ir_tx"
 #define IR_TX_DEFAULT_CLK_HZ (1000000U)
@@ -375,7 +380,7 @@ esp_err_t ir_tx_send_raw(ir_tx_handle_t* transmitter, const ir_raw_signal_t* sig
         }
     }
 
-    esp_err_t err = rmt_tx_wait_all_done(transmitter->channel, -1);
+    esp_err_t err = rmt_tx_wait_all_done(transmitter->channel, 2500);
     if(err == ESP_OK)
     {
         rmt_carrier_config_t carrier = {
@@ -392,7 +397,7 @@ esp_err_t ir_tx_send_raw(ir_tx_handle_t* transmitter, const ir_raw_signal_t* sig
         err = ir_tx_transmit_builder_(transmitter, &builder);
         if(err == ESP_OK)
         {
-            err = rmt_tx_wait_all_done(transmitter->channel, -1);
+            err = rmt_tx_wait_all_done(transmitter->channel, 2500);
             if(err != ESP_OK)
             {
                 /* Stop DMA/interrupt access to the buffer before releasing it. */
@@ -477,7 +482,8 @@ static esp_err_t ir_tx_emit_pdwm_space_frame_(ir_tx_handle_t* transmitter,
  * @param[in] header_space_us Parameter passed to the function.
  * @param[in] one_mark_us Parameter passed to the function.
  * @param[in] zero_mark_us Parameter passed to the function.
- * @param[in] bit_space_us Parameter passed to the function.
+ * @param[in] bit_space_us Gap between bits.
+ * @param[in] frames SIRC frame count for this logical press.
  * @return esp_err_t
  */
 static esp_err_t ir_tx_emit_pdwm_mark_frame_(ir_tx_handle_t* transmitter,
@@ -487,7 +493,8 @@ static esp_err_t ir_tx_emit_pdwm_mark_frame_(ir_tx_handle_t* transmitter,
                                              uint32_t header_space_us,
                                              uint32_t one_mark_us,
                                              uint32_t zero_mark_us,
-                                             uint32_t bit_space_us)
+                                             uint32_t bit_space_us,
+                                             unsigned frames)
 {
     ir_tx_waveform_builder_t builder = {
         .symbols = transmitter->symbols,
@@ -496,23 +503,29 @@ static esp_err_t ir_tx_emit_pdwm_mark_frame_(ir_tx_handle_t* transmitter,
 
     ir_tx_waveform_reset_(&builder);
 
-    if (!ir_tx_waveform_append_(&builder, transmitter->clk_hz, true, header_mark_us) ||
-        !ir_tx_waveform_append_(&builder, transmitter->clk_hz, false, header_space_us))
+    for(unsigned frame = 0; frame < frames; ++frame)
     {
-        return ESP_ERR_NO_MEM;
-    }
-
-    for (size_t bit_index = 0U; bit_index < bit_count; bit_index++)
-    {
-        const bool bit_value = ((bits_lsb >> bit_index) & 0x1ULL) != 0ULL;
-
-        if (!ir_tx_waveform_append_(&builder,
-                                    transmitter->clk_hz,
-                                    true,
-                                    bit_value ? one_mark_us : zero_mark_us) ||
-            !ir_tx_waveform_append_(&builder, transmitter->clk_hz, false, bit_space_us))
+        uint32_t elapsed = header_mark_us + header_space_us;
+        if(!ir_tx_waveform_append_(&builder, transmitter->clk_hz, true, header_mark_us) ||
+           !ir_tx_waveform_append_(&builder, transmitter->clk_hz, false, header_space_us))
         {
             return ESP_ERR_NO_MEM;
+        }
+
+        for(size_t bit_index = 0; bit_index < bit_count; ++bit_index)
+        {
+            const uint32_t mark = ((bits_lsb >> bit_index) & 1ULL) ? one_mark_us : zero_mark_us;
+            if(!ir_tx_waveform_append_(&builder, transmitter->clk_hz, true, mark))
+                return ESP_ERR_NO_MEM;
+            elapsed += mark;
+            uint32_t space = bit_space_us;
+            /* SIRC frames in one button press start 45 ms apart. */
+            if(bit_index + 1U == bit_count && frame + 1U < frames)
+                space = 45000U - elapsed;
+            if((frames > 1U && ir_tx_us_to_rmt_ticks_(space, transmitter->clk_hz) > 32767U) ||
+               !ir_tx_waveform_append_(&builder, transmitter->clk_hz, false, space))
+                return ESP_ERR_INVALID_ARG;
+            elapsed += space;
         }
     }
 
@@ -594,12 +607,20 @@ esp_err_t ir_tx_init(ir_tx_handle_t* transmitter, const ir_tx_config_t* config, 
     esp_err_t err;
     uint32_t mem_block_symbols;
 
-    if ((transmitter == NULL) || (config == NULL) || (config->gpio < 0))
+    if ((transmitter == NULL) || (config == NULL) || (config->gpio < 0) || (config->gpio >= 64))
     {
         return ESP_ERR_INVALID_ARG;
     }
 
+    const uint64_t gpio_mask = UINT64_C(1) << config->gpio;
+    portENTER_CRITICAL(&s_ir_tx_lock);
+    const bool busy = (s_ir_tx_gpios & gpio_mask) != 0;
+    if(!busy) s_ir_tx_gpios |= gpio_mask;
+    portEXIT_CRITICAL(&s_ir_tx_lock);
+    if(busy) return ESP_ERR_INVALID_STATE;
+
     memset(transmitter, 0, sizeof(*transmitter));
+    transmitter->reserved_gpio = (uint8_t)(config->gpio + 1);
     transmitter->tag = (tag != NULL) ? tag : IR_TX_DEFAULT_TAG;
     transmitter->clk_hz = config->clk_hz;
     transmitter->duty_cycle = config->duty_cycle;
@@ -610,6 +631,7 @@ esp_err_t ir_tx_init(ir_tx_handle_t* transmitter, const ir_tx_config_t* config, 
                                                                 MALLOC_CAP_DEFAULT);
     if (transmitter->symbols == NULL)
     {
+        ir_tx_deinit(transmitter);
         return ESP_ERR_NO_MEM;
     }
 
@@ -687,12 +709,6 @@ esp_err_t ir_tx_deinit(ir_tx_handle_t* transmitter)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (transmitter->copy_encoder != NULL)
-    {
-        (void)rmt_del_encoder(transmitter->copy_encoder);
-        transmitter->copy_encoder = NULL;
-    }
-
     if (transmitter->channel != NULL)
     {
         (void)rmt_disable(transmitter->channel);
@@ -700,11 +716,26 @@ esp_err_t ir_tx_deinit(ir_tx_handle_t* transmitter)
         transmitter->channel = NULL;
     }
 
+    if (transmitter->copy_encoder != NULL)
+    {
+        (void)rmt_del_encoder(transmitter->copy_encoder);
+        transmitter->copy_encoder = NULL;
+    }
+
     if (transmitter->symbols != NULL)
     {
         heap_caps_free(transmitter->symbols);
         transmitter->symbols = NULL;
         transmitter->symbol_capacity = 0U;
+    }
+
+    if(transmitter->reserved_gpio)
+    {
+        const uint64_t gpio_mask = UINT64_C(1) << (transmitter->reserved_gpio - 1U);
+        transmitter->reserved_gpio = 0;
+        portENTER_CRITICAL(&s_ir_tx_lock);
+        s_ir_tx_gpios &= ~gpio_mask;
+        portEXIT_CRITICAL(&s_ir_tx_lock);
     }
 
     return ESP_OK;
@@ -786,7 +817,8 @@ esp_err_t ir_tx_samsung32_send(ir_tx_handle_t* transmitter, uint16_t address, ui
                                         IR_TX_SAMSUNG32_STOP_MARK_US);
 }
 
-esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32_t address, uint32_t command)
+static esp_err_t ir_tx_send_(ir_tx_handle_t* transmitter, ir_protocol_t protocol,
+                             uint32_t address, uint32_t command, bool press, bool full_nec_ext)
 {
     esp_err_t err;
     uint32_t log_address = address;
@@ -809,7 +841,15 @@ esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32
             break;
 
         case IR_PROTOCOL_NEC_EXT:
-            err = ir_tx_nec_ext_send(transmitter, (uint16_t)(address & 0xFFFFU), (uint8_t)(command & 0xFFU));
+            if(full_nec_ext)
+            {
+                const uint32_t bits = (address & 0xFFFFU) | ((command & 0xFFFFU) << 16U);
+                err = ir_tx_emit_pdwm_space_frame_(transmitter, bits, 32U,
+                                                   IR_TX_NEC_HDR_MARK_US, IR_TX_NEC_HDR_SPACE_US,
+                                                   IR_TX_NEC_BIT_MARK_US, IR_TX_NEC_ONE_SPACE_US,
+                                                   IR_TX_NEC_ZERO_SPACE_US, IR_TX_NEC_STOP_MARK_US);
+            }
+            else err = ir_tx_nec_ext_send(transmitter, (uint16_t)address, (uint8_t)command);
             break;
 
         case IR_PROTOCOL_SAMSUNG32:
@@ -880,7 +920,8 @@ esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32
                                               IR_TX_SIRC_HDR_SPACE_US,
                                               IR_TX_SIRC_ONE_MARK_US,
                                               IR_TX_SIRC_ZERO_MARK_US,
-                                              IR_TX_SIRC_SPACE_US);
+                                              IR_TX_SIRC_SPACE_US,
+                                              press ? 3U : 1U);
             break;
         }
 
@@ -970,6 +1011,7 @@ esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32
             {
                 raw |= 0x02U;
             }
+            if(press && transmitter->rc5_toggle) raw |= 0x04U;
             raw |= (uint16_t)((ir_tx_reverse8_((uint8_t)(address & 0x1FU)) >> 3U) << 3U);
             raw |= (uint16_t)((ir_tx_reverse8_((uint8_t)(command & 0x3FU)) >> 2U) << 8U);
             data[0] = (uint8_t)~(raw & 0xFFU);
@@ -985,6 +1027,7 @@ esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32
             uint32_t raw = 0U;
 
             raw |= 0x01U;
+            if(press && transmitter->rc6_toggle) raw |= 0x10U;
             raw |= ((uint32_t)ir_tx_reverse8_((uint8_t)address) << 5U);
             raw |= ((uint32_t)ir_tx_reverse8_((uint8_t)command) << 13U);
             data[0] = (uint8_t)(raw & 0xFFU);
@@ -1023,4 +1066,29 @@ esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32
     }
 
     return err;
+}
+
+
+esp_err_t ir_tx_send(ir_tx_handle_t* transmitter, ir_protocol_t protocol, uint32_t address, uint32_t command)
+{
+    return ir_tx_send_(transmitter, protocol, address, command, false, false);
+}
+
+esp_err_t ir_tx_send_press(ir_tx_handle_t* transmitter, ir_protocol_t protocol,
+                           uint32_t address, uint32_t command, bool full_nec_ext)
+{
+    esp_err_t err = ir_tx_send_(transmitter, protocol, address, command, true, full_nec_ext);
+    if(err != ESP_OK) return err;
+
+    err = rmt_tx_wait_all_done(transmitter->channel, 500);
+    if(err != ESP_OK)
+    {
+        (void)rmt_disable(transmitter->channel);
+        (void)rmt_enable(transmitter->channel);
+        return err;
+    }
+    if(protocol == IR_PROTOCOL_RC5 || protocol == IR_PROTOCOL_RC5X)
+        transmitter->rc5_toggle = !transmitter->rc5_toggle;
+    if(protocol == IR_PROTOCOL_RC6) transmitter->rc6_toggle = !transmitter->rc6_toggle;
+    return ESP_OK;
 }
